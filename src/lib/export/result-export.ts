@@ -769,6 +769,16 @@ function pad(value: number, width = 2): string {
  * inserted into a `DATE` column is accepted and silently truncated to the whole second,
  * so nothing is lost either way and the explicit function says what the column is.
  */
+/**
+ * A string that is exactly what `Date#toISOString` writes, and nothing else.
+ *
+ * Over HTTP a row has been through JSON, so a zoned timestamp arrives as this text
+ * instead of the `Date` the in-process path sees. Only this exact form is the instant:
+ * the same characters in a naive column, and any other text in a zoned column, are
+ * data and stay quoted.
+ */
+const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/;
+
 function oracleDateLiteral(value: Date, shape: OracleDateShape): string {
   const utc = shape === "zoned";
   const date = `${pad(utc ? value.getUTCFullYear() : value.getFullYear(), 4)}-${pad((utc ? value.getUTCMonth() : value.getMonth()) + 1)}-${pad(utc ? value.getUTCDate() : value.getDate())}`;
@@ -798,6 +808,18 @@ function sqlValue(value: unknown, dialect: DatabaseType | undefined, oracleShape
   if (value instanceof Date) {
     if (oracleShape !== undefined) return oracleDateLiteral(value, oracleShape);
     return quoteLiteral(value.toISOString(), dialect);
+  }
+  // A zoned Oracle column whose cell is exactly a Date's ISO text is that same
+  // instant. JSON is what the HTTP result path hands the export (#1224), and a quoted
+  // ISO literal is what Oracle refuses (ORA-01843). Anything that is not exactly that
+  // form, and the same form in a column that is not zoned, falls through and is quoted.
+  if (oracleShape === "zoned" && typeof value === "string") {
+    const instant = ISO_INSTANT.exec(value);
+    if (instant !== null) {
+      const [, year, month, day, hour, minute, second, millis] = instant;
+      const stamp = `TO_TIMESTAMP('${year}-${month}-${day} ${hour}:${minute}:${second}.${millis}', 'YYYY-MM-DD HH24:MI:SS.FF3')`;
+      return `FROM_TZ(${stamp}, 'UTC')`;
+    }
   }
   // Before the object branch, which used to write a `bytea`/`BLOB` cell as the quoted
   // text `{"type":"Buffer","data":[…]}`. Replayed into Postgres 18.4 that INSERT

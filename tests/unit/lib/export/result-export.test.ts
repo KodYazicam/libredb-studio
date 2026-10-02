@@ -976,6 +976,26 @@ describe("buildResultExport - Oracle date and timestamp literals", () => {
     expect(oracle({ at: "timestamp with local time zone" }, instant)).toContain(expected);
   });
 
+  // Over HTTP the row has already been through JSON, so the cell is the Date's ISO text
+  // rather than the Date. A quoted ISO literal is what Oracle refuses (ORA-01843). The
+  // string has to be exactly that form: the same characters in a naive column, or any
+  // other text in a zoned column, stay a quoted literal.
+  test("writes a zoned column's JSON ISO string as the same UTC instant the Date path writes (#1224)", () => {
+    const expected = `VALUES (FROM_TZ(TO_TIMESTAMP('2026-08-24 17:11:12.345', 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC'));`;
+    expect(oracle({ at: "TIMESTAMP(6) WITH TIME ZONE" }, instant.toISOString())).toContain(expected);
+    expect(oracle({ at: "TIMESTAMP WITH LOCAL TIME ZONE" }, instant.toISOString())).toContain(expected);
+    // Not a zoned column: the same text is data, quoted.
+    expect(oracle({ at: "TIMESTAMP" }, instant.toISOString())).toContain(`VALUES ('${instant.toISOString()}');`);
+    expect(oracle({ at: "VARCHAR2" }, instant.toISOString())).toContain(`VALUES ('${instant.toISOString()}');`);
+    // A zoned column whose text is not exactly a Date's ISO text stays quoted too.
+    expect(oracle({ at: "TIMESTAMP WITH TIME ZONE" }, "2026-09-01 10:30:00 +03:00")).toContain(
+      `VALUES ('2026-09-01 10:30:00 +03:00');`,
+    );
+    expect(oracle({ at: "TIMESTAMP WITH TIME ZONE" }, "2026-08-24T17:11:12.345+00:00")).toContain(
+      `VALUES ('2026-08-24T17:11:12.345+00:00');`,
+    );
+  });
+
   test("falls back to the timestamp form when the result declared no type for the column", () => {
     expect(oracle(undefined)).toContain(
       `VALUES (TO_TIMESTAMP('2026-08-24 10:11:12.345', 'YYYY-MM-DD HH24:MI:SS.FF3'));`,

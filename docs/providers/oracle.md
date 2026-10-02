@@ -810,7 +810,7 @@ about which fields of the `Date` are the value:
 |---|---|
 | `DATE` | `TO_DATE('2026-08-24 10:11:12', 'YYYY-MM-DD HH24:MI:SS')` — the **local** fields |
 | `TIMESTAMP` (and anything else, and no declared type) | `TO_TIMESTAMP('2026-08-24 10:11:12.345', 'YYYY-MM-DD HH24:MI:SS.FF3')` — the **local** fields |
-| `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` | `FROM_TZ(TO_TIMESTAMP('2026-08-24 17:11:12.345', 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC')` — the **UTC** instant |
+| `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` | `FROM_TZ(TO_TIMESTAMP('2026-08-24 17:11:12.345', 'YYYY-MM-DD HH24:MI:SS.FF3'), 'UTC')` — the **UTC** instant, whether the cell is the `Date` or exactly its `toISOString` text |
 
 - **Local fields for a naive column**, because that is the inverse of what the driver did: it built
   the `Date` by reading the stored wall clock in the *Node process's* zone. Measured above, a `DATE`
@@ -822,6 +822,13 @@ about which fields of the `Date` are the value:
   zone the replaying session runs in*, which a plain `TO_TIMESTAMP` is not — it is read in the
   session's zone. Measured by replaying the same instant into a session at `-07:00` and letting the
   server compare it against the source row:
+- **The same literal for the HTTP path** (#1224). `POST /api/db/query` answers JSON, so by the time
+  the row reaches `buildResultExport` the `Date` is the string `Date#toISOString` writes
+  (`YYYY-MM-DDTHH:MM:SS.sssZ`). A zoned column whose cell is exactly that string is written as the
+  same `FROM_TZ` literal the `Date` path writes, and a replay stores the same instant. Any other
+  text in a zoned column, and that same string in a column that is not zoned, stays a quoted
+  literal. The original offset is not recovered: the driver folded it to UTC before the export
+  saw the value.
 
   ```
   fromtz              1999-01-01 18:04:05.006 UTC       EQUAL
