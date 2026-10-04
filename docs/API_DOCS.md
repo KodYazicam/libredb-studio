@@ -27,12 +27,12 @@
 
 ## Overview
 
-LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, Apache Kafka, etcd, Neo4j, Milvus and Qdrant.
+LibreDB Studio provides a RESTful API for database management operations. The API supports PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia.
 
 ### Key Features
 
 - **JWT Authentication** - Secure token-based authentication stored in HTTP-only cookies
-- **Multi-Database Support** - Twenty-three engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, Apache Kafka, etcd, Neo4j, Milvus, Qdrant
+- **Multi-Database Support** - Twenty-six engines: PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Oracle, Db2 LUW, SQL Server, MongoDB, Couchbase, ClickHouse, Apache Druid, Elasticsearch, OpenSearch, Trino, Apache Cassandra, Redis, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL), Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia
 - **AI-Powered Insights** - EXPLAIN explanations, query-safety analysis and schema docs, streamed
 - **Real-time Health Monitoring** - Database metrics and performance insights
 
@@ -410,6 +410,15 @@ Execute SQL query on connected database.
 }
 ```
 
+A cell holding NaN, Infinity or -Infinity as a number is answered as the string `"NaN"`, `"Infinity"` or `"-Infinity"`, at any depth inside an array or object cell, because JSON has no form for the three and `JSON.stringify` would write each as `null`, which reads as SQL NULL ([`src/lib/non-finite.ts`](../src/lib/non-finite.ts)).
+`POST /api/db/multi-query`, `POST /api/db/transaction`, `GET /api/agent/runs/{runId}/artifacts/{correlationId}`, the agent's row rendering and the MCP serializer write them the same way.
+In the rows a word cell cannot be told from a text cell that holds the same word; only `columnTypes`, where the provider declares it, says which one it is.
+The JSON export writes the words.
+The CSV export writes `NaN` and `Infinity` as they are, and `-Infinity` as `'-Infinity`, because the formula guard prefixes a cell that opens with `-` and is not a plain number.
+The SQL INSERT export writes a non-finite JavaScript number, or a word in a column whose `columnTypes` entry is a float type, in the form the dialect reads back, each replayed into the engine on 2026-10-04: PostgreSQL and DuckDB the quoted word (`'NaN'`); SQLite `9e999` and `-9e999`, and NULL for NaN, which SQLite cannot store; Oracle `BINARY_DOUBLE_NAN`, `BINARY_DOUBLE_INFINITY` and `-BINARY_DOUBLE_INFINITY`; every other dialect NULL, as before.
+A word in a column with no declared float type is written as the quoted text it is.
+A value the engine itself sends as `null` stays `null`: ClickHouse's JSON format does that for `nan` and `inf` unless `output_format_json_quote_denormals` is set, and SQLite stores a NaN as NULL.
+
 The `pagination` object reports the auto-limiting applied by the server.
 `limit` is `options.limit` when the caller sent one and 500 otherwise; the app's own tree click sends 50.
 `wasLimited` is `true` when the server injected a `LIMIT` the query didn't specify and the returned page filled that limit, and also when the provider bounded its own result and reported that bound on the result it returned: the Prometheus provider does so whenever it cut the result, at its series cap, at its matrix cell budget or at its result byte budget, and names each cut in a `warnings` entry (#1085, section 5.4), and the Kafka provider does so whenever its row limit left records unread or its result byte budget or its cell limit cut the result, and names the budget's and the cell limit's cuts in `warnings` entries (#1088, section 5.4), and the etcd provider does so whenever its row limit or its result byte budget stopped a `get` before the end of its range, or ended a watch before its window, and whenever its row limit held a list etcd answers whole (`lease list`, `lease timetolive --keys`, `user list`, `role list`, `user get --detail` and `role get`) to its row limit, and names the stop, or how many entries etcd answered, in a `warnings` entry (#1089, section 5.4).
@@ -423,7 +432,7 @@ Under that cap, a result of exactly `limit` rows still has `wasLimited: true` an
 A bound the provider reported sets `wasLimited` and never `hasMore`, because no `offset` can advance a bound the server did not write.
 A statement the server returned **untouched** — one carrying its own `LIMIT n`, or one whose end the limiter declined to cut into — runs identically at every `offset`, because the requested offset is discarded along with the rewrite. `hasMore` is `false` for those however many rows come back, and re-requesting with a higher `offset` would return the same rows again. Where `hasMore` is `true`, re-request with `offset` advanced by the number of rows you received. See [`docs/editor/query-optimization.md`](editor/query-optimization.md).
 
-Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis, LibreDB, Prometheus, Kafka, etcd, Neo4j, Milvus and Qdrant ignore it. `POST /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
+Not every engine can serve a positive `offset`. Cassandra and Elasticsearch answer one with HTTP 400 rather than silently returning page one; MongoDB, Redis, LibreDB, Prometheus, InfluxDB (InfluxQL), Kafka, etcd, Neo4j, Milvus, Qdrant and Oxia ignore it. `POST /api/db/provider-meta` reports each one's `capabilities.supportsResultPagination`, which is the same flag the app reads before offering its Load More control.
 
 **The database a run reads (optional):**
 ```json
@@ -448,14 +457,14 @@ ordinary case and the one every statement other than a key read sends.
 
 The field is accepted only where the provider declares `keyScan` and a container level to name, which is Redis: a Redis key space belongs to one numbered database, and a run cannot name that database in its statement.
 On an engine that declares no walk it would be a per-run override of an operator-pinned `database` with no walk to justify it, so it is refused rather than quietly honoured.
-etcd declares the walk and no container level, because one connection is one cluster with one key space, so it refuses the field as well.
+etcd and Oxia declare the walk and no container level, because one connection is one key space (one etcd cluster, one Oxia namespace), so they refuse the field as well.
 The declaration is read without connecting, so each refusal costs no socket, and an unreachable host still answers 400:
 
 | Condition | Status | Body |
 |-----------|--------|------|
 | `database` present and not a non-negative integer | `400` | `{ "error": "\"database\" must be a non-negative integer" }` — the same sentence `POST /api/db/keys/scan` refuses with, shared in `optionalDatabase` |
 | The provider declares no `keyScan` | `400` | `{ "error": "<type> declares no key-space walk: \"database\" names the database a key was walked in, and only an engine that needs such a name accepts it" }` |
-| The provider declares `keyScan` and no container level (etcd) | `400` | `{ "error": "<type> walks one key space and declares no database level: \"database\" names the numbered database a key was walked in, and this engine has none to name" }` |
+| The provider declares `keyScan` and no container level (etcd, Oxia) | `400` | `{ "error": "<type> walks one key space and declares no database level: \"database\" names the numbered database a key was walked in, and this engine has none to name" }` |
 | The server has no such database | `400` | `{ "error": "Redis refused database <n>: ERR DB index is out of range", "code": "QUERY_ERROR", "statusCode": 400 }`, never a read of database 0 |
 
 **A connection type's console text bound:**
@@ -470,7 +479,7 @@ The bound is read after the request body is parsed, because the type that select
 | `sql` is not a string | `400` | `{ "error": "sql must be a string" }` |
 
 `POST /api/db/multi-query` refuses every connection whose type declares such a bound with `400 { "error": "This connection type runs one statement per request: send it to POST /api/db/query, because this route would split its text into several requests." }`, before it splits anything.
-Milvus and Qdrant each declare a bound of 1,048,576 bytes, and no other shipped engine declares one, so neither answer changes anything for a connection of another type.
+Milvus and Qdrant each declare a bound of 1,048,576 bytes and InfluxDB (InfluxQL) and Oxia one of 65,536 bytes each, and no other shipped engine declares one, so neither answer changes anything for a connection of another type.
 
 **Bound parameters (optional):**
 ```json
@@ -484,6 +493,8 @@ Milvus and Qdrant each declare a bound of 1,048,576 bytes, and no other shipped 
 `params` binds the statement's positional placeholders through the driver, so a value never becomes statement text. Use it for any statement built from data rather than typed by a person — a value carrying `\'` would otherwise close its own string literal on MySQL or ClickHouse and have the rest read as SQL. The placeholder form is the dialect's own: `$n` (PostgreSQL), `?` (MySQL, SQLite), `:n` (Oracle), `@pn` (SQL Server).
 
 Each element must be a string, number, boolean or `null`; anything else is rejected with 400 rather than handed to the driver. `POST /api/db/transaction` accepts the same field for its `query` action.
+
+**`inTransaction` in a transaction `query` answer.** `POST /api/db/transaction` answers its `query` action with `inTransaction`, and `false` there means the server ended the transaction while running the statement: a typed `COMMIT` or `ROLLBACK`, or a statement the engine commits implicitly (MySQL DDL). The answer does not say whether the work was kept, because the server reports the same state after either; the session is released, and a following `rollback` answers 400 "No active transaction" rather than reporting a rollback that undid nothing. A `begin` the server accepts without opening a transaction (RisingWave's `BEGIN`) answers 400 with the reason, and nothing has been held. A `begin` answer carries `stateReported`: `false` when the server opened the transaction without reporting any transaction state (Databend, StarRocks and Apache Doris over the MySQL wire), `true` when it reported an open one, `null` when the provider does not say. A `begin` sent with `requireReportedState: true`, which is what SANDBOX sends, answers 400 on a `stateReported: false` server instead, with nothing left open.
 
 **Query plan (optional):**
 ```json
@@ -521,8 +532,23 @@ A `params` array may accompany an explain request. The strategies only prefix th
 placeholders are the same ones in the same order and the values bind the built statement, which is how a
 generated statement that sends its values separately still gets a plan.
 
-Two refusals, each a 400 that runs nothing:
+`estimate` never executes the statement, on any strategy: on PostgreSQL it is `EXPLAIN (FORMAT JSON)`,
+and only `analyze` builds `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`, which runs it. The editor asks for
+the estimate in the background beside every run of a SELECT, so an executing estimate would run every
+SELECT twice; until #1311 the PostgreSQL strategy did exactly that.
 
+A `queryId` may accompany an explain request like any other, and `POST /api/db/cancel` with that id
+stops the plan statement on the server. The editor gives its background plan request an id of its own
+and cancels it together with the run.
+
+Three refusals, each a 400 that runs nothing:
+
+- `Only a single statement can be explained` when `sql` holds more than one statement, read under the
+  connection type's own grammar (a `;` inside a quote or a comment does not count, and neither does a
+  trailing one). An EXPLAIN prefixes one statement: handed `SELECT 1; INSERT ...`, PostgreSQL explains
+  the SELECT and then runs the INSERT. A text with a quote or comment the grammar cannot close is refused
+  the same way, since no boundary can be read in it (`SELECT E'\''; INSERT ...` is two statements to
+  PostgreSQL). Refused before a provider is opened (#1311).
 - `This server does not support EXPLAIN` when the provider declares `supportsExplain: false` or no plan
   format at all.
 - `Only SELECT statements can be explained` when the dialect's strategy declines the statement. The
@@ -572,6 +598,11 @@ For MongoDB connections, the `sql` field should contain a JSON query:
   own parameter name); a missing or non-string one is a `QUERY_ERROR` rather than a silent `_id`, and
   `options.projection` is not an alias for it:
   `{"collection":"products","operation":"distinct","field":"category","filter":{"active":true}}`
+
+The query is read as MongoDB Extended JSON, relaxed or canonical, so `filter`, `pipeline`, `update`
+and `documents` can name an ObjectId or a Date: `{"_id":{"$oid":"650000000000000000000001"}}`,
+`{"created":{"$gte":{"$date":"2020-01-01T00:00:00Z"}}}`. A wrapper must be the only key of its object, and a malformed one is a `QUERY_ERROR`
+carrying the reason. Details: [MongoDB provider](providers/mongodb.md#extended-json-in-the-query).
 
 ##### Couchbase Query Format
 
@@ -1287,13 +1318,15 @@ a route of its own rather than an option on the object routes.
 
 The walk is offered by an engine that declares `keyScan` in `POST /api/db/provider-meta`'s
 `capabilities`; Redis declares `{ "defaultCount": 500, "maxCount": 1000 }`.
-etcd declares its own counts ([providers/etcd.md](./providers/etcd.md), section 6.4).
+etcd declares its own counts ([providers/etcd.md](./providers/etcd.md), section 6.4), and Oxia declares `{ "defaultCount": 500, "maxCount": 1000 }` ([providers/oxia.md](./providers/oxia.md), section 6.4).
 Every other connection answers `400`, in this route's own words. A provider that declares the capability and implements no
 walk is a distinct `500` rather than a crash: `ProviderCapabilities` is published, so that is a state
 an external implementer can genuinely be in.
 
 The declaration also states the walk's shape, in four optional fields that each read as Redis's walk when absent: `separator` (`":"`) splits a key into the panel's folders, `cursor` (`"decimal"`) says how a cursor is spelled, `pattern` (`"glob"`) says what `pattern` is, and `totalScope` (`"database"`) says what `total` counts.
+A `totalScope` of `"none"` is an engine that publishes no count and pins no revision: `total` is not read, and a provider answers 0.
 etcd declares `"/"`, `"opaque"`, `"prefix"` and `"walk"`: a cursor only it can read, a literal prefix instead of a glob, and a total that counts the keys the walk covers.
+Oxia declares `"/"`, `"opaque"`, `"prefix"` and `"none"`: a cursor only it can read, a literal prefix, and no count.
 
 **Authentication:** Required.
 No admin gate, for the same reason the object routes have none: the role decides which connection may
@@ -1313,10 +1346,10 @@ be OPENED and nothing about what may be read through it.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `connection` or `connectionId` | object or string | Yes | The same connection selector every database route takes |
-| `cursor` | string | No | The cursor the previous page answered with. Absent means `"0"`, which starts a walk. Under a `"decimal"` declaration (Redis) it is refused unless it is a run of digits: Redis cursors are opaque, and only the obviously malformed one is refused here rather than passed through. Under an `"opaque"` declaration (etcd) it is any non-empty string, passed through exactly as the previous page wrote it, because only the provider that wrote it can read it |
+| `cursor` | string | No | The cursor the previous page answered with. Absent means `"0"`, which starts a walk. Under a `"decimal"` declaration (Redis) it is refused unless it is a run of digits: Redis cursors are opaque, and only the obviously malformed one is refused here rather than passed through. Under an `"opaque"` declaration (etcd, Oxia) it is any non-empty string, passed through exactly as the previous page wrote it, because only the provider that wrote it can read it |
 | `pattern` | string | No | The walk's pattern, in the shape the declaration names. Absent means every key, which is NOT the same as an empty string, which is refused: `MATCH ""` is a pattern no key satisfies. Under `"glob"` (Redis) it is a `MATCH` pattern, trimmed and then forwarded, and a caller scoping a walk has two things to know. `MATCH` is applied per batch server-side and is **not indexed**, so a scoped walk costs the server a full pass over the keyspace rather than a lookup. And it is a glob with **no escape**, so a key segment that contains `*`, `?` or `[` matches more than the prefix asked about: the answer must be filtered by the caller, compared segment by segment (`app:envelope` is not under `app:env`). Under `"prefix"` (etcd) it is the literal prefix every walked key begins with, forwarded exactly as sent, with nothing trimmed and nothing escaped, because a prefix is bytes and a space at either end is part of the range it names |
 | `count` | number | No | The batch size. Absent takes the provider's declared `defaultCount`. A value above the declared `maxCount` is **refused rather than clamped**, because a silent clamp answers a request for 10,000 with 1,000 and says nothing |
-| `database` | number | No | Which numbered database to walk, taken only from an engine that declares a container level to name (Redis). Absent means the one the session is in, since `SELECT` state lives on the connection and not in this route. A caller offering the choice reads the engine's own list from `POST /api/db/objects/containers`, the same container level the object tree's top level comes from, rather than assuming a count: the same server answers 16 outside cluster mode and 1 inside it. An engine that walks one key space and declares no level (etcd) refuses the field |
+| `database` | number | No | Which numbered database to walk, taken only from an engine that declares a container level to name (Redis). Absent means the one the session is in, since `SELECT` state lives on the connection and not in this route. A caller offering the choice reads the engine's own list from `POST /api/db/objects/containers`, the same container level the object tree's top level comes from, rather than assuming a count: the same server answers 16 outside cluster mode and 1 inside it. An engine that walks one key space and declares no level (etcd, Oxia) refuses the field |
 
 **Response (200 OK):**
 
@@ -1331,10 +1364,10 @@ be OPENED and nothing about what may be read through it.
 
 | Field | Description |
 |-------|-------------|
-| `keys` | The batch. Under `"glob"` (Redis) it is **not deduplicated and not ordered**: `SCAN` promises neither, so a key present for the whole walk may be returned twice while the table rehashes, and the order is the hash table's rather than the caller's. Under `"prefix"` (etcd) the pages of one walk read an ordered key range at one pinned revision, so they are one consistent view |
+| `keys` | The batch. Under `"glob"` (Redis) it is **not deduplicated and not ordered**: `SCAN` promises neither, so a key present for the whole walk may be returned twice while the table rehashes, and the order is the hash table's rather than the caller's. Under `"prefix"` (etcd) the pages of one walk read an ordered key range at one pinned revision, so they are one consistent view. Oxia also declares `"prefix"` and pins no revision: each page reads the namespace in its own key order, resumed after the last key the previous page answered |
 | `cursor` | The cursor for the next page. `"0"` means the walk reached the end, and it is the only end-of-walk signal the engine publishes |
 | `types` | Each key's value type, **by key name**. It travels with the page rather than being asked for separately: `TYPE` takes one key and Redis publishes no batch form, so the provider pipelines one call per key and the cost is ONE extra round trip per page whatever the page holds. A key **absent** from the map is one whose type could not be read and a caller should draw nothing for it; a key that vanished between the walk and this read is present with the server's own `"none"`. What it describes is the moment it was read, like everything else in a sampled walk |
-| `total` | What a progress indicator divides by, in the scope the declaration's `totalScope` names. Under `"database"` (Redis) it is `DBSIZE` for the database walked: the engine's own key count, and the only denominator a progress indicator can divide by, since a cursor says nothing about how much is left. On a clustered deployment it is the LOCAL node's count: `SCAN` walks one node's slots and `DBSIZE` has no cluster-wide form. Under `"walk"` (etcd) it is the exact count of the keys the walk covers, the pattern's prefix range or the whole key space, at the revision the walk's pages are pinned to; for a user whose grants are narrower, it counts the keys of the ranges that user may read |
+| `total` | What a progress indicator divides by, in the scope the declaration's `totalScope` names. Under `"database"` (Redis) it is `DBSIZE` for the database walked: the engine's own key count, and the only denominator a progress indicator can divide by, since a cursor says nothing about how much is left. On a clustered deployment it is the LOCAL node's count: `SCAN` walks one node's slots and `DBSIZE` has no cluster-wide form. Under `"walk"` (etcd) it is the exact count of the keys the walk covers, the pattern's prefix range or the whole key space, at the revision the walk's pages are pinned to; for a user whose grants are narrower, it counts the keys of the ranges that user may read. Under `"none"` the engine publishes no count and pins no revision: the field is not read, and a provider answers 0. |
 | `clustered` | Present and `true` only when the server's own `INFO cluster` reply says this deployment is clustered. `SCAN` and `DBSIZE` are per node and neither has a cluster-wide form, so on a cluster `keys` and `total` describe the node that answered and nothing else. **Absent** means the deployment does not say it is clustered, which is the ordinary server; a reply the provider could not read is absent rather than a guess. The fact is read in the same round trip as `total` |
 | `skipped` | Present only when the page left keys out: `{ "count", "reason" }`, how many keys this page read and could not name, and why. On etcd a key that is not UTF-8 text is counted here rather than listed, because a name decoded with replacement characters would address a different key. Redis never sends it |
 
@@ -1394,6 +1427,13 @@ Each of the three validates its key field and returns a `400` with an `error` st
 The exact strings differ: `explain` and `query-safety` return `"Query is required"`,
 `describe-schema` returns `"Schema context required"` — treat the status code, not the message text,
 as the contract.
+
+`query-safety` bounds its wait for the model: a provider request that has not finished after 30 seconds
+(`QUERY_SAFETY_ROUTE_TIMEOUT_MS` in `src/lib/llm/query-safety.ts`) is aborted, and a request that had not
+started streaming answers `504 { "error": "The AI safety analysis did not finish in time.", "code": "TIMEOUT_ERROR" }`;
+one that had started ends there. A caller that disconnects aborts the provider request as well. The bound is
+fixed, not configurable: the Query Safety dialog, the only caller in this repo, stops waiting after 15 seconds
+(`QUERY_SAFETY_ANALYSIS_TIMEOUT_MS`), aborts its request and lets the statement run without the analysis.
 
 **Provider-surfaced errors**
 
@@ -1874,7 +1914,7 @@ Every route here requires an **admin** role (enforced in-handler in addition to 
 
 #### GET /api/admin/audit
 
-Returns audit events. Optional query params: `type` (filter by event type), `limit` (default 100). Response: `{ "events": [], "total": 0 }`. `POST /api/admin/audit` appends an event (user auto-filled from the session).
+Returns audit events. Optional query params: `type` (filter by event type), `limit` (default 100, applied with and without `type`). Events are answered newest first; `limit=0` returns none. Response: `{ "events": [], "total": 0 }`. `POST /api/admin/audit` appends an event (user auto-filled from the session).
 
 Events of type `agent_operation` come from the agent execution path (#328) and additionally carry `correlationId` — the id joining one execution's policy-decision event to its execution-outcome event (a refused operation emits the decision event only, with an `agent_*` reason code). It is opaque and per execution: it identifies neither a user nor a session. On the authoritative stdout line the same value appears as `correlation_id`, and it is omitted entirely from every event that does not set it.
 
@@ -1913,7 +1953,7 @@ The object is one shape on the wire. Fields the server reads from a request body
 change how a connection is opened — are the coordinates and credentials (`id`, `name`, `type`,
 `host`, `port`, `user`, `password`, `database`, `schema`, `connectionString`), plus `ssl`,
 `sshTunnel`, `serviceName` (Oracle), `instanceName` (MSSQL), `localDataCenter` (Cassandra),
-`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
+`authSource` (MongoDB), `saslMechanism` (Kafka), `allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia), `dataServers` (Oxia), `queryTimeout`, `agentUser`, `agentPassword`, `apiKeyId`/`apiKeySecret`
 (Elasticsearch, #708), and `readOnly` (#1089). `color`, `environment`, `group`,
 `managed`, `seedId`, and `createdAt` are client-side bookkeeping that travel in the same object.
 
@@ -1941,7 +1981,8 @@ interface DatabaseConnection {
   localDataCenter?: string; // Cassandra only, and REQUIRED there: the driver refuses to connect without it (`datacenter1` on a stock single node)
   authSource?: string; // MongoDB only: the database the credentials live in (`?authSource=admin`). Not the database being opened - without it the driver checks the user against that one, which fails as a credentials error
   saslMechanism?: 'PLAIN' | 'SCRAM-SHA-256' | 'SCRAM-SHA-512'; // Kafka only: the SASL mechanism that checks user and password, absent meaning none. A user or password with no mechanism is refused, and every mechanism requires TLS
-  allowInsecureAuth?: boolean; // Db2 only (#786): connect with no TLS although the password then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS
+  allowInsecureAuth?: boolean; // Db2, both InfluxDB types and Oxia (#786): connect with no TLS although the password (Db2), the password or token (InfluxDB) or the token (Oxia) then crosses the network in cleartext; without it the Db2 provider refuses a connection that has no TLS, both InfluxDB providers one that sends its secret with no TLS to a host that is not loopback, and the Oxia provider one that sends a token with no TLS to a host that is not this machine (docs/providers/oxia.md section 4.6)
+  dataServers?: string; // Oxia only: a cluster's data-server addresses, host:port entries separated by commas or whitespace, at most 64; see docs/providers/oxia.md section 4.4
   skipObjectScan?: boolean; // read no catalog when this connection opens: zero reads on connect, so the editor is usable immediately and the object tree offers a load action instead of scanning (#765, an Oracle owner with 43,512 tables froze the browser on connect)
   readOnly?: boolean;      // refuse writes, value edits and maintenance before any request (#1089). Accepted only where the engine's provider enforces it: true anywhere else is refused at seed load and before any provider is built, and a value that is not a boolean is refused everywhere
   managed?: boolean;       // true = admin-controlled: not editable in the UI, secrets kept on the server
@@ -1952,7 +1993,7 @@ interface DatabaseConnection {
   apiKeySecret?: string;   // the pair's secret half; either alone (after trim) falls back to user/password rather than sending a key built from an empty half
 }
 
-type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant';
+type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia';
 type ConnectionEnvironment = 'production' | 'staging' | 'development' | 'local' | 'other';
 ```
 
@@ -2022,6 +2063,7 @@ interface QueryResult {
   warnings?: QueryWarning[];             // Notices the engine attached; ABSENT when it reported none
   columnTypes?: Record<string, string>;  // Declared type per column, keyed by its name in `fields`
   vectorColumns?: Readonly<Record<string, VectorColumn>>; // Vector columns by name; ABSENT when the result has none
+  resultSets?: QueryResultSet[];         // Every set of a multi-result text; never sent by /api/db/query or /api/db/transaction
 }
 
 interface QueryPagination {
@@ -2127,7 +2169,7 @@ These are the values of the `code` field emitted by `createErrorResponse` (`src/
 | `QUERY_CANCELLED` | Query cancelled by the client (499) |
 | `CONFIG_ERROR` | Invalid database configuration (400) |
 | `AUTH_ERROR` | Authentication failed (401) |
-| `TIMEOUT_ERROR` | Query exceeded time limit (408) |
+| `TIMEOUT_ERROR` | Query exceeded time limit (408); `POST /api/ai/query-safety` answers it with 504 when the model does not answer in time |
 | `CONNECTION_ERROR` | Database connection failed (503) |
 | `POOL_EXHAUSTED` | Connection pool exhausted (503) |
 | `DATABASE_ERROR` | Generic database error (500) |

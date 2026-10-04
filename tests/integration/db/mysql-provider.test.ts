@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ColumnSchema, DatabaseConnection } from "@/lib/types";
 import type { DatabaseProvider, ObjectKindSpec } from "@/lib/db/types";
-import { DatabaseConfigError } from "@/lib/db/errors";
+import { DatabaseConfigError, NO_TRANSACTION_OPENED, TRANSACTION_STATE_UNREPORTED } from "@/lib/db/errors";
 import { CACHE_HIT_RATIO_UNAVAILABLE } from "@/lib/monitoring-cache-ratio";
 import { asBytes, binaryText } from "@/lib/export/binary";
 import { mysqlJsonStrategy } from "@/lib/explain/mysql-json";
@@ -972,6 +972,10 @@ describe("MySQLProvider", () => {
       expect(caps.supportsResultPagination).toBe(true);
       // One held connection carries the transaction, so the trio is offered (#464).
       expect(caps.supportsTransactions).toBe(true);
+      // DDL commits the open transaction on MySQL, so SANDBOX must refuse it.
+      expect(caps.implicitCommitStatements).toContain("CREATE");
+      expect(caps.implicitCommitStatements).toContain("TRUNCATE");
+      expect(caps.implicitCommitStatements).not.toContain("SET");
       // Inherited from the base capabilities: this engine declares foreign keys, so
       // an empty `foreignKeys` list is a fact about the schema or the role, never
       // about the engine (#414).
@@ -1480,12 +1484,110 @@ describe("MySQLProvider", () => {
       expect(statements.some((sql) => sql.startsWith("OPTIMIZE TABLE"))).toBe(false);
     });
 
+    // Not every MySQL-wire server answers the table verbs with a report. Measured
+    // 2026-10-04 through mysql2 3.24.2: `pingcap/tidb:v8.5.8` answers `ANALYZE TABLE big`
+    // with an OK packet (warningStatus 1, a sample-rate Note in SHOW WARNINGS, tested below),
+    // `datafuselabs/databend:v1.2.925-patch-13` does the same, and
+    // `oceanbase/oceanbase-ce:latest` (4.4.2.1) answers both `ANALYZE TABLE big` and
+    // `OPTIMIZE TABLE big` that way, so mysql2 hands back a `ResultSetHeader` object
+    // where MySQL 26.7.0 hands back rows. The row reader called `.filter` on it and the
+    // route answered 500 "rows.filter is not a function". A table the server refuses
+    // still throws on all three, so a header carries no failure to read.
+    const okPacket = { fieldCount: 0, affectedRows: 0, insertId: 0, info: "", serverStatus: 2, warningStatus: 0 };
+
+    test.each(["analyze", "optimize", "check"] as const)(
+      "%s answered with an OK packet instead of a report succeeds and says there was no report",
+      async (op) => {
+        mockExecuteFn = (sql: string) => {
+          if (sql.startsWith(`${op.toUpperCase()} TABLE`)) {
+            return Promise.resolve([okPacket, undefined]);
+          }
+          return defaultMockExecute(sql);
+        };
+
+        provider = new MySQLProvider(makeMySQLConfig());
+        await provider.connect();
+        const result = await provider.runMaintenance(op, "big");
+
+        expect(result.success).toBe(true);
+        expect(result.message).toBe(`${op.toUpperCase()} completed; the server returned no report`);
+      },
+    );
+
+    test("the whole-database form answered with an OK packet succeeds too", async () => {
+      mockExecuteFn = (sql: string) => {
+        if (sql.startsWith("ANALYZE TABLE")) {
+          return Promise.resolve([okPacket, undefined]);
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const result = await provider.runMaintenance("analyze");
+
+      expect(result.success).toBe(true);
+      expect(result.message).toBe("ANALYZE completed; the server returned no report");
+    });
+
+    test.each([
+      [1, "ANALYZE completed; the server returned no report (1 warning, see SHOW WARNINGS)"],
+      [2, "ANALYZE completed; the server returned no report (2 warnings, see SHOW WARNINGS)"],
+    ])("an OK packet carrying %i warning(s) says where to read them", async (warningStatus, expected) => {
+      // TiDB v8.5.8's ANALYZE answers warningStatus 1: a sample-rate Note that only
+      // SHOW WARNINGS shows, so the message points there instead of hiding it.
+      mockExecuteFn = (sql: string) => {
+        if (sql.startsWith("ANALYZE TABLE")) {
+          return Promise.resolve([{ ...okPacket, warningStatus }, undefined]);
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const result = await provider.runMaintenance("analyze", "big");
+
+      expect(result.success).toBe(true);
+      expect(result.message).toBe(expected);
+    });
+
+    test("a result set with no row says there was no report", async () => {
+      mockExecuteFn = (sql: string) => {
+        if (sql.startsWith("ANALYZE TABLE")) {
+          return Promise.resolve([[], []]);
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const result = await provider.runMaintenance("analyze", "big");
+
+      expect(result.success).toBe(true);
+      expect(result.message).toBe("ANALYZE completed; the server returned no report");
+    });
+
+    test("a table the server refuses with an error still fails with the engine's error", async () => {
+      // The OK-packet servers report a missing table by THROWING (TiDB v8.5.8 and
+      // OceanBase 4.4.2.1 both answer errno 1146), not with an Error row, so the
+      // engine's own message is what reaches the caller.
+      mockExecuteFn = (sql: string) => {
+        if (sql.startsWith("ANALYZE TABLE")) {
+          return Promise.reject(
+            Object.assign(new Error("Table 'e2e.missing' doesn't exist"), { errno: 1146, code: "ER_NO_SUCH_TABLE" }),
+          );
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await expect(provider.runMaintenance("analyze", "missing")).rejects.toThrow("Table 'e2e.missing' doesn't exist");
+    });
+
     test("a statement that answers a header rather than a result set still succeeds", async () => {
-      // KILL is the one maintenance statement here that does NOT answer a result set -
-      // mysql2 hands back a `ResultSetHeader` object - so it never reaches the row reader
-      // and keeps the generic sentence. The three that do (ANALYZE/OPTIMIZE/CHECK TABLE)
-      // always answer rows, measured on 26.7.0, which is why the reader does not have to
-      // defend against a header shape it is never given.
+      // KILL never answers a result set - mysql2 hands back a `ResultSetHeader` object -
+      // so it never reaches the report reader and keeps the generic sentence.
       mockExecuteFn = (sql: string) => {
         if (sql.startsWith("KILL")) {
           return Promise.resolve([{ affectedRows: 0, warningStatus: 0 }, undefined]);
@@ -1526,6 +1628,283 @@ describe("MySQLProvider", () => {
       expect(provider.isInTransaction()).toBe(true);
       await provider.rollbackTransaction();
       expect(provider.isInTransaction()).toBe(false);
+    });
+
+    /**
+     * The OK-packet status flags measured on MySQL 26.7.0 on 2026-10-04 through mysql2:
+     * 16387 after `BEGIN` (and `START TRANSACTION`), 3 after an `INSERT` inside it, 16386
+     * after a `CREATE TABLE` inside it. Bit 0 is `SERVER_STATUS_IN_TRANS`, and the CREATE
+     * cleared it because MySQL committed the transaction implicitly.
+     */
+    function answering(statuses: Record<string, number>) {
+      return (sql: string, params?: unknown[]) => {
+        const status = Object.entries(statuses).find(([prefix]) => sql.trim().toUpperCase().startsWith(prefix))?.[1];
+        return status === undefined
+          ? (defaultMockExecute(sql) as Promise<[unknown, unknown[] | undefined]>)
+          : Promise.resolve([{ fieldCount: 0, affectedRows: 0, serverStatus: status }, undefined] as [
+              unknown,
+              undefined,
+            ]);
+      };
+    }
+
+    test("a BEGIN the server answers with a closed transaction is refused, and the connection goes back", async () => {
+      // Bit 1 (autocommit) without bit 0: the server reports its state, and the state is closed.
+      mockExecuteFn = answering({ BEGIN: 2 });
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const release = spyOn(mockConnection, "release");
+      try {
+        await expect(provider.beginTransaction()).rejects.toThrow(NO_TRANSACTION_OPENED);
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+      } finally {
+        release.mockRestore();
+      }
+    });
+
+    test("a BEGIN the server answers with the transaction open is reported as verified", async () => {
+      mockExecuteFn = answering({ BEGIN: 16387 });
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      expect(await provider.beginTransaction({ requireReportedState: true })).toEqual({ stateReported: true });
+      expect(provider.isInTransaction()).toBe(true);
+      await provider.rollbackTransaction();
+    });
+
+    /**
+     * Databend 1.2.881, StarRocks 4.1.6 and Apache Doris 4.1.3 answer every OK packet with
+     * status 0, inside a transaction and out of one (measured 2026-10-04): neither bit 0 nor
+     * bit 1, so the flags say nothing either way.
+     */
+    test("a BEGIN answered with no status bit opens a session whose state is unreported", async () => {
+      mockExecuteFn = answering({ BEGIN: 0, INSERT: 0 });
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      expect(await provider.beginTransaction()).toEqual({ stateReported: false });
+      expect(provider.isInTransaction()).toBe(true);
+
+      // StarRocks and Doris answer an INSERT inside the transaction with status 0 too. That is
+      // not the server ending the transaction, so the session (and the INSERT) are kept.
+      const release = spyOn(mockConnection, "release");
+      try {
+        protocolCalls.length = 0;
+        await provider.queryInTransaction("INSERT INTO t VALUES (1)");
+        expect(provider.isInTransaction()).toBe(true);
+        expect(release).not.toHaveBeenCalled();
+        expect(protocolCalls.some((call) => call.sql === "ROLLBACK")).toBe(false);
+      } finally {
+        release.mockRestore();
+      }
+      await provider.commitTransaction();
+      expect(provider.isInTransaction()).toBe(false);
+    });
+
+    test("a BEGIN answered with no header at all is unreported, not refused", async () => {
+      mockExecuteFn = (sql: string) =>
+        sql === "BEGIN"
+          ? Promise.resolve([[], []] as [unknown, unknown[]])
+          : (defaultMockExecute(sql) as Promise<[unknown, unknown[] | undefined]>);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      expect(await provider.beginTransaction()).toEqual({ stateReported: false });
+      await provider.rollbackTransaction();
+    });
+
+    test("an unreported state is refused when the caller needs the rollback proven, and nothing is left open", async () => {
+      mockExecuteFn = answering({ BEGIN: 0 });
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const release = spyOn(mockConnection, "release");
+      try {
+        protocolCalls.length = 0;
+        await expect(provider.beginTransaction({ requireReportedState: true })).rejects.toThrow(
+          TRANSACTION_STATE_UNREPORTED,
+        );
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+        // On Databend and Doris the BEGIN did open a transaction; it is rolled back before the
+        // connection returns to the pool.
+        expect(protocolCalls.map((call) => call.sql)).toEqual(["BEGIN", "ROLLBACK"]);
+      } finally {
+        release.mockRestore();
+      }
+      // The refusal left nothing behind: a manual transaction opens on the same provider.
+      expect(await provider.beginTransaction()).toEqual({ stateReported: false });
+      await provider.rollbackTransaction();
+    });
+
+    test("a server that refuses a bare BEGIN gets START TRANSACTION instead", async () => {
+      // MariaDB with sql_mode=ORACLE reads BEGIN as the start of a block and answers 1064;
+      // START TRANSACTION opens the transaction there (status 32771, measured on 13.0.2).
+      mockExecuteFn = (sql: string, params?: unknown[]) =>
+        sql === "BEGIN"
+          ? Promise.reject(Object.assign(new Error("You have an error in your SQL syntax"), { errno: 1064 }))
+          : answering({ "START TRANSACTION": 32771 })(sql, params);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      protocolCalls.length = 0;
+      expect(await provider.beginTransaction()).toEqual({ stateReported: true });
+      expect(protocolCalls.map((call) => call.sql)).toEqual(["BEGIN", "START TRANSACTION"]);
+      await provider.rollbackTransaction();
+    });
+
+    test("a BEGIN that fails in both forms raises the BEGIN's own error and releases the connection", async () => {
+      mockExecuteFn = (sql: string) =>
+        sql === "BEGIN"
+          ? Promise.reject(Object.assign(new Error("syntax error near BEGIN"), { errno: 1064 }))
+          : sql === "START TRANSACTION"
+            ? Promise.reject(new Error("START TRANSACTION refused too"))
+            : (defaultMockExecute(sql) as Promise<[unknown, unknown[] | undefined]>);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const release = spyOn(mockConnection, "release");
+      try {
+        await expect(provider.beginTransaction()).rejects.toThrow("syntax error near BEGIN");
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+      } finally {
+        release.mockRestore();
+      }
+    });
+
+    /**
+     * On Databend and Doris `START TRANSACTION` opens nothing, so falling back after a BEGIN
+     * that failed for a reason other than its grammar would hand the user a session that only
+     * looks open. Doris answers its own errors with 1105; a fatal error is a dead connection.
+     */
+    for (const [label, failure] of [
+      ["a non-parse error (1105)", Object.assign(new Error("transaction already begun"), { errno: 1105 })],
+      ["a fatal parse error", Object.assign(new Error("Connection lost"), { errno: 1064, fatal: true })],
+    ] as const) {
+      test(`a BEGIN refused with ${label} is raised as is, with no START TRANSACTION`, async () => {
+        mockExecuteFn = (sql: string) =>
+          sql === "BEGIN" ? Promise.reject(failure) : (answering({ "START TRANSACTION": 0 })(sql) as never);
+        provider = new MySQLProvider(makeMySQLConfig());
+        await provider.connect();
+        const release = spyOn(mockConnection, "release");
+        try {
+          protocolCalls.length = 0;
+          await expect(provider.beginTransaction()).rejects.toBe(failure);
+          expect(protocolCalls.map((call) => call.sql)).toEqual(["BEGIN"]);
+          expect(provider.isInTransaction()).toBe(false);
+          expect(release).toHaveBeenCalledTimes(1);
+        } finally {
+          release.mockRestore();
+        }
+      });
+    }
+
+    test("a statement MySQL commits implicitly ends the session, so no rollback is pretended", async () => {
+      mockExecuteFn = answering({ BEGIN: 16387, INSERT: 3, CREATE: 16386 });
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.beginTransaction();
+
+      await provider.queryInTransaction("INSERT INTO t VALUES (1)");
+      expect(provider.isInTransaction()).toBe(true);
+      // A read carries no OK packet to judge, and a read never ends a transaction.
+      await provider.queryInTransaction("SELECT 1");
+      expect(provider.isInTransaction()).toBe(true);
+
+      const release = spyOn(mockConnection, "release");
+      try {
+        protocolCalls.length = 0;
+        await provider.queryInTransaction("CREATE TABLE t2 (id INT)");
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+        // A best-effort ROLLBACK goes out before the connection does, so a server that cleared
+        // the flag with a transaction still open cannot hand one to the pool.
+        expect(protocolCalls.at(-1)?.sql).toBe("ROLLBACK");
+        await expect(provider.rollbackTransaction()).rejects.toThrow("No active transaction");
+      } finally {
+        release.mockRestore();
+      }
+    });
+
+    test("a ROLLBACK that fails on an ended session still releases the connection", async () => {
+      const statuses = answering({ BEGIN: 16387, CREATE: 16386 });
+      mockExecuteFn = (sql: string, params?: unknown[]) =>
+        sql === "ROLLBACK" ? Promise.reject(new Error("Connection lost")) : statuses(sql, params);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.beginTransaction();
+      const release = spyOn(mockConnection, "release");
+      try {
+        await provider.queryInTransaction("CREATE TABLE t2 (id INT)");
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+      } finally {
+        release.mockRestore();
+      }
+    });
+
+    test("a ROLLBACK queued behind a statement that ended the session does not release the connection twice", async () => {
+      const statuses = answering({ BEGIN: 16387, CREATE: 16386 });
+      let finish: () => void = () => {};
+      mockExecuteFn = async (sql: string, params?: unknown[]) => {
+        if (sql.startsWith("CREATE")) {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        }
+        return statuses(sql, params);
+      };
+      let openGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      const rollback = spyOn(mockConnection, "rollback").mockImplementation(() => gate);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.beginTransaction();
+      const release = spyOn(mockConnection, "release");
+      try {
+        const running = provider.queryInTransaction("CREATE TABLE t2 (id INT)");
+        const rolledBack = provider.rollbackTransaction();
+        finish();
+        await running;
+        openGate();
+        await rolledBack;
+        expect(provider.isInTransaction()).toBe(false);
+        expect(release).toHaveBeenCalledTimes(1);
+      } finally {
+        release.mockRestore();
+        rollback.mockRestore();
+      }
+    });
+
+    test("a CALL is judged by its own header, the last element of its answer", async () => {
+      const header = (serverStatus: number) => ({ fieldCount: 0, affectedRows: 0, serverStatus });
+      let callStatus = 3;
+      mockExecuteFn = (sql: string) => {
+        if (sql.startsWith("BEGIN")) return Promise.resolve([header(16387), undefined]);
+        if (sql.startsWith("CALL")) return Promise.resolve([[[{ id: 1 }], header(callStatus)], undefined]);
+        return defaultMockExecute(sql) as Promise<[unknown, unknown[] | undefined]>;
+      };
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.beginTransaction();
+
+      await provider.queryInTransaction("CALL still_open()");
+      expect(provider.isInTransaction()).toBe(true);
+      callStatus = 2;
+      await provider.queryInTransaction("CALL runs_ddl()");
+      expect(provider.isInTransaction()).toBe(false);
+    });
+
+    test("a row with a column named serverStatus is never read as the status flags", async () => {
+      mockExecuteFn = (sql: string) =>
+        sql.startsWith("SELECT")
+          ? Promise.resolve([[{ serverStatus: 0 }], [{ name: "serverStatus" }]])
+          : (answering({ BEGIN: 16387 })(sql) as Promise<[unknown, unknown[] | undefined]>);
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      await provider.beginTransaction();
+
+      await provider.queryInTransaction("SELECT 0 AS serverStatus");
+      expect(provider.isInTransaction()).toBe(true);
+      await provider.rollbackTransaction();
     });
 
     test("double beginTransaction throws", async () => {
@@ -2059,6 +2438,61 @@ describe("MySQLProvider", () => {
       expect(typeof first.schemaName).toBe("string");
       expect(typeof first.bloatRatio).toBe("number");
     });
+
+    test("names each row's database as the one it asked for, not the physical shard Vitess reports", async () => {
+      // Measured 2026-10-04 on Vitess 24.0.4 (`vitess/vttestserver:v24.0.4-mysql84`, keyspace `e2e`):
+      // `SELECT TABLE_SCHEMA ... FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'e2e'`
+      // answers `vt_e2e_0` on every row. That name is what Monitoring > Tables hands back to
+      // `runMaintenance` as the row's container, and vtgate refuses it there:
+      // `ANALYZE TABLE vt_e2e_0.customers` is `VT05003: unknown database 'vt_e2e_0' in vschema`.
+      mockExecuteFn = (sql) => {
+        const normalized = sql.toLowerCase();
+        if (normalized.includes("information_schema.tables") && normalized.includes("free_space_bytes")) {
+          return Promise.resolve([
+            [
+              {
+                schema_name: "vt_testdb_0",
+                table_name: "customers",
+                row_count: "2",
+                table_size_bytes: "16384",
+                index_size_bytes: "16384",
+                total_size_bytes: "32768",
+                free_space_bytes: "0",
+              },
+            ],
+            [],
+          ]);
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig());
+      await provider.connect();
+      const stats = await provider.getTableStats();
+
+      expect(stats.map((row) => [row.schemaName, row.tableName])).toEqual([["testdb", "customers"]]);
+      // An explicit schema is the one reported, for the same reason: it is the filter.
+      expect((await provider.getTableStats({ schema: "reporting" }))[0].schemaName).toBe("reporting");
+    });
+
+    test("keeps the server's spelling of the database when it is the filter in another case", async () => {
+      // `lower_case_table_names=1`: a connection configured as `App` reads rows whose
+      // TABLE_SCHEMA is `app`, and `app` is what the tree's container carries, which the
+      // Operations tab matches the row against. Reporting the configured `App` would match
+      // nothing there.
+      mockExecuteFn = (sql) => {
+        const normalized = sql.toLowerCase();
+        if (normalized.includes("information_schema.tables") && normalized.includes("free_space_bytes")) {
+          return Promise.resolve([[{ schema_name: "app", table_name: "orders", row_count: "1" }], []]);
+        }
+        return defaultMockExecute(sql);
+      };
+
+      provider = new MySQLProvider(makeMySQLConfig({ database: "App" }));
+      await provider.connect();
+
+      expect((await provider.getTableStats())[0].schemaName).toBe("app");
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -2165,6 +2599,9 @@ describe("MySQLProvider", () => {
       expect(sizeParams).toEqual([["vt_testdb_0"]]);
       expect(stats[0].indexSizeBytes).toBe(16384);
       expect(stats[0].indexSize).toBe("16 KB");
+      // The shard name is a lookup key and nothing more: the row names the database the
+      // read was filtered on, which is the one a statement through vtgate can address.
+      expect(stats[0].schemaName).toBe("testdb");
     });
   });
 
@@ -2863,7 +3300,10 @@ describe("MySQLProvider non-SELECT statements", () => {
   });
 
   test("queryInTransaction() answers the same envelope for a non-SELECT", async () => {
-    mockExecuteFn = () => Promise.resolve([makeResultSetHeader({ affectedRows: 1, insertId: 7 }), undefined]);
+    // serverStatus 3: autocommit and SERVER_STATUS_IN_TRANS, what MySQL answers for an
+    // INSERT inside a transaction. The shared header's 2 is an autocommitted statement.
+    mockExecuteFn = () =>
+      Promise.resolve([makeResultSetHeader({ affectedRows: 1, insertId: 7, serverStatus: 3 }), undefined]);
 
     provider = new MySQLProvider(makeMySQLConfig());
     await provider.connect();
@@ -3654,15 +4094,17 @@ function objectSurfaceFixture(options: { mariadb: boolean }) {
     // Before every catalog arm: a `SHOW CREATE` statement names no information_schema view and
     // would otherwise fall through to the empty default, which reads as an absence.
     if (normalized.startsWith("show create")) return [sourceReply(sql, options.mariadb), []];
-    if (normalized.includes("information_schema.schemata")) {
+    // `SHOW DATABASES` answers one column named `Database`, the reserved four included, in
+    // the order MySQL 26.7.0 and MariaDB 13.0.2 print it (measured 2026-10-04).
+    if (normalized === "show databases") {
       return [
-        [
-          { name: "app", is_session_default: 1 },
-          { name: "reporting", is_session_default: 0 },
-        ],
+        ["app", "information_schema", "mysql", "performance_schema", "reporting", "sys"].map((name) => ({
+          Database: name,
+        })),
         [],
       ];
     }
+    if (normalized.startsWith("select database()")) return [[{ name: "app" }], []];
     // Before `information_schema.tables`, which the counting statement also names.
     if (normalized.includes("group by kind")) return [counts, []];
 
@@ -4099,14 +4541,154 @@ describe("object surface", () => {
       { path: ["app"], name: "app", level: 0, isSessionDefault: true },
       { path: ["reporting"], name: "reporting", level: 0, isSessionDefault: false },
     ]);
-    // The statement excludes the four schemas both servers reserve, and it is bound to
-    // nothing: the container list is the SERVER's databases, not the one the pool opened
-    // against, which is what makes `reporting` reachable at all.
-    const read = protocolCalls.find((c) => c.sql.includes("information_schema.SCHEMATA"));
+    // The read is bound to nothing: the container list is the SERVER's databases, not the
+    // one the pool opened against, which is what makes `reporting` reachable at all. The
+    // four reserved schemas the server answered are dropped here rather than in the
+    // statement, because `SHOW DATABASES` takes no filter vtgate honours (next test).
+    const read = protocolCalls.find((c) => c.sql.trim() === "SHOW DATABASES");
     expect(read?.params).toBeUndefined();
-    for (const schema of ["information_schema", "mysql", "performance_schema", "sys"]) {
-      expect(read?.sql).toContain(`'${schema}'`);
-    }
+    expect(protocolCalls.some((c) => c.sql.includes("information_schema.SCHEMATA"))).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("on Vitess the containers are the keyspaces, not the shard databases information_schema holds", async () => {
+    // Measured 2026-10-04 on Vitess 24.0.4 (`vitess/vttestserver:v24.0.4-mysql84`, keyspace `e2e`,
+    // one shard), through vtgate:
+    //   information_schema.SCHEMATA -> mysql, information_schema, performance_schema, sys,
+    //                                  _vt, vt_e2e_0
+    //   SHOW DATABASES              -> e2e, information_schema, mysql, sys, performance_schema
+    //   SELECT DATABASE()           -> e2e
+    // So SCHEMATA drew the sidecar `_vt` and the physical shard `vt_e2e_0` and never the
+    // keyspace a statement can address. vtgate also ignores a WHERE on SHOW DATABASES (the
+    // same five rows come back), and it answers them unsorted, so the provider filters and
+    // orders the answer itself.
+    mockExecuteFn = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      if (normalized.includes("version()")) return [[{ version: "8.4.6-Vitess" }], []];
+      if (normalized === "show databases") {
+        return [
+          ["e2e", "information_schema", "mysql", "sys", "performance_schema"].map((name) => ({ Database: name })),
+          [],
+        ];
+      }
+      if (normalized.startsWith("select database()")) return [[{ name: "e2e" }], []];
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "e2e" }));
+    await provider.connect();
+
+    expect(await provider.listContainers()).toEqual([{ path: ["e2e"], name: "e2e", level: 0, isSessionDefault: true }]);
+    await provider.disconnect();
+  });
+
+  test("a caller SHOW DATABASES refuses under --skip-show-database reads the catalog instead", async () => {
+    // Measured 2026-10-04 on MySQL 26.7.0 and MariaDB 13.0.2, each started with
+    // `--skip-show-database`, as a user granted only `e2e.*`: SHOW DATABASES is errno 1227 and
+    // information_schema.SCHEMATA lists `information_schema` and `e2e`.
+    const sent: string[] = [];
+    mockExecuteFn = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      sent.push(normalized);
+      if (normalized.includes("version()")) return [[{ version: MYSQL_VERSION_STRING }], []];
+      if (normalized === "show databases") {
+        throw Object.assign(
+          new Error("Access denied; you need (at least one of) the SHOW DATABASES privilege(s) for this operation"),
+          {
+            errno: 1227,
+            code: "ER_SPECIFIC_ACCESS_DENIED_ERROR",
+          },
+        );
+      }
+      if (normalized.includes("information_schema.schemata")) {
+        return [[{ name: "information_schema" }, { name: "e2e" }], []];
+      }
+      if (normalized.startsWith("select database()")) return [[{ name: "e2e" }], []];
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "e2e" }));
+    await provider.connect();
+
+    expect(await provider.listContainers()).toEqual([{ path: ["e2e"], name: "e2e", level: 0, isSessionDefault: true }]);
+    expect(sent.filter((sql) => sql.includes("schemata"))).toHaveLength(1);
+    await provider.disconnect();
+  });
+
+  test("any other refusal of SHOW DATABASES is raised, with no fallback", async () => {
+    const sent: string[] = [];
+    mockExecuteFn = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      sent.push(normalized);
+      if (normalized.includes("version()")) return [[{ version: MYSQL_VERSION_STRING }], []];
+      if (normalized === "show databases") {
+        throw Object.assign(new Error("Lost connection to MySQL server during query"), { errno: 2013 });
+      }
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "e2e" }));
+    await provider.connect();
+
+    await expect(provider.listContainers()).rejects.toThrow("Lost connection to MySQL server during query");
+    expect(sent.some((sql) => sql.includes("schemata"))).toBe(false);
+    await provider.disconnect();
+  });
+
+  test("the database name is read from the first column, whatever the engine calls it", async () => {
+    // Databend 1.2.925 (`datafuselabs/databend:v1.2.925-patch-13`), measured 2026-10-04: SHOW
+    // DATABASES labels its one column `databases_in_default`, not `Database`. Reading the label
+    // drew nameless containers there.
+    mockExecuteFn = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      if (normalized.includes("version()")) return [[{ version: "8.0.90-v1.2.925-patch-13" }], []];
+      if (normalized === "show databases") {
+        return [["default", "information_schema", "system"].map((name) => ({ databases_in_default: name })), []];
+      }
+      if (normalized.startsWith("select database()")) return [[{ name: "default" }], []];
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "default" }));
+    await provider.connect();
+
+    expect(await provider.listContainers()).toEqual([
+      { path: ["default"], name: "default", level: 0, isSessionDefault: true },
+      { path: ["system"], name: "system", level: 0, isSessionDefault: false },
+    ]);
+    await provider.disconnect();
+  });
+
+  test("the containers are ordered by code point, and TiDB's upper-case schemas are kept as before", async () => {
+    // TiDB 8.5.8 (`pingcap/tidb:v8.5.8`), measured 2026-10-04: SHOW DATABASES answers its own
+    // schemas in upper case, and SCHEMATA's `SCHEMA_NAME` is `utf8mb4_bin` there, so the
+    // former `NOT IN ('information_schema', ...)` never matched them and the tree showed
+    // INFORMATION_SCHEMA, METRICS_SCHEMA and PERFORMANCE_SCHEMA. The filter here is the same
+    // exact-case comparison, so that tree is unchanged, and so is the order: a binary
+    // collation and a code-point sort put upper case first.
+    mockExecuteFn = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      if (normalized.includes("version()")) return [[{ version: "8.0.11-TiDB-v8.5.8" }], []];
+      if (normalized === "show databases") {
+        return [
+          ["test", "INFORMATION_SCHEMA", "METRICS_SCHEMA", "PERFORMANCE_SCHEMA", "e2e", "mysql", "sys"].map((name) => ({
+            Database: name,
+          })),
+          [],
+        ];
+      }
+      if (normalized.startsWith("select database()")) return [[{ name: "e2e" }], []];
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "e2e" }));
+    await provider.connect();
+
+    const containers = await provider.listContainers();
+
+    expect(containers.map((c) => c.name)).toEqual([
+      "INFORMATION_SCHEMA",
+      "METRICS_SCHEMA",
+      "PERFORMANCE_SCHEMA",
+      "e2e",
+      "test",
+    ]);
+    expect(containers.filter((c) => c.isSessionDefault).map((c) => c.name)).toEqual(["e2e"]);
     await provider.disconnect();
   });
 
@@ -4369,10 +4951,13 @@ describe("MySQL object listing and detail", () => {
 
     // PACKAGE BODY is a second ROUTINES row for one node, exactly as on Oracle, so counting
     // it would double the Packages badge. SYSTEM VIEW is what information_schema's own
-    // tables are. Both fall out of `kind IS NOT NULL` rather than being filtered by name.
+    // tables are. Both reach the GROUP BY as a NULL kind, which no declared folder is named,
+    // rather than being filtered by name.
     expect(counted).not.toContain("PACKAGE BODY");
     expect(counted).not.toContain("SYSTEM VIEW");
-    expect(counted).toContain("WHERE kind IS NOT NULL");
+    // And no filter on the derived `kind` column either: vtgate cannot plan one over this
+    // UNION (see the next test), so the NULL kind is dropped after the read instead.
+    expect(counted).not.toMatch(/WHERE\s+kind/i);
     // The four views the four arms read, so "one statement" is a measurement rather than a
     // claim about a statement that only reads one of them.
     for (const view of [
@@ -4403,6 +4988,46 @@ describe("MySQL object listing and detail", () => {
     // per call. SYSTEM VERSIONED above is the control that makes this negative mean
     // something: both are MariaDB-only TABLE_TYPEs and only one of them is excluded.
     expect(counted).not.toContain("TEMPORARY");
+    await provider.disconnect();
+  });
+
+  test("a kind the CASE has no name for is dropped after the read, so vtgate can plan the count", async () => {
+    // A regression pin rather than a fail-first test: `applyKindCounts` already skipped a kind
+    // nobody declared, so this held before the outer WHERE was removed and must keep holding.
+    // Measured 2026-10-04 on Vitess 24.0.4 (`vitess/vttestserver:v24.0.4-mysql84`): the four-arm
+    // count with an outer `WHERE kind IS NOT NULL` is refused by vtgate's planner with
+    // `VT13001: [BUG] could not find the column 'TABLE_TYPE' on the UNION`, which put that
+    // sentence on every folder of the tree. The same statement without the outer WHERE is
+    // answered (`table 3`, `view 2` for the e2e keyspace), and so is the WHERE over two arms,
+    // so it is the filter pushed through three or more arms that the planner cannot resolve.
+    // The NULL group is therefore one more row of the answer, and it must count for nothing.
+    mockExecuteFn = async (sql: string) => {
+      if (sql.toLowerCase().includes("version()")) return [[{ version: MYSQL_VERSION_STRING }], []];
+      if (sql.includes("GROUP BY kind")) {
+        return [
+          [
+            { kind: null, n: 79 },
+            { kind: "table", n: 3 },
+            { kind: "view", n: 2 },
+          ],
+          [],
+        ];
+      }
+      return [[], []];
+    };
+    const provider = new MySQLProvider(makeMySQLConfig({ database: "app" }));
+    await provider.connect();
+
+    const counts = await provider.countObjects(["app"]);
+
+    expect(counts).toEqual({
+      table: { count: 3 },
+      view: { count: 2 },
+      procedure: { count: 0 },
+      function: { count: 0 },
+      trigger: { count: 0 },
+      event: { count: 0 },
+    });
     await provider.disconnect();
   });
 

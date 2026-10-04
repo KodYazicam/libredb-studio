@@ -4,6 +4,8 @@ import { quoteLiteral } from "@/lib/sql/values";
 import { asBytes, binaryText } from "./binary";
 import { cellOf, resolveColumns, toCsv, type CsvDelimiter } from "./csv";
 import { jsonText } from "./json";
+import { typedLiteral } from "./typed-literals";
+import { isNonFiniteWord, nonFiniteWord, type NonFiniteWord } from "@/lib/non-finite";
 
 /**
  * Turning a result grid into a file the user keeps.
@@ -193,11 +195,36 @@ const DIALECT_TYPES: Partial<Record<DatabaseType, Partial<Record<InferredKind, s
  * A declared type is engine output — or, through the embeddable shell, whatever the
  * host put in `columnTypes` — so it is data until it has been checked, in a file whose
  * whole purpose is to be run somewhere else unattended (#290). Letters, digits,
- * underscores, spaces, commas and parentheses cover every real spelling
+ * underscores, spaces, commas and parentheses cover most real spellings
  * (`Nullable(Int64)`, `DECIMAL(10, 2)`, `TIMESTAMP WITH TIME ZONE`) and exclude every
  * character that could end the definition list it sits in.
+ *
+ * Three more shapes are real and were written as `TEXT` before #1386, which lost the type
+ * the INSERT beside it needs: a trailing `[]` (Postgres `integer[]`), a single-quoted
+ * argument (ClickHouse `DateTime64(3, 'Europe/Istanbul')`, `Enum8('a' = 1)`), and the
+ * `=` and negative numbers those argument lists hold. A quoted argument may not contain a
+ * quote, a backslash or a line break, so it cannot close early in any dialect, and a `-`
+ * must be followed by a digit, so `--` cannot start a comment.
  */
-const PLAUSIBLE_TYPE = /^[A-Za-z][A-Za-z0-9_(), ]*$/;
+const PLAUSIBLE_TYPE = /^[A-Za-z](?:[A-Za-z0-9_(), =]|-(?=\d)|'[^'\\\r\n]*')*(?:\[\])*$/;
+
+/**
+ * `PLAUSIBLE_TYPE`, plus parentheses that balance outside the quoted arguments.
+ *
+ * The character class alone admits `int) SELECT load_file('/etc/passwd') AS b, (c int`,
+ * which closes the column list it sits in and opens a new one, so a host-supplied
+ * `columnTypes` value could turn the CREATE TABLE into a CREATE TABLE ... AS SELECT. Every
+ * real spelling nests: the depth never drops below zero and ends at zero.
+ */
+function isPlausibleType(declared: string): boolean {
+  if (!PLAUSIBLE_TYPE.test(declared)) return false;
+  let depth = 0;
+  for (const char of declared.replace(/'[^']*'/g, "")) {
+    if (char === "(") depth++;
+    else if (char === ")" && --depth < 0) return false;
+  }
+  return depth === 0;
+}
 
 /** A column's kind, inferred from a value. */
 function inferKind(sample: unknown): InferredKind {
@@ -327,14 +354,16 @@ const BARE_TYPE_FAMILY: Record<string, InferredKind> = {
  * it answers `Unknown type 'text'` to.
  *
  * The map is total, for the reason `BINARY_LITERAL` below is: a new provider must not
- * inherit a silently wrong answer. The fourteen dialects with NO row measured have an
+ * inherit a silently wrong answer. The seventeen dialects with NO row measured have an
  * empty one. Db2 is the one of them that parses both statements (#786); no bare name was
  * measured standing alone there, so each is re-spelled from its family. Druid takes no INSERT at all without the MSQ extension. The two search
  * endpoints and Couchbase parse no CREATE TABLE: a SQL++ collection is schemaless and
  * `CREATE COLLECTION` takes no columns, which is why the Couchbase provider declares
- * `supportsCreateTable: false`. MongoDB, Redis, Kafka, etcd, Milvus, Qdrant and the embedded store declare
- * `queryLanguage: "json"`, `prometheus` declares `"promql"` and `neo4j` declares `"cypher"`,
- * so no SQL statement is ever built for those nine to read. A file for any of those thirteen
+ * `supportsCreateTable: false`. InfluxDB 3 parses SQL, but its 3.12 planner refuses DDL and DML, so
+ * a generated file is for another engine, the search pair's reason. MongoDB, Redis, Kafka, etcd,
+ * Milvus, Qdrant, Oxia and the embedded store declare `queryLanguage: "json"`, `prometheus` declares
+ * `"promql"`, `neo4j` declares `"cypher"` and `influxdb` declares `"influxql"`, so no SQL statement
+ * is ever built for those eleven to read. A file for any of those sixteen
  * is by definition meant to run somewhere else, so every bare name in it is re-spelled
  * portably rather than kept as one engine's private word.
  */
@@ -353,19 +382,7 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
     "timestamp without time zone",
     "timestamp with time zone",
   ],
-  mysql: [
-    "text",
-    "tinytext",
-    "mediumtext",
-    "longtext",
-    "blob",
-    "tinyblob",
-    "mediumblob",
-    "longblob",
-    "timestamp",
-    "datetime",
-    "year",
-  ],
+  mysql: ["text", "tinytext", "mediumtext", "longtext", "blob", "tinyblob", "mediumblob", "longblob", "year"],
   oracle: ["number", "binary_double", "binary_float", "clob", "nclob", "blob", "timestamp", "timestamp with time zone"],
   mssql: [
     "text",
@@ -532,6 +549,27 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   neo4j: NOTHING_STANDS_ALONE,
   milvus: NOTHING_STANDS_ALONE,
   qdrant: NOTHING_STANDS_ALONE,
+  influxdb: NOTHING_STANDS_ALONE,
+  influxdb3: NOTHING_STANDS_ALONE,
+  // Oxia has no statement form for an export.
+  oxia: NOTHING_STANDS_ALONE,
+};
+
+/**
+ * The bare names a dialect narrows below the value its own driver hands back, so the
+ * INSERT this same export writes beside the CREATE TABLE fails or rounds (#1386).
+ *
+ * Kept per dialect because the drivers disagree about the value (`BARE_TYPE_FAMILY` above
+ * says why `bit` cannot have one family): `pg` hands a bit string back as text such as
+ * `1010`, which a bare `bit` (`bit(1)`) refuses with `bit string length 4 does not match
+ * type bit(1)` and `bit varying` takes at any length; `mysql2` hands one back as bytes,
+ * which `bit(64)`, MySQL's widest, takes for every width. MySQL's bare `datetime`,
+ * `timestamp` and `time` have fractional precision 0, which ROUNDS a `.999` replayed into
+ * them up to the next second, so they are written at precision 6.
+ */
+const DIALECT_BARE_SPELLING: Partial<Record<DatabaseType, Readonly<Record<string, string>>>> = {
+  postgres: { bit: "bit varying" },
+  mysql: { bit: "bit(64)", datetime: "datetime(6)", timestamp: "timestamp(6)", time: "time(6)" },
 };
 
 /**
@@ -557,6 +595,11 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
  */
 function completeDeclaredType(declared: string, dialect: DatabaseType | undefined): string {
   if (declared.includes("(")) return declared;
+  const respelled = dialect === undefined ? undefined : DIALECT_BARE_SPELLING[dialect];
+  // The element type of an array is re-spelled the same way: a Postgres `bit[]` holds the
+  // same `1010` text per element that a bare `bit` refuses.
+  const [, name, dimensions] = /^(.*?)((?:\[\])*)$/.exec(declared.trim().toLowerCase()) as RegExpExecArray;
+  if (respelled !== undefined && Object.hasOwn(respelled, name)) return `${respelled[name]}${dimensions}`;
   // No dialect at all is not an unknown dialect: it means the file names no engine, so
   // there is nothing standing behind ANY private spelling and the portable name is the
   // only defensible one. It is also what this same export's value-shaped path already
@@ -591,7 +634,7 @@ function completeDeclaredType(declared: string, dialect: DatabaseType | undefine
  */
 function sqlTypeOf(column: string, rows: readonly Record<string, unknown>[], source: ResultExportSource): string {
   const declared = source.columnTypes;
-  if (declared !== undefined && Object.hasOwn(declared, column) && PLAUSIBLE_TYPE.test(declared[column])) {
+  if (declared !== undefined && Object.hasOwn(declared, column) && isPlausibleType(declared[column])) {
     return completeDeclaredType(declared[column], source.dialect);
   }
   const kind = inferKind(firstSample(rows, column));
@@ -671,6 +714,15 @@ const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   prometheus: "standard-hex",
   // Cypher, not SQL: it has no INSERT and no byte literal, so no statement is built for it either.
   neo4j: "standard-hex",
+  // InfluxQL, not SQL: it has no INSERT and no byte literal, so no statement is built for it either.
+  influxdb: "standard-hex",
+  // Measured on InfluxDB 3.12.0: `SELECT arrow_typeof(X'00ff')` answers `Binary`, and `SELECT
+  // arrow_typeof(X''), encode(X'','hex'), encode(X'0102deadbeef','hex')` answers `Binary`, the empty
+  // string and `0102deadbeef`, so the empty value has a spelling too.
+  influxdb3: "standard-hex",
+  // Oxia has no statement language for a value, so no statement is built for it; the answer is the inert default,
+  // as `etcd`'s and `neo4j`'s.
+  oxia: "standard-hex",
   // Measured on SQL Server 2022: `SELECT CONVERT(varchar(64), 0x0102deadbeef, 2)`
   // answers `0102DEADBEEF`, `DATALENGTH(0x)` answers 0 — so the empty case is spelled
   // — and `SELECT X'0102'` is `Msg 207 … Invalid column name 'X'`.
@@ -852,6 +904,42 @@ function oracleTextLiteral(text: string, type: "date" | "timestamp"): string | u
 }
 
 /**
+ * NaN and the infinities as each dialect reads them back into a float column.
+ *
+ * None of them is a number literal anywhere, the bare word `NaN` would read as a column
+ * name, and NULL is a different value, so each spelling here was replayed into the
+ * engine (2026-10-04): PostgreSQL 18.6 and DuckDB read the quoted words into `real`,
+ * `double precision`, `DOUBLE` and `FLOAT` (PostgreSQL also into `timestamptz`, whose
+ * infinities are quoted text anyway); SQLite reads `9e999` and `-9e999` as its
+ * infinities in a `REAL` column, where a quoted `'Infinity'` is stored as TEXT, and has
+ * no NaN at all (it stores one as NULL); Oracle AI Database 23.26.3 reads its own
+ * constants into `BINARY_DOUBLE` and `BINARY_FLOAT`. Every other dialect, which either
+ * cannot store these values or was not replayed, keeps writing NULL.
+ */
+const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFiniteWord, string>>>> = {
+  postgres: { NaN: "'NaN'", Infinity: "'Infinity'", "-Infinity": "'-Infinity'" },
+  duckdb: { NaN: "'NaN'", Infinity: "'Infinity'", "-Infinity": "'-Infinity'" },
+  sqlite: { NaN: "NULL", Infinity: "9e999", "-Infinity": "-9e999" },
+  oracle: { NaN: "BINARY_DOUBLE_NAN", Infinity: "BINARY_DOUBLE_INFINITY", "-Infinity": "-BINARY_DOUBLE_INFINITY" },
+};
+
+function nonFiniteLiteral(word: NonFiniteWord, dialect: DatabaseType | undefined): string {
+  return (dialect === undefined ? undefined : NON_FINITE_LITERALS[dialect]?.[word]) ?? "NULL";
+}
+
+/**
+ * A declared type that holds a binary float, spelled the way the providers report it:
+ * PostgreSQL's `real` / `double precision`, DuckDB's `FLOAT` / `DOUBLE`, SQLite's
+ * declared `REAL`, Oracle's `BINARY_DOUBLE` / `BINARY_FLOAT`, and `float4`/`float8`.
+ */
+const FLOAT_TYPE = /^(double( precision)?|real|float\d*|binary_(double|float))$/i;
+
+/** `columnTypes` is the host's data until checked, so a declared type is tested only as a string. */
+function isFloatColumn(declared: unknown): boolean {
+  return typeof declared === "string" && FLOAT_TYPE.test(declared.trim());
+}
+
+/**
  * A value as SQL.
  *
  * Everything that is not a number, a bigint or a boolean is quoted through the
@@ -861,12 +949,21 @@ function oracleTextLiteral(text: string, type: "date" | "timestamp"): string | u
  * be stringified to a locale-dependent form no engine parses back, and an object to
  * the literal text `[object Object]`.
  */
-function sqlValue(value: unknown, dialect: DatabaseType | undefined, oracle?: OracleDateColumn): string {
+function sqlValue(
+  value: unknown,
+  dialect: DatabaseType | undefined,
+  oracle?: OracleDateColumn,
+  floatColumn = false,
+): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "bigint") return String(value);
-  // NaN and ±Infinity are not numbers any of these dialects accepts as a literal,
-  // and `String(NaN)` would put the bare word `NaN` where a value belongs.
-  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL";
+  if (typeof value === "number") {
+    const word = nonFiniteWord(value);
+    return word === undefined ? String(value) : nonFiniteLiteral(word, dialect);
+  }
+  // A cell that crossed HTTP carries the word as a string, which is only a float when the
+  // column was declared one: a text column may hold the word itself.
+  if (floatColumn && isNonFiniteWord(value)) return nonFiniteLiteral(value, dialect);
   if (typeof value === "boolean") return String(value);
   if (value instanceof Date) {
     if (oracle !== undefined) return oracleDateLiteral(value, oracle.shape);
@@ -921,8 +1018,19 @@ export function buildResultExport(format: ResultExportFormat, source: ResultExpo
     // type, which does not change row to row.
     const oracleColumns =
       dialect === "oracle" ? columns.map((column) => oracleDateColumn(declaredTypeOf(source, column))) : undefined;
+    const floatColumns = columns.map((column) => isFloatColumn(declaredTypeOf(source, column)));
+    const declaredTypes = columns.map((column) => declaredTypeOf(source, column));
+    const scalar = (value: unknown) => sqlValue(value, dialect);
     const statements = rows.map((row) => {
-      const values = columns.map((column, index) => sqlValue(cellOf(row, column), dialect, oracleColumns?.[index]));
+      const values = columns.map((column, index) => {
+        const cell = cellOf(row, column);
+        // The cells whose literal depends on the declared type first (#1386): an array,
+        // an interval, a map, a BIT. Everything else is written as it always was.
+        return (
+          typedLiteral(cell, declaredTypes[index], dialect, scalar) ??
+          sqlValue(cell, dialect, oracleColumns?.[index], floatColumns[index])
+        );
+      });
       return `INSERT INTO ${tableName} (${quotedColumns.join(", ")}) VALUES (${values.join(", ")});`;
     });
     return sql(statements.join("\n"));

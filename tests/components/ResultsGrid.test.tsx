@@ -1380,6 +1380,132 @@ describe("ResultsGrid", () => {
       expect(queryAllByPlaceholderText(/^Filter /).length).toBeGreaterThan(0);
     });
 
+    /**
+     * A filter belongs to the result it was typed against (#1409). A different query in the
+     * same tab used to inherit it, and a column the new rows lack reads as "" so every row
+     * was hidden while the strip still reported the real count.
+     */
+    test("a new result without the filtered column starts unfiltered", () => {
+      const { container, getByTestId, rerender } = render(React.createElement(ResultsGrid, { result: mockResult }));
+      fireEvent.click(getByTestId("view-table"));
+      fireEvent.click(container.querySelectorAll('button[title="Filter column"]')[1]);
+      fireEvent.change(container.querySelector('input[placeholder="Filter name..."]')!, { target: { value: "Alice" } });
+      expect(container.querySelector('[data-testid="filtered-count"]')?.textContent).toContain("1 filtered");
+
+      const other: QueryResult = {
+        rows: [{ sku: "a" }, { sku: "b" }],
+        fields: ["sku"],
+        rowCount: 2,
+        executionTime: 1,
+      };
+      rerender(React.createElement(ResultsGrid, { result: other }));
+
+      expect(container.querySelector('[data-testid="filtered-count"]')?.textContent).toContain("2 filtered");
+      expect(container.querySelector('[data-testid="clear-filters"]')).toBeNull();
+    });
+
+    test("filter matching folds the Turkish dotted and dotless I", () => {
+      const turkish: QueryResult = {
+        rows: [{ city: "İzmir" }, { city: "IZMIR" }, { city: "ızmir" }, { city: "Ankara" }],
+        fields: ["city"],
+        rowCount: 4,
+        executionTime: 1,
+      };
+      const { container, getByTestId } = render(React.createElement(ResultsGrid, { result: turkish }));
+      fireEvent.click(getByTestId("view-table"));
+      fireEvent.click(container.querySelector('button[title="Filter column"]')!);
+      const input = () => container.querySelector('input[placeholder="Filter city..."]')!;
+      const count = () => container.querySelector('[data-testid="filtered-count"]')?.textContent;
+
+      fireEvent.change(input(), { target: { value: "izmir" } });
+      expect(count()).toContain("3 filtered");
+      fireEvent.change(input(), { target: { value: "İZMİR" } });
+      expect(count()).toContain("3 filtered");
+      fireEvent.change(input(), { target: { value: "ANK" } });
+      expect(count()).toContain("1 filtered");
+    });
+
+    test("filter matching keeps other accents and scripts apart", () => {
+      const mixed: QueryResult = {
+        rows: [{ w: "caf\u00e9" }, { w: "cafe" }, { w: "\ud55c\uad6d" }, { w: "\u017caba" }],
+        fields: ["w"],
+        rowCount: 4,
+        executionTime: 1,
+      };
+      const { container, getByTestId } = render(React.createElement(ResultsGrid, { result: mixed }));
+      fireEvent.click(getByTestId("view-table"));
+      fireEvent.click(container.querySelector('button[title="Filter column"]')!);
+      const input = () => container.querySelector('input[placeholder="Filter w..."]')!;
+      const count = () => container.querySelector('[data-testid="filtered-count"]')?.textContent;
+
+      fireEvent.change(input(), { target: { value: "cafe" } });
+      expect(count()).toContain("1 filtered");
+      fireEvent.change(input(), { target: { value: "\ud558" } });
+      expect(count()).toContain("0 filtered");
+      fireEvent.change(input(), { target: { value: "zaba" } });
+      expect(count()).toContain("0 filtered");
+    });
+
+    describe("filter lifetime (#1409)", () => {
+      const resultA = (fields = ["id", "name", "email"]): QueryResult => ({
+        rows: [
+          { id: 1, name: "Alice", email: "a@x" },
+          { id: 2, name: "Bob", email: "b@x" },
+        ].map((r) => Object.fromEntries(fields.map((f) => [f, (r as Record<string, unknown>)[f]]))),
+        fields,
+        rowCount: 2,
+        executionTime: 1,
+      });
+      const renderGrid = (result: QueryResult, resultQuery: string | undefined) =>
+        React.createElement(ResultsGrid, { result, resultQuery });
+      const typeNameFilter = (container: HTMLElement) => {
+        fireEvent.click(container.querySelectorAll('button[title="Filter column"]')[1]);
+        fireEvent.change(container.querySelector('input[placeholder="Filter name..."]')!, {
+          target: { value: "Alice" },
+        });
+      };
+      const count = (c: HTMLElement) => c.querySelector('[data-testid="filtered-count"]')?.textContent;
+
+      test("A, then B without the column, then A again starts unfiltered", () => {
+        const { container, getByTestId, rerender } = render(renderGrid(resultA(), "select * from a"));
+        fireEvent.click(getByTestId("view-table"));
+        typeNameFilter(container);
+        expect(count(container)).toContain("1 filtered");
+        rerender(renderGrid({ rows: [{ sku: "x" }], fields: ["sku"], rowCount: 1, executionTime: 1 }, "select sku"));
+        rerender(renderGrid(resultA(), "select * from a"));
+        expect(count(container)).toContain("2 filtered");
+        expect(container.querySelector('[data-testid="clear-filters"]')).toBeNull();
+      });
+
+      test("a different query with the same columns starts unfiltered", () => {
+        const { container, getByTestId, rerender } = render(renderGrid(resultA(), "select * from a"));
+        fireEvent.click(getByTestId("view-table"));
+        typeNameFilter(container);
+        rerender(renderGrid(resultA(), "select * from b"));
+        expect(count(container)).toContain("2 filtered");
+      });
+
+      test("the same run keeps its filter across a page that changes the columns", () => {
+        const { container, getByTestId, rerender } = render(renderGrid(resultA(), "db.a.find()"));
+        fireEvent.click(getByTestId("view-table"));
+        typeNameFilter(container);
+        rerender(renderGrid(resultA(["id", "name"]), "db.a.find()"));
+        expect(count(container)).toContain("1 filtered");
+        // a column that vanished takes its own filter with it, the others stay
+        rerender(renderGrid(resultA(["id"]), "db.a.find()"));
+        expect(count(container)).toContain("2 filtered");
+      });
+
+      test("an open filter panel closes when its column leaves the result", () => {
+        const { container, getByTestId, rerender } = render(renderGrid(resultA(), "q"));
+        fireEvent.click(getByTestId("view-table"));
+        fireEvent.click(container.querySelectorAll('button[title="Filter column"]')[1]);
+        expect(container.querySelector('input[placeholder="Filter name..."]')).not.toBeNull();
+        rerender(renderGrid(resultA(["id"]), "q"));
+        expect(container.querySelector('input[placeholder="Filter name..."]')).toBeNull();
+      });
+    });
+
     test("clicking filter button opens filter dropdown with input", () => {
       const { container, getByTestId } = render(React.createElement(ResultsGrid, { result: mockResult }));
       fireEvent.click(getByTestId("view-table"));
@@ -1581,6 +1707,38 @@ describe("ResultsGrid", () => {
       expect(findEditInput(container)).toBeUndefined();
       expect(onCellChange).not.toHaveBeenCalled();
       expect(container.querySelectorAll(".cursor-text").length).toBe(0);
+    });
+
+    test("a column whose declared type the provider refuses opens no editor, and says why (K24)", () => {
+      // Db2 declares a CLOB, DBCLOB or BLOB column by its bare name, and db2-node writes nothing
+      // for a value bound to one declared 32768 bytes or longer, so its provider refuses the type.
+      const onCellChange = mock(() => {});
+      const reason = "db2-node writes nothing for a value bound to this column";
+      const { container, getByTestId } = render(
+        React.createElement(ResultsGrid, {
+          result: {
+            ...mockResult,
+            rows: [{ id: 1, name: "Alice", email: "alice-notes" }],
+            columnTypes: { id: "INTEGER", name: "VARCHAR(20)", email: "CLOB" },
+          },
+          editingEnabled: true,
+          inlineEditRefusedColumns: { type: "^(CLOB|DBCLOB|BLOB)$", reason },
+          onCellChange,
+          pendingChanges: [],
+        }),
+      );
+      fireEvent.click(getByTestId("view-table"));
+
+      const row = findDesktopRow(container, "Alice")!;
+      const refused = within(row).getByText("alice-notes").parentElement!;
+      expect(refused.getAttribute("title")).toBe(reason);
+      expect(refused.classList.contains("cursor-text")).toBe(false);
+      fireEvent.doubleClick(refused);
+      expect(findEditInput(container)).toBeUndefined();
+
+      // The column beside it, whose type the rule does not match, still edits.
+      fireEvent.doubleClick(findDesktopCell(container, "Alice")!);
+      expect(findEditInput(container)).not.toBeUndefined();
     });
 
     test("Enter key commits a desktop-table edit and calls onCellChange", () => {
@@ -2061,6 +2219,66 @@ describe("ResultsGrid", () => {
     expect(descending[0]).toContain("Charlie");
     expect(descending[1]).toContain("Bob");
     expect(descending[2]).toContain("Alice");
+  });
+
+  /**
+   * 64-bit integers and decimals reach the grid as digit strings (#1384), and the table's
+   * default comparison orders a string lexicographically: 1, 10, 100, 9. The column's declared
+   * type picks a numeric comparison, and a text column keeps the default.
+   */
+  describe("sorting numeric columns (#1384)", () => {
+    const numericResult: QueryResult = {
+      rows: [
+        { id: "10", total: "100.00", label: "10", memo: "b" },
+        { id: "9", total: "1.25", label: "9", memo: "a" },
+        { id: "9007199254740993", total: "-5.5", label: "9007199254740993", memo: "d" },
+        { id: null, total: null, label: "100", memo: "c" },
+        { id: "-5", total: "1000.00", label: "-5", memo: "e" },
+        { id: "9007199254740992", total: "10.00", label: "1", memo: "f" },
+      ],
+      fields: ["id", "total", "label", "memo"],
+      columnTypes: { id: "bigint", total: "numeric(12,2)", label: "varchar(30)", memo: "text" },
+      rowCount: 6,
+      executionTime: 1,
+    };
+
+    /** The memo column names each row with one letter, so the order read back is unambiguous. */
+    const memoOrder = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll("[data-index]:not([data-testid]):not(button)"))
+        .map((row) => /[a-f]$/.exec(row.textContent ?? "")?.[0])
+        .join("");
+
+    const clickHeader = (utils: ReturnType<typeof render>, name: RegExp) =>
+      fireEvent.click(utils.getAllByRole("button", { name })[0]);
+
+    test("a bigint column sorts ascending and descending as numbers, NULL last both ways", () => {
+      const utils = render(React.createElement(ResultsGrid, { result: numericResult }));
+      fireEvent.click(utils.getByTestId("view-table"));
+      clickHeader(utils, /^id, bigint$/);
+      // -5, 9, 10, 2^53, 2^53 + 1, NULL
+      expect(memoOrder(utils.container)).toBe("eabfdc");
+      clickHeader(utils, /^id, bigint, sorted ascending$/);
+      // 2^53 + 1, 2^53, 10, 9, -5, NULL
+      expect(memoOrder(utils.container)).toBe("dfbaec");
+    });
+
+    test("a numeric(12,2) column sorts decimals of different magnitudes as numbers", () => {
+      const utils = render(React.createElement(ResultsGrid, { result: numericResult }));
+      fireEvent.click(utils.getByTestId("view-table"));
+      clickHeader(utils, /^total, numeric\(12,2\)$/);
+      // -5.5, 1.25, 10.00, 100.00, 1000.00, NULL
+      expect(memoOrder(utils.container)).toBe("dafbec");
+      clickHeader(utils, /^total, numeric\(12,2\), sorted ascending$/);
+      expect(memoOrder(utils.container)).toBe("ebfadc");
+    });
+
+    test("a text column of digit strings keeps the text order", () => {
+      const utils = render(React.createElement(ResultsGrid, { result: numericResult }));
+      fireEvent.click(utils.getByTestId("view-table"));
+      clickHeader(utils, /^label, varchar\(30\)$/);
+      // "-5" < "1" < "10" < "100" < "9" < "9007199254740993" as text
+      expect(memoOrder(utils.container)).toBe("efbcad");
+    });
   });
 
   // ── A11y semantics (#100): keyboard-reachable interactive elements ────────

@@ -1,3 +1,4 @@
+import { firstResultSet } from "@/lib/api/first-result-set";
 import { NextRequest, NextResponse } from "next/server";
 import { createDatabaseProvider, getOrCreateProvider } from "@/lib/db";
 import { createErrorResponse } from "@/lib/api/errors";
@@ -8,8 +9,13 @@ import { consoleTextByteLimit, consoleTextOverLimit } from "@/lib/db/destructive
 import { ObjectRouteError, objectRouteErrorBody, optionalDatabase } from "@/lib/api/object-route";
 import { containerDepth } from "@/lib/db/object-kinds";
 import { getExplainStrategy, type ExplainMode } from "@/lib/explain";
+import { countCodeStatements } from "@/lib/sql/statement-splitter";
+import { hasUnterminatedSpan } from "@/lib/sql/spans";
+import { resolveSqlGrammar } from "@/lib/sql/grammar";
 import { endsOpenQueryTransactions, newQueryCallScope } from "@/lib/db/types";
+import { supportsQueryCancel } from "@/lib/db/query-cancel";
 import type { ExplainFormat, OpenQueryTransactionOutcome } from "@/lib/db/types";
+import { rowsWithNonFiniteWords } from "@/lib/non-finite";
 
 /**
  * The error an unreadable `explain` field gets. It names the whole allowed shape
@@ -59,6 +65,11 @@ export async function POST(req: NextRequest) {
     if (!sql) {
       return NextResponse.json({ error: "Connection and query are required" }, { status: 400 });
     }
+    // The id a provider tracks the run under and the cancel route names it by: a provider
+    // sends it on to the engine (ClickHouse) or keys a Map with it, so only a string (#1364).
+    if (queryId !== undefined && typeof queryId !== "string") {
+      return NextResponse.json({ error: "queryId must be a string" }, { status: 400 });
+    }
 
     // A connection type that declares a console text bound is held to it here, before the bound parameters, the
     // provider and the statement cache are reached, so an oversize text opens no socket. The answer names the size
@@ -86,6 +97,26 @@ export async function POST(req: NextRequest) {
     const explain = readExplainRequest(body.explain);
     if (!explain.valid) {
       return NextResponse.json({ error: explain.message }, { status: 400 });
+    }
+
+    // AN EXPLAIN PREFIXES ONE STATEMENT (#1311). Handed `SELECT 1 AS a; INSERT ...` it
+    // explained the SELECT and the simple-query protocol then RAN the INSERT as a
+    // statement of its own: measured on Materialize 26.44.1, AlloyDB Omni 17.9 and
+    // Cloudberry 2.1.0, one RUN of that text applied the INSERT twice, once in the run
+    // and once in its background plan request. A plan of several statements is not a
+    // plan of anything, so the text is refused before a provider is opened. It is read
+    // under the connection's own grammar, the one the editor splits a run with, so a
+    // `;` inside a quote or a comment is not a second statement, and neither is a note
+    // after the final `;` (a fragment of comments only is not counted). A text with a
+    // run the grammar cannot close is refused too: the splitter finds no boundary in
+    // it, yet `SELECT E'\''; INSERT ...` is two statements to PostgreSQL.
+    const explainGrammar = resolveSqlGrammar(connection.type);
+    if (
+      explain.explain &&
+      typeof sql === "string" &&
+      (countCodeStatements(sql, explainGrammar) > 1 || hasUnterminatedSpan(sql, explainGrammar))
+    ) {
+      return NextResponse.json({ error: "Only a single statement can be explained" }, { status: 400 });
     }
 
     // The database one RUN should reach. A key lives in exactly one numbered database and
@@ -219,7 +250,7 @@ export async function POST(req: NextRequest) {
     let openTransaction: OpenQueryTransactionOutcome = "none";
 
     // Pass queryId to provider for cancellation tracking
-    const supportsCancel = "cancelQuery" in provider;
+    const supportsCancel = supportsQueryCancel(provider);
     let result: Awaited<ReturnType<typeof provider.query>>;
     try {
       result = await provider.query(prepared.query, bound.params, supportsCancel ? queryId : undefined, scope);
@@ -243,9 +274,11 @@ export async function POST(req: NextRequest) {
     // pagination is offered; if it is the user's, or the statement could not be
     // rewritten, it is not.
     const hasMore = prepared.wasLimited && result.rows.length === prepared.limit;
-
     return NextResponse.json({
-      ...result,
+      ...firstResultSet(result),
+      // NaN and the infinities as words: `JSON.stringify` would write each as null, which
+      // the grid and every export then show as SQL NULL (`src/lib/non-finite.ts`).
+      rows: rowsWithNonFiniteWords(result.rows),
       ...(explainFormat !== undefined && { explainFormat }),
       // Present only when there was a transaction to end, the way `/api/db/multi-query`
       // reports it, so an always-present "none" would announce something that did not happen.

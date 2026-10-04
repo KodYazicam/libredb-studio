@@ -126,6 +126,27 @@ export class QueryError extends DatabaseError {
 }
 
 /**
+ * What `beginTransaction()` raises when the server accepted the BEGIN and its own status
+ * says no transaction is open, the providers that can read that status (PostgreSQL's
+ * ReadyForQuery byte, MySQL's `SERVER_STATUS_IN_TRANS`) share it. Measured 2026-10-04 on
+ * RisingWave 3.1.0: `BEGIN` answers success with the NOTICE "no transaction is actually
+ * started" and ReadyForQuery `I`, and an INSERT and a DELETE run after it stayed applied
+ * through the ROLLBACK that SANDBOX reported as "Changes auto-rolled back". Raised as a
+ * `QueryError`, so the route answers 400 with this sentence and the UI shows it as is.
+ */
+export const NO_TRANSACTION_OPENED =
+  "This server accepted BEGIN but did not open a transaction, so nothing run in it could be rolled back. Transactions and SANDBOX are not available on this connection.";
+
+/**
+ * What `beginTransaction({ requireReportedState: true })` raises when the server answered the
+ * BEGIN without reporting any transaction state (see `BeginTransactionResult`). SANDBOX asks
+ * for that, because it tells the user their changes were rolled back, and on such a server
+ * nothing Studio can read would show it. A manual transaction is still opened there.
+ */
+export const TRANSACTION_STATE_UNREPORTED =
+  "This server does not report whether a transaction is open, so Studio cannot prove that SANDBOX rolled anything back. SANDBOX is not available on this connection; BEGIN, COMMIT and ROLLBACK still are.";
+
+/**
  * Timeout error - query or connection timeout
  */
 export class TimeoutError extends DatabaseError {

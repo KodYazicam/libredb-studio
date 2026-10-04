@@ -238,6 +238,28 @@ export interface PreviewProjection {
   readonly unprojectedNote: string;
 }
 
+/**
+ * A preview that reads a recent window, newest first (see `ProviderCapabilities.previewTimeWindow`):
+ * `SELECT * FROM <table> WHERE <column> >= <since> ORDER BY <column> DESC`, under `note`.
+ */
+export interface PreviewTimeWindow {
+  /** The time column, written through `quoteIdentifier`. */
+  readonly column: string;
+  /** The window's lower bound as the engine's own expression, InfluxDB 3's `now() - INTERVAL '1 hour'`. */
+  readonly since: string;
+  /**
+   * The preview's first comment line, written without its `-- `: why an empty preview is empty.
+   * Nothing reads it back, and no provider recognises its own generated text.
+   */
+  readonly note: string;
+  /**
+   * The commented lines Generate Query writes below its statement, each without its `-- `.
+   * `{table}` is filled with the quoted table and `{column}` with the first `float` or
+   * `integer` column of the described columns, quoted, else `"value"`.
+   */
+  readonly examples: readonly string[];
+}
+
 /** Where a surface wants to put a control: on one row, or on a whole-database card. */
 export type MaintenancePlacement = "perEntity" | "global";
 
@@ -472,6 +494,10 @@ export function offersSqlExport(capabilities: ProviderCapabilities | undefined):
  * known not to fit it.
  */
 export function offersSchemaDiagram(capabilities: ProviderCapabilities | undefined): boolean {
+  // InfluxDB spec 6.3: a measurement's columns are the union of the tag and field keys its points happened to carry,
+  // read with two SHOW statements per measurement, so a diagram would cost two requests per box to draw a schema the
+  // engine never declares, with no relation between boxes.
+  if (capabilities?.queryLanguage === "influxql") return false;
   return capabilities?.queryLanguage !== "cypher";
 }
 
@@ -568,9 +594,10 @@ export interface KeyScanCapability {
   readonly pattern?: "glob" | "prefix";
   /**
    * What `KeyScanPage.total` counts. Absent reads `"database"`, the engine's own count of the database
-   * walked; `"walk"` is the exact count of the keys this walk covers at its pinned revision.
+   * walked; `"walk"` is the exact count of the keys this walk covers at its pinned revision. `"none"` is
+   * an engine that publishes no count and pins no revision: `total` is not read, and a provider answers 0.
    */
-  readonly totalScope?: "database" | "walk";
+  readonly totalScope?: "database" | "walk" | "none";
 }
 
 /**
@@ -584,7 +611,7 @@ export interface KeyScanShape {
   readonly separator: string;
   readonly cursor: "decimal" | "opaque";
   readonly pattern: "glob" | "prefix";
-  readonly totalScope: "database" | "walk";
+  readonly totalScope: "database" | "walk" | "none";
 }
 
 /**
@@ -658,6 +685,9 @@ export interface KeyScanPage {
    * pinned to: the pattern's prefix range, or the whole key space, and for a caller whose grants are
    * narrower, the keys of the ranges it may read (spec 4.7). Every page answers it, and a panel replaces
    * its total with each page's.
+   *
+   * UNDER `"none"` IT IS NOT READ. `"none"` is an engine that publishes no count and pins no revision:
+   * `total` is not read, and a provider answers 0.
    */
   readonly total: number;
   /**
@@ -694,16 +724,20 @@ export interface ProviderCapabilities {
    * same reason: Cypher is neither JSON nor SQL. Its tabs render in the `graph-cypher` language, a
    * tree click writes a bounded Cypher read, and the count, profiling and code-generation gates
    * below refuse it by naming the languages they serve.
+   * `"influxql"` is the InfluxDB provider's (InfluxDB spec I12), declared with no `queryDialect`
+   * because InfluxQL is neither JSON nor SQL. Its tabs render in the `influxql` language over the
+   * provider's own lexer, a tree click writes a time-windowed newest-first read, and the count,
+   * profiling and code-generation gates refuse it by naming the languages they serve.
    *
    * Published through `src/exports/types.ts`, so widening it breaks a consumer's exhaustive
    * switch over it; that ships with a release note, not a compatibility layer.
    */
-  queryLanguage: "sql" | "json" | "promql" | "cypher";
+  queryLanguage: "sql" | "json" | "promql" | "cypher" | "influxql";
   /**
    * Optional client-side query dialect, declared only beside `queryLanguage: "json"`, where it
    * names the grammar the editor text really is: JSON of this product's own schema (Kafka) or a
    * command line (Redis, LibreDB, etcd), for which `"json"` means only "not SQL". `queryLanguage`
-   * says SQL, JSON, PromQL or Cypher; for a `"json"` provider the query generators otherwise
+   * says SQL, JSON, PromQL, Cypher or InfluxQL; for a `"json"` provider the query generators otherwise
    * assume MongoDB syntax.
    * A provider sets `queryDialect` to opt its tables into a custom client-side
    * generator (see `query-generators.ts`), and it is checked BEFORE
@@ -731,12 +765,14 @@ export interface ProviderCapabilities {
    * line and one JSON body, the closed console the provider re-serialises from its own parse. It landed through
    * one record in each registry and no arm anywhere else.
    *
+   * `"oxia"` is the Oxia provider's: one `oxia client` read command per run (O10).
+   *
    * Those arms are now records: a member added here does not compile until it has one in each of
    * `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`)
    * and `DIALECT_GENERATORS` (`src/lib/query-generators.ts`), and every other reader of this field and of
    * `queryLanguage` is held to a closed list by `tests/unit/lib/dialect-reader-allowlist.test.ts`.
    */
-  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant";
+  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant" | "oxia";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).
@@ -761,6 +797,24 @@ export interface ProviderCapabilities {
    * permissive default.
    */
   supportsInlineRowEdit?: boolean;
+  /**
+   * The result columns the inline editor must not write, where the engine accepts the editor's
+   * `UPDATE` for other columns but not for these.
+   *
+   * `type` is a regular expression source matched against the type the result itself declares for
+   * the column (`QueryResult.columnTypes`), because that is the only per-column fact a grid holds;
+   * a column that declares no type is never matched. `reason` is shown on each such cell, which
+   * opens no editor. A string pattern rather than a `RegExp` because capabilities travel to the
+   * client as JSON.
+   *
+   * Db2 is the case: db2-node writes nothing, and reports no error, for a value bound to a CLOB,
+   * DBCLOB or BLOB column declared 32768 bytes or longer (K24 in `docs/providers/db2.md`), and a
+   * result declares those columns without their length.
+   *
+   * Optional for the same published-interface reason as `supportsInlineRowEdit`; absent refuses no
+   * column.
+   */
+  inlineEditRefusedColumns?: { readonly type: string; readonly reason: string };
   /**
    * Whether this provider can be asked for the page AFTER the first one — whether
    * `prepareQuery(sql, { limit, offset })` with a positive `offset` really applies it.
@@ -808,6 +862,73 @@ export interface ProviderCapabilities {
    * as no transactions rather than inheriting a permissive default.
    */
   supportsTransactions?: boolean;
+  /**
+   * Whether `POST /api/db/cancel` can reach a running statement on this provider: whether it
+   * implements `cancelQuery(queryId)`. The route answers 400 "Query cancellation is not
+   * supported for this database type" everywhere else, and the editor used to offer Cancel
+   * there anyway and report it as done (#1364): measured on SQLite, ClickHouse and libSQL, the
+   * statement kept running and the toast said "Query Cancelled".
+   *
+   * NOT declared by a provider. `/api/db/provider-meta` stamps it from the same shape check
+   * the cancel route and the query route make (`supportsQueryCancel` in
+   * `src/lib/db/query-cancel.ts`), so the declaration and the route cannot disagree, which a
+   * second, hand-written declaration of the same fact would allow.
+   *
+   * It says the provider CAN ask; whether one cancel worked is the route's `cancelled`
+   * answer, because a provider's engine can still refuse (a PostgreSQL-wire engine that does
+   * not honour `pg_cancel_backend`, a statement that ended first).
+   *
+   * Optional, and the UI reads it only on `=== false`: an embedded host declares its own
+   * capabilities and runs its own queries, so an absent flag keeps the control it had. Where
+   * it is false the control reads "Stop waiting": it ends the editor's wait and says the
+   * statement keeps running on the server.
+   */
+  supportsQueryCancel?: boolean;
+  /**
+   * The engine runs a statement on the Studio server's own JavaScript thread, synchronously,
+   * so while one runs the server answers no other request: SQLite, whose `node:sqlite` and
+   * `bun:sqlite` drivers are both synchronous (#1364; measured 2026-10-03, `/api/health`
+   * answered after 69.7 s during one statement).
+   *
+   * Declared by the provider, unlike `supportsQueryCancel`: it is a property of the driver,
+   * and nothing on the provider's surface shows it. It is why the editor disables its
+   * Cancel control there instead of offering "Stop waiting": with the server blocked,
+   * nothing else the user could do next would be answered before the statement ends.
+   */
+  blocksServerWhileRunning?: boolean;
+  /**
+   * The statements that can END the transaction they run inside on this engine, beyond the
+   * `COMMIT` / `ROLLBACK` / `ABORT` every engine has: the ones it COMMITS IMPLICITLY (MySQL
+   * and Oracle DDL), a dialect's own synonym for COMMIT (PostgreSQL's `END`), or code that
+   * may commit and that the provider cannot check afterwards (an Oracle PL/SQL block). Each
+   * entry is a sequence of leading words, upper-cased and space-separated (`"CREATE"`,
+   * `"PREPARE TRANSACTION"`), matched against the statement's operative keyword and the words
+   * right after it. A ROLLBACK after such a statement answers success and can undo nothing,
+   * neither the statement nor anything the transaction ran before it.
+   *
+   * It exists because SANDBOX promises a rollback. Measured 2026-10-04 on MySQL 26.7.0:
+   * `START TRANSACTION`, `INSERT`, `CREATE TABLE`, `ROLLBACK` left both the table and the
+   * row, and the OK packet of the CREATE already carried `SERVER_STATUS_IN_TRANS` cleared
+   * (16387 after the START, 3 after the INSERT, 16386 after the CREATE). The UI said
+   * "Changes auto-rolled back. No data was modified." So SANDBOX refuses a statement
+   * these entries name before anything is sent, rather than running it and reporting
+   * afterwards that the data changed.
+   *
+   * A declaration and not a measurement, because the harm happens on the server before
+   * any answer could be read. The providers that can read the server's own transaction
+   * state after a statement also do (`queryInTransaction` ends the held session when the
+   * server says the transaction is gone, and the transaction route reports
+   * `inTransaction: false`), which covers a statement this list does not name. Absent
+   * means nothing beyond the universal three, or no transactions at all.
+   */
+  implicitCommitStatements?: readonly string[];
+  /**
+   * Word sequences that an `implicitCommitStatements` entry would match and that do NOT end
+   * the transaction, in the same form: Oracle's `ALTER SESSION` and `ALTER SYSTEM` are
+   * session and system control rather than DDL, and MySQL's `CREATE TEMPORARY TABLE` does
+   * not commit. Only read together with that list.
+   */
+  implicitCommitExceptions?: readonly string[];
   /**
    * Whether this engine has foreign keys to declare at all — not whether any
    * particular schema declares one, and not whether the current role can see them.
@@ -947,8 +1068,13 @@ export interface ProviderCapabilities {
    * and nothing about the old behaviour moves. A provider sets this when the port
    * is not a faithful proxy for its dialect - which is any engine that shares a
    * default port with a differently-quoting one.
+   *
+   * `"double"` and `"backtick"` quote only a name that would not round-trip bare;
+   * `"double-always"` quotes every name. InfluxDB 3 declares it: its read policy
+   * refuses a bare `$`, which the `"double"` rule lets through, so a generated Count
+   * of a table named `a$b` was refused by Studio itself.
    */
-  identifierQuoting?: "double" | "backtick";
+  identifierQuoting?: "double" | "backtick" | "double-always";
   /**
    * Whether a statement this product runs may end with `;`.
    *
@@ -989,6 +1115,18 @@ export interface ProviderCapabilities {
    * `unprojectedNote` comment, because no list exists to project.
    */
   previewProjection?: PreviewProjection;
+  /**
+   * A preview that reads a recent window, newest first (InfluxDB spec 6.6, I20), for an engine
+   * where an unwindowed `SELECT *` reads the oldest rows first or past a file limit.
+   *
+   * Absent means a preview is the engine's usual `SELECT *`. Present, the SQL arms of the
+   * generators write `WHERE <column> >= <since> ORDER BY <column> DESC` under the `note`
+   * comment, with no `LIMIT` in the text: the preview cap travels as the `limit` execution
+   * option, so the limiter appends it and Load More pages. Generate Query adds the `examples`
+   * as comment lines. Count and Profile stay unwindowed. Read by the generators, never by a
+   * type-id.
+   */
+  previewTimeWindow?: PreviewTimeWindow;
   /**
    * The container levels this engine nests its objects in, outermost first (#789).
    *
@@ -1282,6 +1420,30 @@ export interface QueryPrepareOptions {
  * script's unfinished transaction reach another user.
  */
 export type OpenQueryTransactionOutcome = "none" | "rolled-back";
+
+/** What the caller of `beginTransaction()` needs from the transaction it is opening. */
+export interface BeginTransactionOptions {
+  /**
+   * Refuse a transaction the server does not report the state of, and leave nothing open.
+   * SANDBOX asks for this: it promises the user a rollback, and on a server that never says
+   * whether a transaction is open no answer can show that the rollback undid anything.
+   */
+  requireReportedState?: boolean;
+}
+
+/**
+ * What a provider that reads the server's transaction state learned when it opened one.
+ *
+ * `stateReported: false` means the server answered the BEGIN without saying whether a
+ * transaction is open, and will not say it after any later statement either. Measured
+ * 2026-10-04 over the MySQL wire: Databend 1.2.881, StarRocks 4.1.6 and Apache Doris 4.1.3
+ * answer every OK packet with status 0, inside a transaction and outside one, although all
+ * three roll back what ran after a `BEGIN`. The session is then the user's own to drive,
+ * and nothing in it is judged by a status the server never sends.
+ */
+export interface BeginTransactionResult {
+  stateReported: boolean;
+}
 
 /**
  * A fresh name for one caller's call scope (D87). One per request, minted by the route
@@ -1835,6 +1997,13 @@ export interface PerformanceMetrics {
    * to a healthy 100 when it is absent.
    */
   cacheHitRatio?: number;
+  /**
+   * What to do about a low `cacheHitRatio`, declared by a provider whose engine has a
+   * setting to point at ("Increase shared_buffers" on PostgreSQL). Absent where the engine
+   * has no such knob, so the Performance tab falls back to a line that names no setting
+   * rather than advising a ClickHouse or MySQL server to tune PostgreSQL.
+   */
+  cacheHitAdvice?: string;
   /** Transactions per second */
   transactionsPerSecond?: number;
   /** Queries per second */

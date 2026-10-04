@@ -4,6 +4,7 @@ import React, { useMemo, useState, useRef, useCallback, useEffect } from "react"
 import { QueryResult, type DatabaseType } from "@/lib/types";
 import {
   type ColumnDef,
+  type SortFn,
   type SortingState,
   columnResizingFeature,
   columnSizingFeature,
@@ -32,15 +33,23 @@ import { writeToClipboard } from "@/components/copy-button";
 import { ResultCard } from "@/components/results-grid/ResultCard";
 import { RowDetailSheet } from "@/components/results-grid/RowDetailSheet";
 import { StatsBar } from "@/components/results-grid/StatsBar";
-import { describeWarning, formatCellCopy, formatCellValue, renderContextFor } from "@/components/results-grid/utils";
+import {
+  describeWarning,
+  foldFilterCase,
+  formatCellCopy,
+  formatCellValue,
+  renderContextFor,
+} from "@/components/results-grid/utils";
 import {
   getHeaderFitColumnSize,
   RESULT_COLUMN_MAX_SIZE,
   RESULT_COLUMN_MIN_SIZE,
 } from "@/components/results-grid/column-sizing";
+import { isNumericColumn, numericCellComparator } from "@/components/results-grid/numeric-sort";
 import { hasResultOrder } from "@/lib/sql/result-order";
 import { pageOfferFor } from "@/components/results-grid/page-offer";
 import { useDismissOnOutsideClick } from "@/hooks/use-dismiss-on-outside-click";
+import type { ProviderCapabilities } from "@/lib/db/types";
 
 export interface CellChange {
   rowIndex: number;
@@ -120,6 +129,8 @@ interface ResultsGridProps {
   maskingConfig?: MaskingConfig;
   // Inline editing props
   editingEnabled?: boolean;
+  /** The provider's columns the editor must not write (`ProviderCapabilities.inlineEditRefusedColumns`). */
+  inlineEditRefusedColumns?: ProviderCapabilities["inlineEditRefusedColumns"];
   pendingChanges?: CellChange[];
   onCellChange?: (change: CellChange) => void;
   onDiscardChanges?: () => void;
@@ -177,6 +188,7 @@ export function ResultsGrid({
   userRole,
   maskingConfig,
   editingEnabled,
+  inlineEditRefusedColumns,
   pendingChanges,
   onCellChange,
   onDiscardChanges,
@@ -188,7 +200,7 @@ export function ResultsGrid({
   const [viewMode, setViewMode] = useState<"card" | "table">("card");
   const [wrapText, setWrapText] = useState(false);
   const [selectedRow, setSelectedRow] = useState<{ row: Record<string, unknown>; index: number } | null>(null);
-  const [columnFilters, setColumnFilters] = useState<Map<string, string>>(new Map());
+  const [typedFilters, setColumnFilters] = useState<Map<string, string>>(new Map());
   const [activeFilterCol, setActiveFilterCol] = useState<string | null>(null);
   /**
    * Which fields are hidden, as TanStack's own visibility map (#870).
@@ -233,6 +245,38 @@ export function ResultsGrid({
 
   const hasSensitive = sensitiveColumns.size > 0;
 
+  /**
+   * A filter belongs to the run it was typed against (#1409).
+   *
+   * A column the rows lack reads as "", so a filter carried into a different query matched nothing
+   * and hid every row while the strip still counted them. Two things end a filter, both decided
+   * during render so no frame draws the stale one:
+   *
+   * - A different RUN clears them all. The run is the statement that produced the rows
+   *   (`resultQuery`, unchanged by Load More, which only appends a page to the same run); with none
+   *   given, as for a hydrated result, the column set stands in for it.
+   * - Within one run a changed column set (Load More on a document engine re-derives it from the
+   *   rows) only drops the filters whose column is gone, so the user's filter survives the page.
+   *
+   * The same statement re-run keeps its filter on purpose: it is the same question asked again.
+   */
+  const fieldsKey = JSON.stringify(result.fields);
+  const runKey = resultQuery === undefined ? `fields:${fieldsKey}` : `query:${resultQuery}`;
+  const [seenRun, setSeenRun] = useState(runKey);
+  const [seenFields, setSeenFields] = useState(fieldsKey);
+  if (seenRun !== runKey) {
+    setSeenRun(runKey);
+    setSeenFields(fieldsKey);
+    setColumnFilters(new Map());
+    setActiveFilterCol(null);
+  } else if (seenFields !== fieldsKey) {
+    setSeenFields(fieldsKey);
+    const present = new Set(result.fields);
+    setColumnFilters((prev) => new Map([...prev].filter(([col]) => present.has(col))));
+    if (activeFilterCol !== null && !present.has(activeFilterCol)) setActiveFilterCol(null);
+  }
+  const columnFilters = typedFilters;
+
   // Clear revealed cells when result changes
   useEffect(() => {
     setRevealedCells(new Set());
@@ -265,11 +309,13 @@ export function ResultsGrid({
   // Filter rows based on column filters
   const filteredRows = useMemo(() => {
     if (columnFilters.size === 0) return result.rows;
+    // Folded once here, not once per row.
+    const wanted = [...columnFilters]
+      .filter(([, filterVal]) => filterVal)
+      .map(([col, filterVal]) => [col, foldFilterCase(filterVal)] as const);
     return result.rows.filter((row) => {
-      for (const [col, filterVal] of columnFilters) {
-        if (!filterVal) continue;
-        const cellVal = String(row[col] ?? "").toLowerCase();
-        if (!cellVal.includes(filterVal.toLowerCase())) return false;
+      for (const [col, folded] of wanted) {
+        if (!foldFilterCase(String(row[col] ?? "")).includes(folded)) return false;
       }
       return true;
     });
@@ -407,6 +453,38 @@ export function ResultsGrid({
     setActiveFilterCol(null);
   }, []);
 
+  // The reason a column cannot be edited inline, keyed by field, for the columns whose declared
+  // type the provider refuses (K24 on Db2). Such a cell opens no editor and shows the reason.
+  const editRefusals = useMemo(() => {
+    const refusals = new Map<string, string>();
+    if (inlineEditRefusedColumns === undefined) return refusals;
+    const refused = new RegExp(inlineEditRefusedColumns.type);
+    for (const field of result.fields) {
+      const declared = declaredTypeOf(result.columnTypes, field);
+      if (declared !== undefined && refused.test(declared)) refusals.set(field, inlineEditRefusedColumns.reason);
+    }
+    return refusals;
+  }, [inlineEditRefusedColumns, result.fields, result.columnTypes]);
+
+  // One comparator per numeric column, each with its own parse cache, built once per result
+  // rather than on every render or edit keystroke.
+  const numericSortFns = useMemo(() => {
+    const sortFns = new Map<string, SortFn<typeof tableFeatureSet, Record<string, unknown>>>();
+    for (const field of result.fields) {
+      if (!isNumericColumn(declaredTypeOf(result.columnTypes, field), result.rows, field)) continue;
+      const compare = numericCellComparator();
+      sortFns.set(field, (rowA, rowB, columnId) =>
+        compare(
+          rowA.getValue(columnId),
+          rowB.getValue(columnId),
+          // The table inverts a descending comparison, so the NULL placement needs the direction.
+          rowA.table.atoms.sorting?.get().some((sort) => sort.id === columnId && sort.desc) === true,
+        ),
+      );
+    }
+    return sortFns;
+  }, [result.fields, result.columnTypes, result.rows]);
+
   const columns = useMemo<ColumnDef<typeof tableFeatureSet, Record<string, unknown>>[]>(() => {
     // `truncate` carries its own `white-space: nowrap`, so wrapping has to replace it here,
     // on the element holding the value, not only on the cell around it.
@@ -461,6 +539,9 @@ export function ResultsGrid({
       // something off the prototype chain.
       id: field,
       accessorFn: (row: Record<string, unknown>) => (Object.hasOwn(row, field) ? row[field] : undefined),
+      // A numeric column sorts as numbers, not as the strings it travels as (#1384).
+      // Every other column keeps the table's own comparison.
+      ...(numericSortFns.has(field) ? { sortFn: numericSortFns.get(field) } : {}),
       header: ({ column }) => {
         const hasFilter = columnFilters.has(field) && !!columnFilters.get(field);
         const isSensitive = effectiveMaskingEnabled && sensitiveColumns.has(field);
@@ -657,9 +738,13 @@ export function ResultsGrid({
         // required it, so without this a cell offered an input whose edit was
         // silently discarded — including where the provider declares no inline row
         // editing at all (issue #269).
-        if (!editingEnabled) {
+        const editRefusal = editRefusals.get(column.id);
+        if (!editingEnabled || editRefusal !== undefined) {
           return (
-            <div className={cn("w-full", valueFlow, pendingChange && "bg-warning-tint/10 rounded px-0.5")}>
+            <div
+              className={cn("w-full", valueFlow, pendingChange && "bg-warning-tint/10 rounded px-0.5")}
+              title={editingEnabled ? editRefusal : undefined}
+            >
               <span className={cn(className, pendingChange && "text-warning")}>{display}</span>
             </div>
           );
@@ -691,6 +776,7 @@ export function ResultsGrid({
     detailColumnId,
     wrapText,
     result.fields,
+    numericSortFns,
     result.columnTypes,
     result.vectorColumns,
     editingCell,
@@ -698,6 +784,7 @@ export function ResultsGrid({
     effectiveMaskingEnabled,
     sensitiveColumns,
     editingEnabled,
+    editRefusals,
     onCellChange,
     getCellChange,
     getDisplayedCellValue,
