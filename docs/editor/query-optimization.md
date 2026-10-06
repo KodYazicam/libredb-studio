@@ -298,6 +298,12 @@ declared run, which is re-attached verbatim:
 | `SELECT * FROM t BYPASS CACHE` (ScyllaDB) | `SELECT * FROM t LIMIT 500 BYPASS CACHE` |
 | `SELECT * FROM t USING TIMEOUT 5s` (ScyllaDB) | `SELECT * FROM t LIMIT 500 USING TIMEOUT 5s` |
 | `SELECT * FROM t ALLOW FILTERING` (CQL) | `SELECT * FROM t LIMIT 500 ALLOW FILTERING` |
+| `SELECT * FROM t -- note` ⏎ `ALLOW FILTERING` (CQL) | `SELECT * FROM t LIMIT 500 -- note` ⏎ `ALLOW FILTERING` |
+
+A comment the writer put between the code and the clause stays between the bound and
+the clause, its own closing newline kept, so the bound is written in code rather than
+inside the comment - and a commented-out bound behind one (`-- LIMIT 5` ⏎
+`ALLOW FILTERING`) does not answer for the statement.
 
 The same reading answers "is this statement already bounded": `LIMIT 10 BYPASS CACHE` is an
 existing bound followed by a declared clause, so it is detected, honoured and never doubled. On

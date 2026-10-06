@@ -1571,3 +1571,46 @@ describe("the clause patterns keep their guards (#1398)", () => {
     expect(result.sql).toBe("SELECT * FROM t WHERE id IN (SELECT id FROM u USING TIMEOUT 5s) LIMIT 500");
   });
 });
+
+// ─── a comment before a trailing clause keeps the bound in code (#1398 review) ─
+//
+// The clause patterns match from `\s+`, which also takes the newline that CLOSES a
+// line comment, so the clause run once started at that newline and the stripped
+// body ended inside the comment: the bound was written INTO the comment while
+// `wasLimited: true` was reported, and a commented-out bound read as real. The
+// stripped body is now cut at its code end, so the comment sits BETWEEN the bound
+// and the clause and the probes read code only.
+describe("a comment before a trailing clause keeps the bound in code (#1398 review)", () => {
+  test("-- note before ALLOW FILTERING: the bound is written before the comment", () => {
+    const result = applyQueryLimit("SELECT * FROM big -- note\nALLOW FILTERING", 500, 0, {}, "cassandra");
+    expect(result.sql).toBe("SELECT * FROM big LIMIT 500 -- note\nALLOW FILTERING");
+    expect(result.wasLimited).toBe(true);
+  });
+
+  test("// note before BYPASS CACHE: the bound is written before the comment", () => {
+    const result = applyQueryLimit("SELECT * FROM shop.e2e_t // note\nBYPASS CACHE", 500, 0, {}, "cassandra");
+    expect(result.sql).toBe("SELECT * FROM shop.e2e_t LIMIT 500 // note\nBYPASS CACHE");
+    expect(result.wasLimited).toBe(true);
+  });
+
+  test("-- note before AS OF: the bound is written before the comment", () => {
+    const result = applyQueryLimit("SELECT * FROM ui_mv -- note\nAS OF AT LEAST 0", 500, 0, {}, "postgres");
+    expect(result.sql).toBe("SELECT * FROM ui_mv LIMIT 500 -- note\nAS OF AT LEAST 0");
+    expect(result.wasLimited).toBe(true);
+  });
+
+  test("a commented-out bound before the clause is not read as real", () => {
+    const info = analyzeQuery("SELECT * FROM big -- LIMIT 5\nALLOW FILTERING", "cassandra");
+    expect(info.hasLimit).toBe(false);
+
+    const result = applyQueryLimit("SELECT * FROM big -- LIMIT 5\nALLOW FILTERING", 500, 0, {}, "cassandra");
+    expect(result.sql).toBe("SELECT * FROM big LIMIT 500 -- LIMIT 5\nALLOW FILTERING");
+    expect(result.wasLimited).toBe(true);
+  });
+
+  test("a real bound before a comment before the clause is still recognised", () => {
+    const result = applyQueryLimit("SELECT * FROM big LIMIT 5 -- note\nALLOW FILTERING", 500, 0, {}, "cassandra");
+    expect(result.wasLimited).toBe(false);
+    expect(result.sql).toBe("SELECT * FROM big LIMIT 5 -- note\nALLOW FILTERING");
+  });
+});

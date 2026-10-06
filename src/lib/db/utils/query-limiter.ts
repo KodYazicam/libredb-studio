@@ -155,7 +155,8 @@ function hasRepeatedCodeWord(sql: string, word: string, from: number, grammar: S
 }
 
 /**
- * The statement with its trailing-clause run removed, and that run (#1398).
+ * The statement with its trailing-clause run removed: the code, the trivia that
+ * sat between the code and the clause, and the run itself (#1398).
  *
  * A dialect's grammar declares the clauses that must FOLLOW the row bound -
  * Materialize's `AS OF`, ScyllaDB's `BYPASS CACHE` and `USING TIMEOUT`, CQL's
@@ -169,8 +170,20 @@ function hasRepeatedCodeWord(sql: string, word: string, from: number, grammar: S
  * statement carrying two of them keeps them in the order they were written. Each
  * pattern is end-anchored and eats at least one word, so the index strictly
  * decreases and the loop terminates whatever the declaration says.
+ *
+ * The clause patterns match from `\s+`, which also takes the NEWLINE that closes
+ * a `--` or `//` comment, so the body left behind can end inside one: a comment
+ * the writer put between the code and the clause. That body is cut at its code
+ * end - the same reading `applyQueryLimit` gives the statement's own trailing
+ * trivia - so the comment is returned between the code and the clause rather
+ * than swallowing the bound that is about to be written into it, and the
+ * end-anchored probes read code only: `-- LIMIT 5\nALLOW FILTERING` is not a
+ * statement already limited to 5.
  */
-function stripTrailingClauses(statement: string, grammar: SqlGrammar): { body: string; clauseRun: string } {
+function stripTrailingClauses(
+  statement: string,
+  grammar: SqlGrammar,
+): { code: string; midTrivia: string; clauseRun: string } {
   let body = statement;
   let clauseRun = "";
 
@@ -186,7 +199,8 @@ function stripTrailingClauses(statement: string, grammar: SqlGrammar): { body: s
     if (!stripped) break;
   }
 
-  return { body, clauseRun };
+  const end = readStatementEnd(body, grammar);
+  return { code: body.slice(0, end.end), midTrivia: body.slice(end.end), clauseRun };
 }
 
 /** The type this module reports for a statement operated by `keyword`. */
@@ -226,13 +240,15 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
   // what these probes read before the reader existed, so none of them answers
   // differently than it used to.
   const statement = sql.slice(0, readStatementEnd(sql, grammar).end);
-  // The statement without the trailing-clause run the dialect declared (#1398).
-  // The end-anchored probes below read THIS: on a dialect with such a clause an
-  // existing bound is never the last thing in the statement, and reading the raw
-  // end made `LIMIT 10 BYPASS CACHE` look unbounded - so a second bound was
-  // appended and the engine refused the pair. The whole-body probes keep the full
+  // The statement's CODE with the trailing-clause run the dialect declared removed
+  // (#1398). The end-anchored probes below read THIS: on a dialect with such a
+  // clause an existing bound is never the last thing in the statement, and reading
+  // the raw end made `LIMIT 10 BYPASS CACHE` look unbounded - so a second bound was
+  // appended and the engine refused the pair. A comment the writer put between the
+  // code and the clause is cut off here too, so a commented-out bound behind one
+  // cannot answer for the statement. The whole-body probes keep the full
   // statement: the clause run cannot contain the words they ask about.
-  const { body: clauseStripped } = stripTrailingClauses(statement, grammar);
+  const { code: clauseStripped } = stripTrailingClauses(statement, grammar);
 
   // Query type detection - from the first keyword that is not whitespace or a
   // comment, and where a comment ENDS is the dialect's answer: on a dialect that
@@ -440,10 +456,13 @@ export function applyQueryLimit(
   // re-attached after the bound, so the clauses that must FOLLOW the row bound -
   // Materialize's `AS OF`, ScyllaDB's `BYPASS CACHE` and `USING TIMEOUT`, CQL's
   // `ALLOW FILTERING` - keep the place their grammar demands instead of refusing
-  // the statement. The analysis above read the same run off the same statement,
-  // so an existing bound followed by one never reaches this rewrite.
-  const { body: withoutClauses, clauseRun } = stripTrailingClauses(statement, grammar);
-  statement = withoutClauses;
+  // the statement. A comment the writer put between the code and the clause is
+  // re-attached between the bound and the clause, its own closing newline kept,
+  // so the bound is written in code rather than inside the comment. The analysis
+  // above read the same run off the same statement, so an existing bound followed
+  // by one never reaches this rewrite.
+  const { code, midTrivia, clauseRun } = stripTrailingClauses(statement, grammar);
+  statement = code;
 
   // Mevcut LIMIT/OFFSET'i kaldır (eğer forceLimit true ise). These are anchored
   // at the end of the STATEMENT, so a trailing comment neither hides the bound
@@ -459,7 +478,7 @@ export function applyQueryLimit(
   const limitClause = offset > 0 ? `LIMIT ${limit} OFFSET ${offset}` : `LIMIT ${limit}`;
 
   return {
-    sql: `${statement} ${limitClause}${clauseRun}${trailing}`,
+    sql: `${statement} ${limitClause}${midTrivia}${clauseRun}${trailing}`,
     wasLimited: true,
     originalLimit: info.existingLimit,
     appliedLimit: limit,
