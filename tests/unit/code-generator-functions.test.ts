@@ -806,6 +806,18 @@ describe("integer spellings are whole tokens, not substrings (#1446 review)", ()
     expect(mapSqlTypeToTS("varint")).toBe("number");
     expect(mapSqlTypeToPython("varint")).toBe("int");
   });
+
+  test("DuckDB's unsigned and huge integers keep their family", () => {
+    for (const type of ["UTINYINT", "USMALLINT", "UINTEGER"]) {
+      expect(mapSqlTypeToTS(type)).toBe("number");
+      expect(mapSqlTypeToGo(type)).toBe("int");
+    }
+    for (const type of ["UBIGINT", "HUGEINT", "UHUGEINT"]) {
+      expect(mapSqlTypeToTS(type)).toBe("bigint");
+      expect(mapSqlTypeToGo(type)).toBe("int64");
+      expect(mapSqlTypeToJava(type)).toBe("Long");
+    }
+  });
 });
 
 /*

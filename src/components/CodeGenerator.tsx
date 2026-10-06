@@ -164,9 +164,12 @@ const classifySqlType = (sqlType: string): TypeClass => {
   // Integer spellings are WHOLE TOKENS, never a substring: `point`, `interval`
   // and `geo_point` each carry `int` as characters and none is an integer type,
   // and the substring test typed them `int`/`Integer`/`Int` in three languages
-  // (#1446 review).
-  if (/\b(bigint|int8|int64|uint64|bigserial|serial8)\b/.test(t)) return { kind: "int64" };
-  if (/\b(int|integer|int2|int4|smallint|tinyint|mediumint|serial|serial2|serial4|smallserial|varint)\b/.test(t)) {
+  // (#1446 review). DuckDB's unsigned and 128-bit spellings (`UINTEGER`, `UBIGINT`,
+  // `HUGEINT`) are whole tokens of their own and join the family they widen.
+  if (/\b(u?bigint|u?hugeint|int8|int64|uint64|bigserial|serial8)\b/.test(t)) return { kind: "int64" };
+  if (
+    /\b(int|u?integer|int2|int4|u?smallint|u?tinyint|mediumint|serial|serial2|serial4|smallserial|varint)\b/.test(t)
+  ) {
     return { kind: "integer" };
   }
   // Two numeric families, because Go and Java spell them differently: the
