@@ -63,8 +63,8 @@ describe("mapSqlTypeToTS", () => {
   test("TIME → Date", () => expect(mapSqlTypeToTS("TIME")).toBe("Date"));
   test("JSONB → Record", () => expect(mapSqlTypeToTS("JSONB")).toBe("Record<string, unknown>"));
   test("UUID → string", () => expect(mapSqlTypeToTS("UUID")).toBe("string"));
-  test("ARRAY → unknown[]", () => expect(mapSqlTypeToTS("text[]")).toBe("string"));
-  // Note: 'INTEGER ARRAY' matches 'int' first due to includes check order, so returns 'number'
+  test("ARRAY → the element array", () => expect(mapSqlTypeToTS("text[]")).toBe("string[]"));
+  // PostgreSQL's `format_type` bracket spelling: an array of the element before it
   test("array keyword detected", () => expect(mapSqlTypeToTS("_text ARRAY")).toBe("unknown[]"));
   test("VARCHAR → string", () => expect(mapSqlTypeToTS("VARCHAR(255)")).toBe("string"));
   test("TEXT → string", () => expect(mapSqlTypeToTS("TEXT")).toBe("string"));
@@ -171,7 +171,7 @@ describe("mapSqlTypeToTS classifies the declared type once (#1446)", () => {
   test("Map(String, Int64) is a record of bigints", () =>
     expect(mapSqlTypeToTS("Map(String, Int64)")).toBe("Record<string, bigint>"));
   test("a bare ARRAY stays unknown[]", () => expect(mapSqlTypeToTS("_text ARRAY")).toBe("unknown[]"));
-  test("a bracket spelling is not the container keyword", () => expect(mapSqlTypeToTS("text[]")).toBe("string"));
+  test("a bracket spelling is an array of its element", () => expect(mapSqlTypeToTS("text[]")).toBe("string[]"));
   test("ClickHouse Int64 is bigint, not number", () => expect(mapSqlTypeToTS("Int64")).toBe("bigint"));
   test("ClickHouse UInt64 is bigint, not number", () => expect(mapSqlTypeToTS("UInt64")).toBe("bigint"));
   test("BIGINT is bigint", () => expect(mapSqlTypeToTS("BIGINT")).toBe("bigint"));
@@ -722,4 +722,122 @@ describe("generateCode — non-identifier table names (#427)", () => {
       expect(generateCode(lang, unicodeSchema)).toContain(expected);
     });
   }
+});
+
+// ─── the review's three fixes (#1446) ─────────────────────────────────────────
+
+/*
+  1. The `time`, `datetime` and `LocalDateTime` imports are decided from the
+     MAPPED type, not the raw declared one, so a container the classifier cannot
+     see into (`list<timestamp>`, `map<text, timestamp>`, `Tuple(DateTime, Int32)`)
+     no longer emits an import nothing uses - `go build` failed on exactly that.
+*/
+describe("imports follow the mapped type, not the declared string (#1446 review)", () => {
+  const cassandraContainers: DetailedObject = {
+    name: "ch",
+    kind: "table",
+    path: ["ch"],
+    indexes: [],
+    columns: [
+      { name: "l", type: "list<timestamp>", nullable: false, isPrimary: false },
+      { name: "m", type: "map<text, timestamp>", nullable: false, isPrimary: false },
+      { name: "t", type: "Tuple(DateTime, Int32)", nullable: false, isPrimary: false },
+    ],
+  };
+
+  test("Go emits no time import for containers it maps to interface{}", () => {
+    const code = generateCode("go", cassandraContainers);
+    expect(code).not.toContain('import "time"');
+    expect(code).toContain("L []interface{}");
+    expect(code).toContain("M map[string]interface{}");
+    expect(code).toContain("T []interface{}");
+  });
+
+  test("Python emits no datetime import for them", () => {
+    const code = generateCode("python", cassandraContainers);
+    expect(code).not.toContain("from datetime import datetime");
+    expect(code).toContain("l: list");
+    expect(code).toContain("m: dict");
+  });
+
+  test("Java emits no LocalDateTime import for them", () => {
+    const code = generateCode("java", cassandraContainers);
+    expect(code).not.toContain("import java.time.LocalDateTime;");
+    expect(code).toContain("private Object[] l;");
+  });
+});
+
+/*
+  2. Integer spellings match as whole tokens, so `point`, `interval` and
+     `geo_point` (each carrying `int` as characters, none an integer type) are
+     not integers in any language, and ClickHouse's CamelCase `Int8` - an 8-bit
+     integer - is not PostgreSQL's `int8`, which is a 64-bit one.
+*/
+describe("integer spellings are whole tokens, not substrings (#1446 review)", () => {
+  for (const type of ["point", "interval", "geo_point"]) {
+    test(`${type} is not an integer in any language`, () => {
+      expect(mapSqlTypeToTS(type)).toBe("string");
+      expect(mapSqlTypeToZod(type)).toBe("z.string()");
+      expect(mapSqlTypeToGo(type)).toBe("string");
+      expect(mapSqlTypeToPython(type)).toBe("str");
+      expect(mapSqlTypeToJava(type)).toBe("String");
+      expect(mapSqlTypeToPrisma(type)).toBe("String");
+    });
+  }
+
+  test("ClickHouse Int8 is an 8-bit integer, not PostgreSQL's int8", () => {
+    expect(mapSqlTypeToTS("Int8")).toBe("number");
+    expect(mapSqlTypeToZod("Int8")).toBe("z.number()");
+    expect(mapSqlTypeToGo("Int8")).toBe("int");
+    expect(mapSqlTypeToJava("Int8")).toBe("Integer");
+    expect(mapSqlTypeToPrisma("Int8")).toBe("Int");
+  });
+
+  test("PostgreSQL's int8 stays the 64-bit one", () => {
+    expect(mapSqlTypeToTS("int8")).toBe("bigint");
+    expect(mapSqlTypeToGo("int8")).toBe("int64");
+    expect(mapSqlTypeToJava("int8")).toBe("Long");
+    expect(mapSqlTypeToPrisma("int8")).toBe("BigInt");
+  });
+
+  test("a modified integer keeps its family", () => {
+    expect(mapSqlTypeToTS("int(11)")).toBe("number");
+    expect(mapSqlTypeToTS("smallint")).toBe("number");
+    expect(mapSqlTypeToTS("varint")).toBe("number");
+    expect(mapSqlTypeToPython("varint")).toBe("int");
+  });
+});
+
+/*
+  3. A trailing `[]` is PostgreSQL's array spelling (format_type), so the element
+     is typed: `integer[]` is a list of numbers, not one number, and
+     `timestamp with time zone[]` reaches Go as []time.Time.
+*/
+describe("a trailing [] is an array of its element (#1446 review)", () => {
+  test("integer[] is a list of numbers", () => expect(mapSqlTypeToTS("integer[]")).toBe("number[]"));
+  test("text[] is a list of strings", () => expect(mapSqlTypeToTS("text[]")).toBe("string[]"));
+  test("timestamp with time zone[] is a list of Date", () =>
+    expect(mapSqlTypeToTS("timestamp with time zone[]")).toBe("Date[]"));
+  test("Go reads []time.Time for a zoned array", () =>
+    expect(mapSqlTypeToGo("timestamp with time zone[]")).toBe("[]time.Time"));
+  test("a two-dimensional array nests", () => expect(mapSqlTypeToTS("integer[][]")).toBe("number[][]"));
+  test("Zod and Python type the element too", () => {
+    expect(mapSqlTypeToZod("integer[]")).toBe("z.array(z.number())");
+    expect(mapSqlTypeToPython("integer[]")).toBe("list[int]");
+  });
+  test("the _text ARRAY spelling still names no element", () =>
+    expect(mapSqlTypeToTS("_text ARRAY")).toBe("unknown[]"));
+
+  test("generateCode writes the element type and no unused import", () => {
+    const schema: DetailedObject = {
+      name: "pg",
+      kind: "table",
+      path: ["pg"],
+      indexes: [],
+      columns: [{ name: "tags", type: "text[]", nullable: false, isPrimary: false }],
+    };
+    const code = generateCode("go", schema);
+    expect(code).toContain("Tags []string");
+    expect(code).not.toContain('import "time"');
+  });
 });

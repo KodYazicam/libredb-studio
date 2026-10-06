@@ -108,21 +108,38 @@ type TypeClass =
   | { kind: "string" };
 
 const classifySqlType = (sqlType: string): TypeClass => {
-  let t = sqlType.toLowerCase().trim();
+  // The original spelling is kept beside the lowercased one: the width-explicit
+  // integer family below is read case-sensitively, because `Int8` and `int8` are
+  // different types - ClickHouse's 8-bit integer and PostgreSQL's 64-bit one -
+  // and the two readings agree on no language's type.
+  let original = sqlType.trim();
+  let t = original.toLowerCase();
   // ClickHouse's `Nullable(...)` wrapper names nullability, which the column's own
   // `nullable` flag carries; unwrapping it keeps the inner type visible to the
   // container test below, so `Nullable(Array(String))` is a list of strings.
-  while (t.startsWith("nullable(") && t.endsWith(")")) t = t.slice(9, -1);
+  while (t.startsWith("nullable(") && t.endsWith(")")) {
+    original = original.slice(9, -1);
+    t = t.slice(9, -1);
+  }
+  // PostgreSQL's own array spelling, from `format_type`: a trailing `[]` makes the
+  // type an array of whatever precedes it (`integer[]`, `timestamp with time
+  // zone[]`), and a second `[]` nests. The internal `_text` spelling and the word
+  // `ARRAY` name no element, so those keep the bare-array treatment below.
+  if (t.endsWith("[]")) return { kind: "array", element: classifySqlType(original.slice(0, -2)) };
   // Containers FIRST, before any numeric word: an `Array(Int32)` contains `int`,
   // and the int test used to win. The element sits between the first `(` and the
   // last `)` of the whole spelling, which also holds for one nested level
   // (`Array(Nullable(String))`). A spelling with no parentheses (PostgreSQL's
-  // `_text ARRAY`) names no element, and a tuple names several, so both stay bare.
+  // `_text ARRAY`, Cassandra's `list<timestamp>`) names no element, and a tuple
+  // names several, so all of them stay bare.
+  // The element is sliced from the ORIGINAL spelling, so a ClickHouse `Int32`
+  // inside `Array(Int32)` reaches the case-sensitive width test below as `Int32`
+  // and not as the lowercased `int32`, which is a different type's spelling.
   const container = /\b(array|list|map|tuple)\b/.exec(t);
   if (container !== null) {
     const open = t.indexOf("(");
     const close = t.lastIndexOf(")");
-    const inner = open >= 0 && close > open ? t.slice(open + 1, close) : null;
+    const inner = open >= 0 && close > open ? original.slice(open + 1, close) : null;
     if (container[1] === "map") {
       const comma = inner === null ? -1 : inner.indexOf(",");
       if (inner !== null && comma > 0) {
@@ -137,17 +154,28 @@ const classifySqlType = (sqlType: string): TypeClass => {
     if (container[1] !== "tuple" && inner !== null) return { kind: "array", element: classifySqlType(inner) };
     return { kind: "array" };
   }
-  // 64-bit integers before the generic int word: a `bigint`, an `int8`, a ClickHouse
-  // `Int64`/`UInt64` or a `bigserial` is a wider integer than the languages' default
-  // int, and the API carries one past 2^53 as a string, so the class is its own.
-  if (/\b(bigint|int8|int64|uint64|bigserial)\b/.test(t)) return { kind: "int64" };
-  if (t.includes("int") || t.includes("serial")) return { kind: "integer" };
+  // ClickHouse's width-explicit family, spelled CamelCase and read
+  // case-sensitively: `Int8`, `Int16` and `Int32` are 8/16/32-bit integers, while
+  // `Int64`, `UInt64` and the wider ones are the 64-bit class. A lowercase `int8`
+  // is PostgreSQL's spelling of BIGINT and is read by the token test below, which
+  // is why the two are not one rule.
+  const width = /\bU?Int(\d+)\b/.exec(original);
+  if (width !== null) return Number(width[1]) >= 64 ? { kind: "int64" } : { kind: "integer" };
+  // Integer spellings are WHOLE TOKENS, never a substring: `point`, `interval`
+  // and `geo_point` each carry `int` as characters and none is an integer type,
+  // and the substring test typed them `int`/`Integer`/`Int` in three languages
+  // (#1446 review).
+  if (/\b(bigint|int8|int64|uint64|bigserial|serial8)\b/.test(t)) return { kind: "int64" };
+  if (/\b(int|integer|int2|int4|smallint|tinyint|mediumint|serial|serial2|serial4|smallserial|varint)\b/.test(t)) {
+    return { kind: "integer" };
+  }
   // Two numeric families, because Go and Java spell them differently: the
   // single-precision family (float, real) and the wide one (double, decimal,
   // numeric, and a type spelled `number`, which is LibreDB's and Oracle's word).
   if (t.includes("float") || t.includes("real")) return { kind: "float" };
-  if (t.includes("double") || t.includes("decimal") || t.includes("numeric") || /\bnumber\b/.test(t))
+  if (t.includes("double") || t.includes("decimal") || t.includes("numeric") || /\bnumber\b/.test(t)) {
     return { kind: "double" };
+  }
   if (t.includes("bool")) return { kind: "boolean" };
   if (t.includes("date") || t.includes("time")) return { kind: "datetime" };
   if (t.includes("json")) return { kind: "json" };
@@ -449,9 +477,12 @@ export function generateCode(lang: Language, table: DetailedObject): string {
         const nullable = c.nullable ? "*" : "";
         return `\t${goFieldName(c.name)} ${nullable}${goType} \`json:"${c.name}" db:"${c.name}"\``;
       });
-      const needsTime = columns.some(
-        (c) => decidableType(c).toLowerCase().includes("date") || decidableType(c).toLowerCase().includes("time"),
-      );
+      // The import follows the MAPPED type, not the declared string: a container
+      // the classifier cannot see into (Cassandra's `list<timestamp>`, ClickHouse's
+      // `Tuple(DateTime, Int32)`) maps to `[]interface{}` and `map[string]interface{}`,
+      // and an import decided from the raw text was emitted beside a type that never
+      // uses it, which `go build` refuses (#1446 review).
+      const needsTime = columns.some((c) => mapSqlTypeToGo(decidableType(c)).includes("time.Time"));
       const imports = needsTime ? '\nimport "time"\n' : "";
       return `package models${imports}\n\ntype ${name} struct {\n${fields.join("\n")}\n}`;
     }
@@ -466,9 +497,8 @@ export function generateCode(lang: Language, table: DetailedObject): string {
       });
       const aliased = columns.some((c) => !PYTHON_IDENTIFIER.test(toSnakeCase(c.name)));
       const needsOptional = columns.some((c) => c.nullable);
-      const needsDatetime = columns.some(
-        (c) => decidableType(c).toLowerCase().includes("date") || decidableType(c).toLowerCase().includes("time"),
-      );
+      // Mapped type, for the same reason as Go's `time` import above.
+      const needsDatetime = columns.some((c) => mapSqlTypeToPython(decidableType(c)).includes("datetime"));
       const imports: string[] = [`from dataclasses import ${aliased ? "dataclass, field" : "dataclass"}`];
       if (needsOptional) imports.push("from typing import Optional");
       if (needsDatetime) imports.push("from datetime import datetime");
@@ -481,9 +511,10 @@ export function generateCode(lang: Language, table: DetailedObject): string {
         if (IDENTIFIER.test(styled)) return `    private ${javaType} ${styled};`;
         return `    @JsonProperty("${stringLiteral(c.name)}")\n    private ${javaType} ${javaFieldName(c.name)};`;
       });
-      const needsLocalDateTime = columns.some(
-        (c) => decidableType(c).toLowerCase().includes("date") || decidableType(c).toLowerCase().includes("time"),
-      );
+      // Mapped type, like Go's `time` and Python's `datetime` above, and like
+      // `needsMap` already was: a container that maps to `Object[]` or
+      // `Map<String, Object>` names no LocalDateTime, whatever its element text.
+      const needsLocalDateTime = columns.some((c) => mapSqlTypeToJava(decidableType(c)).includes("LocalDateTime"));
       const needsMap = columns.some((c) => mapSqlTypeToJava(decidableType(c)).startsWith("Map<"));
       const needsJsonProperty = columns.some((c) => !IDENTIFIER.test(toCamelCase(c.name)));
       const imports: string[] = [];
