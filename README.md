@@ -196,11 +196,12 @@ what comes back, and finishes by composing a report whose every claim cites the 
   and `EXPLAIN ANALYZE` is default-denied because it would run the statement. This pipeline is the
   agent's alone: statements you run yourself in the editor call the provider directly
   (`src/app/api/db/query/route.ts:44`) and are neither policy-checked nor audited this way.
-- **Agent mode reads PostgreSQL, SQLite, DuckDB and SQL Server only.** The read-only profile is
+- **Agent mode reads PostgreSQL, SQLite, DuckDB, SQL Server and MySQL.** The read-only profile is
   database-native, so it exists only where a provider implements it — `queryReadOnly` on
-  `postgres.ts`, `sqlite.ts`, `duckdb/index.ts` and `mssql.ts`, and nowhere else. On any other engine
-  an Agent-mode run whose workflow sends statements is refused when it is started, before a run is
-  opened, and any that reaches the provider factory ends `engine-unsupported`. **Plan** mode opens on
+  `postgres.ts`, `sqlite.ts`, `duckdb/index.ts`, `mssql.ts` and `mysql.ts`, and nowhere else. On any
+  other engine an Agent-mode run whose workflow sends statements is refused when it is started,
+  before a run is opened, and any that reaches the provider factory ends `engine-unsupported`.
+  **Plan** mode opens on
   every connection — the model there is toolless, runs no statement of yours, writes nothing, and
   drafts a statement for you to run yourself. Its GROUNDING reaches every engine: on PostgreSQL and
   SQLite the server composes catalog statements itself, and on every other connection it asks that

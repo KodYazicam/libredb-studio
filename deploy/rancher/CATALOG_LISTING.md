@@ -62,9 +62,9 @@ What gets mailed is `pcsc-listing.html` beside this file, not the sections below
 > probe instead of writing a literal, which is why `DECLARES_EXPLAIN_FORMAT` in
 > `tests/unit/marketplace-copy.test.ts` carries a second alternative for them. Alongside it is the read-only agent rail
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
-> which executes statements on PostgreSQL, SQLite, DuckDB and SQL Server only (`queryReadOnly`
-> exists on those four providers alone), with the database and not the IDE refusing the write. Do
-> NOT write "in a read-only session": that is true of three of the four and false of SQL Server,
+> which executes statements on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL only (`queryReadOnly`
+> exists on those five providers alone), with the database and not the IDE refusing the write. Do
+> NOT write "in a read-only session": that is true of four of the five and false of SQL Server,
 > which has no read-only transaction and no session-level read-only switch, and bounds the run by
 > a principal verified at open to be unable to write plus an optimizer admission per statement
 > (`docs/providers/mssql.md`). "Never writes" is engine-independent and is the sentence to use.
@@ -155,7 +155,7 @@ mutation (`DELETE`) is off by default, and Druid SQL has no `UPDATE`, no `DELETE
 model) writes up a query in plain English from the engine's own EXPLAIN plan, on
 PostgreSQL, MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Trino and
 Databend, the engines that return one. It also runs a read-only investigation agent on PostgreSQL,
-SQLite, DuckDB and SQL Server whose every claim cites the result it came from, and that never writes:
+SQLite, DuckDB, SQL Server and MySQL whose every claim cites the result it came from, and that never writes:
 the database, not the IDE, is what refuses writes and DDL. It stays off unless
 configured.
 
@@ -177,7 +177,7 @@ versions are documented and validated for every release.
 - Optional AI assistance (Gemini, OpenAI, or a self-hosted model; off by default):
   plain-English query explanation on the engines that return an EXPLAIN plan (PostgreSQL,
   MySQL, SQLite, libSQL, DuckDB, Couchbase, ClickHouse, Apache Druid, Trino, Databend). Plus a
-  read-only investigation agent on PostgreSQL, SQLite, DuckDB and SQL Server that never writes — the
+  read-only investigation agent on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL that never writes — the
   database, not the IDE, is what refuses the write
 - Hardened chart defaults: non-root, read-only root filesystem, NetworkPolicy, PDB,
   HPA, Ingress/TLS
