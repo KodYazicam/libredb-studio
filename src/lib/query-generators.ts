@@ -769,6 +769,16 @@ const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Ob
   // listing, or an object's preview, and Generate Command adds reads as comments. The path is the provider's own,
   // [bucket] or [<bucket>/<key>]. No shipped click reaches them in v1 (a bucket or object row opens its Source tab).
   // Every text is a command the console's parser accepts, or a note.
+  // MQTT has no query console at all: its surface is the Keys panel, and a declared key-browser kind opens a
+  // topic's value in its Source tab rather than a generated read, so these are reached only by a path that
+  // asks for text where there is none. They answer a sentence saying so, never a statement, because a
+  // statement would be a command this provider cannot send.
+  mqtt: {
+    table: (path) =>
+      `// MQTT has no query console. ${objectSegment(path)} opens in its Source tab from the Keys panel.`,
+    select: (path) =>
+      `// MQTT has no query console. ${objectSegment(path)} opens in its Source tab from the Keys panel.`,
+  },
   s3: {
     table: (path) => s3TableQuery(path),
     select: (path) => s3SelectQuery(path),
@@ -1167,7 +1177,10 @@ export function generateSelectQuery(
       "\n",
     );
   }
-  const cols = columns.map((c) => `  ${quoteIdentifier(c.name, capabilities)}`).join(",\n") || "  *";
+  // Columns the engine refuses to project in a SELECT list (e.g. search mapped types like `flattened`, #1459)
+  // are omitted so the starter query runs; an index holding only unprojectable columns falls back to `*`.
+  const projectable = columns.filter((c) => c.projectable !== false);
+  const cols = projectable.map((c) => `  ${quoteIdentifier(c.name, capabilities)}`).join(",\n") || "  *";
   // Oracle
   if (capabilities.defaultPort === 1521) {
     return `SELECT\n${cols}\nFROM ${table}\nWHERE 1=1\nFETCH FIRST 100 ROWS ONLY${terminator(capabilities)}`;

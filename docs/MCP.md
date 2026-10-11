@@ -10,9 +10,9 @@ It is off by default.
   It speaks revision 2026-07-28 and, without sessions, the 2025 revisions 2025-11-25 and 2025-06-18 that most clients still use.
 - Three tools, each annotated read-only and closed-world:
   - `list_connections` lists the connections opted in for MCP that your token's role may use, without credentials.
-    It works for every engine but etcd, Oxia, S3-compatible object storage and Kubernetes, whose connections the seed file cannot opt in.
+    It works for every engine but etcd, Oxia, S3-compatible object storage, Kubernetes and MQTT, whose connections the seed file cannot opt in.
   - `inspect_schema` lists one connection's tables with their columns and, on request, their indexes.
-    It works on every engine but etcd, Oxia, S3-compatible object storage and Kubernetes: it lists every object kind the engine reads rows from, such as views beside tables, MongoDB collections, Redis keyspaces and search indexes, and `kind` names which one each entry is.
+    It works on every engine but etcd, Oxia, S3-compatible object storage, Kubernetes and MQTT: it lists every object kind the engine reads rows from, such as views beside tables, MongoDB collections, Redis keyspaces and search indexes, and `kind` names which one each entry is.
     A column an engine only inferred from sampled data, rather than read from a declaration, is never listed, so a table may hold fields the answer does not show; `columns_omitted` counts only the columns beyond the 50-column cap, and agent grounding and the AI panels never receive such a column either.
     On Milvus it lists the collection's declared fields, with the dynamic field as one `$meta` column and never a key inside it.
     On Qdrant it lists payload-index fields and vectors only, and says that other payload keys may exist: the keys Studio samples from points never reach an MCP client.
@@ -291,9 +291,10 @@ For the first few seconds after that service starts, `opencode mcp list` can say
 | PostgreSQL | Studio stops waiting; the statement runs on until `statement_timeout`, which is set to the time left | The database ends the statement, and the client gets the timeout answer |
 | SQL Server | Studio stops waiting; the statement runs until the provider's deadline cancels it | The provider cancels the statement, and the client gets the timeout answer |
 | DuckDB | Studio stops waiting; the statement runs to completion and its result is discarded | The client gets the timeout answer near `timeout_ms`, and the statement runs on |
-| SQLite | The driver is synchronous, so the whole Studio process, the UI included, waits until the statement ends | The client is answered after the statement ends |
+| SQLite | An on-disk statement runs in a killable child process, so the client is answered at `timeout_ms` | The statement is killed at `timeout_ms`; an in-memory statement still runs to completion |
 
-- One MCP query against a large SQLite table stops the Studio process while it runs.
+- One MCP query against a large SQLite table no longer stops the Studio process: the read runs in a
+  child process and is killed at `timeout_ms`; only an in-memory SQLite read still blocks it.
 - An MCP call on a LibreDB connection that no Studio session holds open opens the file itself and keeps its exclusive lock until that handle has been idle for 30 minutes.
   Every MCP call resets that clock, and meanwhile opening the connection in the Studio editor fails with 503, `LibreDB file is already open by another process (exclusive lock)`.
   When the editor opened the file first, MCP borrows its handle and nothing conflicts ([`docs/providers/libredb.md`](providers/libredb.md#421-on-disk-format-locking-and-version-compatibility-02x)).

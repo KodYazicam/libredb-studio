@@ -579,6 +579,7 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   s3: NOTHING_STANDS_ALONE,
   // Kubernetes has no statement form for an export.
   kubernetes: NOTHING_STANDS_ALONE,
+  mqtt: NOTHING_STANDS_ALONE,
   // Measured by M08a and M08c on the pinned image: each was created and read back unbounded (`String`, `Timestamp`
   // with microseconds, `Binary`). Every other bare name is re-spelled from its family (design 7.2, X01).
   databend: ["varchar", "timestamp", "binary"],
@@ -779,6 +780,7 @@ const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   s3: "standard-hex",
   // Kubernetes has no statement language for a value either; the inert default, as Oxia's.
   kubernetes: "standard-hex",
+  mqtt: "standard-hex",
   // Measured on SQL Server 2022: `SELECT CONVERT(varchar(64), 0x0102deadbeef, 2)`
   // answers `0102DEADBEEF`, `DATALENGTH(0x)` answers 0 — so the empty case is spelled
   // — and `SELECT X'0102'` is `Msg 207 … Invalid column name 'X'`.
@@ -941,10 +943,15 @@ function pad(value: number, width = 2): string {
  */
 function oracleDateLiteral(value: Date, shape: OracleDateShape): string {
   const utc = shape === "zoned";
-  const date = `${pad(utc ? value.getUTCFullYear() : value.getFullYear(), 4)}-${pad((utc ? value.getUTCMonth() : value.getMonth()) + 1)}-${pad(utc ? value.getUTCDate() : value.getDate())}`;
+  const year = utc ? value.getUTCFullYear() : value.getFullYear();
+  // A BC year keeps its sign in front of the zeros (`-0044`, never `0-44`) and takes the signed
+  // `SYYYY` mask, as `oracleTextLiteral` does for the provider's text (#1498).
+  const bc = year < 0;
+  const date = `${bc ? "-" : ""}${pad(Math.abs(year), 4)}-${pad((utc ? value.getUTCMonth() : value.getMonth()) + 1)}-${pad(utc ? value.getUTCDate() : value.getDate())}`;
   const time = `${pad(utc ? value.getUTCHours() : value.getHours())}:${pad(utc ? value.getUTCMinutes() : value.getMinutes())}:${pad(utc ? value.getUTCSeconds() : value.getSeconds())}`;
-  if (shape === "date") return `TO_DATE('${date} ${time}', 'YYYY-MM-DD HH24:MI:SS')`;
-  const stamp = `TO_TIMESTAMP('${date} ${time}.${pad(utc ? value.getUTCMilliseconds() : value.getMilliseconds(), 3)}', 'YYYY-MM-DD HH24:MI:SS.FF3')`;
+  const yearMask = bc ? "SYYYY" : "YYYY";
+  if (shape === "date") return `TO_DATE('${date} ${time}', '${yearMask}-MM-DD HH24:MI:SS')`;
+  const stamp = `TO_TIMESTAMP('${date} ${time}.${pad(utc ? value.getUTCMilliseconds() : value.getMilliseconds(), 3)}', '${yearMask}-MM-DD HH24:MI:SS.FF3')`;
   return utc ? `FROM_TZ(${stamp}, 'UTC')` : stamp;
 }
 
@@ -976,9 +983,8 @@ function oracleTextLiteral(text: string, type: "date" | "timestamp"): string | u
 /**
  * The text `Date#toISOString` writes for a year from 0000 to 9999. A year outside that
  * range is written with a sign and six digits (`-000044-…`, `+012026-…`) and does not
- * match: Oracle has no year after 9999, and the `Date` path does not write a BC year
- * Oracle reads back, so that text stays quoted instead of taking a literal the `Date`
- * of the same instant would not get.
+ * match: Oracle has no year after 9999, and a BC year's text is left for a separate change
+ * (the `Date` path itself writes one as `SYYYY`, #1498), so that text stays quoted.
  */
 const ISO_INSTANT_TEXT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 

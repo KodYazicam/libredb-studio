@@ -156,7 +156,15 @@ export type DatabaseType =
   // kubectl-subset console beside the databases. Read-only in this version whatever `readOnly` says. The connection's
   // Password field is a bearer token, Database the default namespace, and `apiPath`, `namespaces` and `tlsServerName`
   // are its own fields; a client certificate rides in the SSL panel.
-  | "kubernetes";
+  | "kubernetes"
+  // MQTT (#1635). A broker's topic tree, read only, over MQTT 5.0 on TCP or TLS by a client of this
+  // repository's own (`src/lib/db/providers/keyvalue/mqtt/`). MQTT has no command that lists topics, so the tree
+  // is built from what a subscription delivers and the provider never claims a read was complete; what it can
+  // prove it reports, and nothing else. The connection is one broker address plus TLS and an optional
+  // credential, with the discovery filter below naming what to subscribe to. Read-only is structural rather
+  // than a mode: the outbound path can encode only CONNECT, SUBSCRIBE, UNSUBSCRIBE, PINGREQ and DISCONNECT, so
+  // no PUBLISH and no Will exists to send.
+  | "mqtt";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -557,6 +565,17 @@ export interface ColumnSchema {
    * keeps a sampled column from every model and MCP surface, because its name was read out of the data.
    */
   provenance?: "sampled";
+  /**
+   * Whether this column can be named in a projection (a SELECT list).
+   *
+   * Search engines (Elasticsearch, OpenSearch) map types that their SQL surfaces refuse to project
+   * by name — e.g. `flattened` on Elasticsearch, or `flat_object`, `unsigned_long` and `version`
+   * on OpenSearch (#1459). Introspection lists the column so the schema tree is honest about the
+   * mapping, but sets this to `false` so starter query generators leave it out of the SELECT list.
+   *
+   * Absent means projectable (`true`), which is the case for ordinary columns across all engines.
+   */
+  projectable?: boolean;
 }
 
 export interface IndexSchema {
@@ -807,7 +826,8 @@ export interface QueryTab {
     | "influxql"
     | "oxia"
     | "s3"
-    | "kubectl";
+    | "kubectl"
+    | "mqtt";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state
