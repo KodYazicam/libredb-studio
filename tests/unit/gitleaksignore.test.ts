@@ -51,10 +51,16 @@ describe(".gitleaksignore", () => {
     // Silo capture sets re-recorded under the reworded blocked-host sentence;
     // they name a branch commit and move onto the squash commit once it lands.
     //
+    // The 8 after THOSE are the same re-recorded cursors as PR #1629's merge
+    // commit re-presents them: the merge brought main's side of the capture
+    // sets into a branch where the files were new, so the scanner attributes
+    // the content to the merge and reports it under fingerprints naming the
+    // merge. Same values, same classification, one presenting commit more.
+    //
     // This number is the point of the test: a suppression is a decision someone
     // has to make on purpose, so both a line silently dropped and a line
     // silently added land here as a failing diff rather than as nothing.
-    expect(contentLines).toHaveLength(51);
+    expect(contentLines).toHaveLength(59);
   });
 
   test("every non-comment, non-blank line is a well-formed fingerprint", () => {
