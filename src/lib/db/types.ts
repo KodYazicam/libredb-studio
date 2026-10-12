@@ -608,7 +608,8 @@ export type ExplainFormat =
   | "druid-native"
   | "trino-json"
   | "duckdb-json"
-  | "databend-text";
+  | "databend-text"
+  | "bigquery-dryrun";
 
 /**
  * How deep an engine's container chain is, in the TYPE rather than only in a derivation.
@@ -1197,6 +1198,13 @@ export interface ProviderCapabilities {
    * reader would guess, and the next one would be added to a provider and forgotten here.
    */
   tablesAreDerivedGroupings?: boolean;
+  /**
+   * True when a bare table name resolves nowhere unless the connection names a default container, so a completion
+   * must insert the container too even when no default is known. BigQuery: a table is addressed `dataset.table`, and
+   * with no default dataset a bare name is an error. Absent means a bare name may resolve, which keeps the editor's
+   * rule: qualify only outside a KNOWN default container.
+   */
+  tablesNeedContainer?: boolean;
   /**
    * True when the engine admits exactly ONE open handle per database FILE, because
    * opening the file takes an exclusive lock: a second open of a file this process
@@ -1804,13 +1812,37 @@ export interface DatabaseProvider {
   connect(): Promise<void>;
 
   /**
-   * What the server cautioned while `connect()` opened the connection, in the server's own
-   * words; empty when it said nothing worth showing. A connect that succeeded is not always
-   * the connection asked for: Materialize accepts a session database that does not exist and
-   * reports it only as a startup NOTICE (#1401). Optional, because most engines have no such
-   * channel; `POST /api/db/test-connection` reads it when it is there.
+   * Cautions about the connection `connect()` just opened, built only from what `connect()`
+   * learned or derived on the requests it made anyway, with no request of its own. The
+   * server's words where the server gave them; empty when there is nothing worth showing. A
+   * connect that succeeded is not always the connection asked for: Materialize accepts a
+   * session database that does not exist and reports it only as a startup NOTICE (#1401).
+   * Optional, because most engines have no such channel; `POST /api/db/test-connection` reads
+   * it when it is there. A caution that needs a request of its own belongs in
+   * `testConnectionWarnings()`, because `connect()` also runs on every background cache miss,
+   * where nobody reads a caution.
    */
   connectWarnings?(): QueryWarning[];
+
+  /**
+   * Extra probes run only when a user asks to test the connection; cautions, never an error.
+   *
+   * `POST /api/db/test-connection` is its one caller (pinned by a source scan), and both Test
+   * Connection and the connection dialog's Save post to it. It calls the method once,
+   * after a successful `connect()` and after `connectWarnings()`, on the provider it built for
+   * that click and never on a cached or borrowed one, and lists its cautions after
+   * `connectWarnings()`'s. So each request it makes is paid for by a user who asked and by no
+   * background path. Any caution turns the dialog's answer amber, so a connection with nothing
+   * to caution about answers `[]`. A rejection is a defect: the route shows one caution of its
+   * own in its place and the connection still counts as tested. It bounds its own probes with a
+   * deadline, because the route waits for it before answering. The dialog's second Save stops
+   * again when it meets a caution other than the one the first showed, so a caution's text
+   * depends only on what the server reports, never on timing: no count a deadline cut short, and a
+   * fixed order. A caution is the provider's own sentence, never a caught error's or a library's
+   * text, because every user who can test the connection reads it. Optional, because most engines
+   * have nothing to check beyond `connect()`.
+   */
+  testConnectionWarnings?(): Promise<QueryWarning[]>;
 
   /**
    * Close all connections and cleanup resources
