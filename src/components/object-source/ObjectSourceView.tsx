@@ -1,7 +1,7 @@
 "use client";
 
 import Editor from "@monaco-editor/react";
-import { FileWarning, LoaderCircle, RefreshCw, TriangleAlert } from "lucide-react";
+import { FileWarning, Info, LoaderCircle, RefreshCw, TriangleAlert } from "lucide-react";
 import type * as Monaco from "monaco-editor";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApplyPreviewDialog, type ApplyPreviewState } from "./ApplyPreviewDialog";
@@ -20,7 +20,7 @@ import {
 import { partEditability, type SourceEditability } from "./source-editable";
 import { Button } from "@/components/ui/button";
 import { isObjectEditBuildResponseShape, isObjectEditOutcomeShape } from "@/lib/api/object-edit-wire";
-import { isSourcePartUnavailable, SOURCE_CHARACTER_LIMIT } from "@/lib/db/object-kinds";
+import { isSourcePartStatement, isSourcePartUnavailable, SOURCE_CHARACTER_LIMIT } from "@/lib/db/object-kinds";
 import { pathKey } from "@/lib/db/object-path";
 import type {
   ObjectEditConsequenceClass,
@@ -142,6 +142,14 @@ export interface ObjectSourceViewProps {
   readonly onApplyInFlightChange?: (inFlight: boolean) => void;
   /** MUST be stable across renders, or the read effect re-issues for ever. */
   readonly onChange: (patch: ObjectSourcePatch) => void;
+  /**
+   * The shell holds every read on this connection until the person uses it, because the page opened
+   * it by itself and any request to it can resume billed compute (CL-CORE-2). A held pane with
+   * nothing in hand reads nothing and offers the read instead; absent means not held.
+   */
+  readonly readHeld?: boolean;
+  /** What the held pane's action calls: the person's use of the connection, which lifts the hold. */
+  readonly onUse?: () => void;
 }
 
 /** The sentence for a body neither shell can draw, which is OUR fact and not the engine's. */
@@ -149,6 +157,10 @@ const UNRENDERABLE = "The source read answered with a body this viewer cannot re
 
 /** The sentence for a well-formed definition that names a DIFFERENT object. Also our fact. */
 const MISMATCHED = "The source read answered with a definition for another object.";
+
+/** What a held pane says instead of reading, where the tree says `BILLED_COMPUTE_HOLD`. */
+export const SOURCE_BILLED_COMPUTE_HOLD =
+  "Studio restored this tab without reading the definition, because any request to this connection can resume compute that is billed while it runs.";
 
 /** The sentence for a pane whose connection is gone. Also our fact, and the shell's own state. */
 const DISCONNECTED = "This connection is no longer open, so this definition cannot be read here.";
@@ -538,6 +550,8 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
     onApplied,
     onApplyInFlightChange,
     onChange: patchTab,
+    readHeld,
+    onUse,
   } = props;
   const theme = useEffectiveTheme();
   const baseId = useId();
@@ -597,6 +611,7 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
    */
   const asked = useRef<Set<string>>(new Set());
   const needsRead = sourceDocument === undefined && failure === undefined;
+  const held = readHeld === true && needsRead && connection !== null;
 
   useEffect(() => {
     if (!needsRead || connection === null) {
@@ -610,6 +625,8 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
       asked.current.delete(address);
       return;
     }
+    // Held: nothing is sent, and the address stays unasked so the read goes out once the hold lifts.
+    if (held) return;
     if (asked.current.has(address)) return;
     asked.current.add(address);
     /*
@@ -660,7 +677,7 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
     );
     // `path` and `connection` are read through `address`; `reader` and `onChange` are documented
     // as stable, and a change in either is answered by the address guard rather than a re-issue.
-  }, [address, needsRead, refreshToken, connection, path, kind, reader, onChange]);
+  }, [address, needsRead, held, refreshToken, connection, path, kind, reader, onChange]);
 
   /**
    * The SECOND entry, and the one round 1 left unguarded (#789).
@@ -1518,6 +1535,22 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
             </Button>
           )}
         </div>
+      ) : held ? (
+        <div className="flex-1 px-3 py-8 text-center text-muted-foreground" data-testid="object-source-held">
+          <p className="mx-auto max-w-xl text-xs leading-relaxed">{SOURCE_BILLED_COMPUTE_HOLD}</p>
+          {onUse !== undefined && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-3 h-7 px-3 text-xs"
+              data-testid="object-source-held-read"
+              onClick={onUse}
+            >
+              Read definition
+            </Button>
+          )}
+        </div>
       ) : part === undefined ? (
         // `output` rather than a div carrying role="status": both announce, and `jsx-a11y`'s
         // prefer-tag-over-role is an ERROR in this repository, not a warning. `output` has an
@@ -1569,7 +1602,20 @@ export function ObjectSourceView(props: ObjectSourceViewProps): React.JSX.Elemen
               ? { role: "tabpanel", id: panelId(activeIndex), "aria-labelledby": tabId(activeIndex) }
               : {})}
           >
-            {isSourcePartUnavailable(part) ? (
+            {isSourcePartStatement(part) ? (
+              /*
+               * A NEUTRAL STATEMENT, asked BEFORE the refusal because `isSourcePartUnavailable`
+               * answers true for it too. It is a fact about the object, so it carries none of the
+               * failure grammar below: no "could not be read" heading and no warning colour. It is
+               * still not a definition, so there is no editor here either.
+               */
+              <div className="flex-1 px-3 py-8 text-center text-muted-foreground" data-testid="object-source-statement">
+                <Info aria-hidden="true" strokeWidth={1.5} className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                <p className="mx-auto max-w-xl break-words text-xs" data-testid="object-source-statement-message">
+                  {part.unavailable}
+                </p>
+              </div>
+            ) : isSourcePartUnavailable(part) ? (
               /*
                * A DIFFERENT component, not an editor with an empty buffer. This is the
                * composition DBeaver gets wrong, measured in its source: an unreadable

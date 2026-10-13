@@ -452,6 +452,34 @@ describe("SeedConnectionSchema: an S3 connection is not offered to MCP", () => {
   });
 });
 
+describe("SeedConnectionSchema: a Firestore connection (Firestore spec 3.3, 7)", () => {
+  const firestore = { id: "orders", name: "Orders", type: "firestore", database: "acme-orders", roles: ["*"] };
+
+  it("is accepted with no host, port or credential, the shape of an operator seed on the server's identity", () => {
+    const result = SeedConnectionSchema.safeParse({ ...firestore, schema: "orders-eu", managed: true });
+    expect(result.success).toBe(true);
+    expect(result.data?.type).toBe("firestore");
+    expect(result.data?.schema).toBe("orders-eu");
+  });
+
+  it("fails a seed with mcp: true, naming mcp and the type", () => {
+    const result = SeedConnectionSchema.safeParse({ ...firestore, mcp: true });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => [issue.path.join("."), issue.message])).toEqual([
+      [
+        "mcp",
+        "mcp is not offered for firestore: the product does not expose this engine to MCP clients. Remove mcp from this connection.",
+      ],
+    ]);
+  });
+
+  it("keeps readOnly: true, which its provider enforces", () => {
+    const result = SeedConnectionSchema.safeParse({ ...firestore, readOnly: true });
+    expect(result.success).toBe(true);
+    expect(result.data?.readOnly).toBe(true);
+  });
+});
+
 describe("SeedConnectionSchema: Db2's consent to a cleartext password (#786)", () => {
   const db2 = {
     id: "warehouse",
@@ -581,6 +609,88 @@ describe("SeedConnectionSchema: Kafka's SASL mechanism", () => {
 
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["saslMechanism"]);
+  });
+});
+
+/**
+ * OPC UA's five fields (#1677), and the reason this block exists at all.
+ *
+ * THE PIN IS THE PROVIDER'S WHOLE SAFETY PROPERTY, AND ZOD DROPPED IT IN SILENCE. Measured before
+ * the fields were declared: a seed file naming `securityMode: "SignAndEncrypt"` and a thumbprint
+ * parsed, validated and reached the provider with NEITHER - an unpinned connection, dialled with
+ * the library's default, which trusts a server on first sight and keeps trusting a replacement
+ * certificate after the server is rebuilt. An operator who seeded a pinned plant connection was
+ * handed the one thing the mode exists to prevent, and nothing anywhere said so.
+ */
+describe("SeedConnectionSchema: OPC UA's mode, pin and deployment paths", () => {
+  const opcua = {
+    id: "plant",
+    name: "Plant",
+    type: "opcua",
+    host: "opc.tcp://plc.ornek.net:4840/UA/Server",
+    ssl: { mode: "disable" },
+    roles: ["*"],
+  };
+
+  it("carries the mode, the pin and the three deployment paths through validation", () => {
+    const result = SeedConnectionSchema.safeParse({
+      ...opcua,
+      securityMode: "SignAndEncrypt",
+      serverCertificateThumbprint:
+        "B9:43:2E:D1:31:E3:00:92:D2:A0:61:92:84:76:3A:40:3C:33:FC:39:29:54:67:28:86:4B:27:B4:75:C9:52:9A",
+      securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+      clientCertificatePath: "/run/secrets/opcua/client.der",
+      clientPrivateKeyPath: "/run/secrets/opcua/client.pem",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.securityMode).toBe("SignAndEncrypt");
+    expect(result.data?.serverCertificateThumbprint).toBe(
+      "B9:43:2E:D1:31:E3:00:92:D2:A0:61:92:84:76:3A:40:3C:33:FC:39:29:54:67:28:86:4B:27:B4:75:C9:52:9A",
+    );
+    expect(result.data?.securityPolicyUri).toBe("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
+    expect(result.data?.clientCertificatePath).toBe("/run/secrets/opcua/client.der");
+    expect(result.data?.clientPrivateKeyPath).toBe("/run/secrets/opcua/client.pem");
+  });
+
+  it.each(["None", "Sign", "SignAndEncrypt"])("accepts the mode %s, which is the server's own word", (mode) => {
+    const result = SeedConnectionSchema.safeParse({ ...opcua, securityMode: mode });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.securityMode).toBe(mode);
+  });
+
+  it.each([
+    ["a mode this engine does not have", "verify-full"],
+    ["a mode spelled in the wrong case", "signandencrypt"],
+    ["an empty mode", ""],
+    ["an environment reference, which is resolved for no such field", "${OPCUA_MODE}"],
+  ])("rejects %s, naming the field", (_label, mode) => {
+    const result = SeedConnectionSchema.safeParse({ ...opcua, securityMode: mode });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path.join("."))).toEqual(["securityMode"]);
+  });
+
+  it.each([
+    "securityMode",
+    "serverCertificateThumbprint",
+    "securityPolicyUri",
+    "clientCertificatePath",
+    "clientPrivateKeyPath",
+  ])("refuses %s on another engine, where no provider reads it", (field) => {
+    const result = SeedConnectionSchema.safeParse({
+      id: "pg",
+      name: "Postgres",
+      type: "postgres",
+      host: "db.ornek.net",
+      ssl: { mode: "verify-full" },
+      roles: ["*"],
+      [field]: field === "securityMode" ? "SignAndEncrypt" : "value",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path.join("."))).toContain(field);
   });
 });
 

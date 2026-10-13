@@ -480,11 +480,14 @@ export type TypedConfirmationAsk =
  * count. The asymmetry is kept on purpose, because changing either answer would change what a menu offers. A
  * declared dialect with no record, which only a host's own declaration can name, is refused, as it always was.
  *
+ * An engine declaring `supportsColumnProfiling: false` is refused before the language rule, whatever it speaks.
+ *
  * Unknown capabilities are not a permission, for the reason `maintenanceControl` gives:
  * `/api/db/provider-meta` answers with nothing both while it is in flight and when it failed.
  */
 export function offersColumnProfiling(capabilities: ProviderCapabilities | undefined): boolean {
   if (capabilities === undefined) return false;
+  if (capabilities.supportsColumnProfiling === false) return false;
   if (capabilities.queryLanguage === "sql") return true;
   const profilesDialect = dialectSpec(capabilities)?.offersColumnProfiling ?? !declaresDialect(capabilities);
   return capabilities.queryLanguage === "json" && profilesDialect;
@@ -536,7 +539,7 @@ export function offersCodeGeneration(capabilities: ProviderCapabilities | undefi
  * PromQL counts series at an instant, which is not the row count this action promises.
  *
  * A declared dialect is offered it only where its record's `offersCountQuery` in `QUERY_DIALECTS`
- * (`src/lib/db/query-dialects.ts`) says so, which none does, and a declared dialect with no record is refused.
+ * (`src/lib/db/query-dialects.ts`) says so, which Firestore's alone does, and a declared dialect with no record is refused.
  *
  * A derived grouping is refused on top of the language, because a Redis `user:*` row is a
  * summary this server built and there is no object to address (#427).
@@ -609,7 +612,9 @@ export type ExplainFormat =
   | "trino-json"
   | "duckdb-json"
   | "databend-text"
-  | "bigquery-dryrun";
+  | "bigquery-dryrun"
+  | "snowflake-json"
+  | "firestore-explain";
 
 /**
  * How deep an engine's container chain is, in the TYPE rather than only in a derivation.
@@ -960,12 +965,28 @@ export interface ProviderCapabilities {
    * `"kubectl"` is the Kubernetes provider's: one statement of a read-only kubectl subset per run. It landed through one
    * record in each registry and no arm anywhere else.
    *
+   * `"firestore"` is the Firestore provider's: one statement of a read-only subset of the Admin SDK's query chain per
+   * run, `db.collection(...)` and the rest of its chain.
+   *
    * Those arms are now records: a member added here does not compile until it has one in each of
    * `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`)
    * and `DIALECT_GENERATORS` (`src/lib/query-generators.ts`), and every other reader of this field and of
    * `queryLanguage` is held to a closed list by `tests/unit/lib/dialect-reader-allowlist.test.ts`.
    */
-  queryDialect?: "libredb" | "redis" | "kafka" | "etcd" | "milvus" | "qdrant" | "oxia" | "s3" | "mqtt" | "kubectl";
+  queryDialect?:
+    | "libredb"
+    | "redis"
+    | "kafka"
+    | "etcd"
+    | "milvus"
+    | "qdrant"
+    | "oxia"
+    | "s3"
+    | "mqtt"
+    | "firestore"
+    | "rabbitmq"
+    | "kubectl"
+    | "opcua";
   supportsExplain: boolean;
   /**
    * Present iff supportsExplain is true (enforced by provider tests).
@@ -1055,6 +1076,15 @@ export interface ProviderCapabilities {
    * permissive default.
    */
   supportsResultPagination?: boolean;
+  /**
+   * Whether the column profiler may be offered for this SQL engine, read by `offersColumnProfiling`.
+   *
+   * An SQL engine declares false when a profile's full-column scans would bill a warehouse per click and cannot be
+   * cancelled; absent keeps the SQL rule.
+   * Only `false` is accepted, so the field can withhold the profiler and never grant it to an engine the language
+   * rule refuses.
+   */
+  supportsColumnProfiling?: false;
   /**
    * Whether THIS PROVIDER implements the interactive transaction session that
    * `POST /api/db/transaction` drives — `beginTransaction()` / `commitTransaction()`
@@ -1518,11 +1548,21 @@ export interface ProviderCapabilities {
    * handed one container as the whole database. It is for an engine whose container count makes a whole walk cost
    * hundreds of reads.
    *
+   * `whenNoDefault`, where the deepest level marks no session default: `{ walk: "parent-default-children" }` reads
+   * the children of the one container the level above marks `isSessionDefault`, in the walk's order, minus each
+   * child whose name `skip` holds, within the walk's own limits and timer. Absent, or with no single parent default,
+   * no container is read beyond `alsoWalk`, as before. It is for an engine whose session has a catalog and no schema
+   * when only the catalog is configured.
+   *
    * Optional for the same published-interface reason as `containerLevels`.
    */
   agentWalkScope?: {
     readonly mode: "session-default";
     readonly alsoWalk?: readonly (readonly string[])[];
+    readonly whenNoDefault?: {
+      readonly walk: "parent-default-children";
+      readonly skip?: readonly string[];
+    };
   };
   /**
    * The row actions this engine offers on objects of named kinds, in menu order. See `KindRowAction`.
@@ -1837,10 +1877,11 @@ export interface DatabaseProvider {
    * own in its place and the connection still counts as tested. It bounds its own probes with a
    * deadline, because the route waits for it before answering. The dialog's second Save stops
    * again when it meets a caution other than the one the first showed, so a caution's text
-   * depends only on what the server reports, never on timing: no count a deadline cut short, and a
-   * fixed order. A caution is the provider's own sentence, never a caught error's or a library's
-   * text, because every user who can test the connection reads it. Optional, because most engines
-   * have nothing to check beyond `connect()`.
+   * depends only on what the server reports, in a fixed order, except a count a check deadline
+   * cut short, which can differ between the two clicks; the dialog then shows the new text once
+   * more before saving. A caution is the provider's own sentence, never a caught error's or a
+   * library's text, because every user who can test the connection reads it. Optional, because
+   * most engines have nothing to check beyond `connect()`.
    */
   testConnectionWarnings?(): Promise<QueryWarning[]>;
 
@@ -1848,6 +1889,20 @@ export interface DatabaseProvider {
    * Close all connections and cleanup resources
    */
   disconnect(): Promise<void>;
+
+  /**
+   * Whether a run this provider started is still running or waiting, so that closing the provider now would end it.
+   *
+   * The factory's idle sweep reads it and keeps an idle cached provider that answers true. Optional, because only a
+   * provider whose `disconnect()` ends running work needs it, and absent reads as false. It answers synchronously from
+   * state the provider holds, sends nothing and never throws; a throw is a defect of the provider, logged as an error,
+   * and the entry is then evicted as it would be without the method. Every run it counts must end at its own deadline,
+   * or a busy entry would be kept for the life of the process.
+   *
+   * A method and not a capability flag, because its answer changes from moment to moment while `getCapabilities()` is
+   * a declaration the censuses read once. `tests/unit/db/runs-in-flight-census.test.ts` pins who declares it.
+   */
+  hasRunsInFlight?(): boolean;
 
   /**
    * Check if provider is currently connected
@@ -3113,6 +3168,36 @@ export type ObjectSourcePart =
       readonly label: string;
       /** The engine's own sentence, unprefixed, never a rewrite of it. */
       readonly unavailable: string;
+    }
+  /**
+   * A neutral statement about the object, never a failure: "this engine cannot show X without
+   * changing it, so nothing is read here". The viewer draws the sentence as plain text, without the
+   * "could not be read" heading the refusal arm gets.
+   *
+   * A SUPERSET of the refusal arm, and that is the point of its shape: `unavailable` carries the
+   * statement's sentence and `statement: true` marks it neutral. Every reader that narrows with
+   * `isSourcePartUnavailable` still lands it on the refusal arm, so the route's rules for a refusal
+   * hold for it unchanged: never truncated, never an `edit`, never a `text` beside it.
+   * `isSourcePartStatement` is the narrowing that tells the two apart, and it accepts `true` only.
+   *
+   * The compiler does NOT keep `statement` off the readable arm: a union admits a property any of
+   * its members declares, so `{ text, ..., statement: true }` type-checks. Run time closes it, as it
+   * closes the text-plus-refusal hybrid: the client's shape check and `assertObjectSurface` refuse a
+   * `statement` key on a part without `unavailable`, and the client then refuses the whole document.
+   *
+   * ADDITIVE ON PURPOSE, for the reason `KindCount` is: this type is published through
+   * `src/exports/types.ts`, so the two existing members stay valid unchanged. The cost is not the
+   * same as `KindCount`'s, and saying so is what a host needs: a consumer that has not heard of
+   * `statement` narrows this member to the refusal arm and shows a neutral fact under "This
+   * definition could not be read", a mislabelled fact where an unknown count state degrades only to
+   * an imprecise number.
+   */
+  | {
+      readonly id: string;
+      readonly label: string;
+      /** The statement itself: a neutral fact about the object, never a failure. */
+      readonly unavailable: string;
+      readonly statement: true;
     };
 
 /**

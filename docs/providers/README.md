@@ -17,6 +17,7 @@ in lockstep with the code (see the tri-sync rule in [`../../CLAUDE.md`](../../CL
 | Redis | `redis` | Key-Value | `ioredis` | JSON | [redis.md](./redis.md) |
 | MongoDB | `mongodb` | Document | `mongodb` | JSON (MQL) | [mongodb.md](./mongodb.md) |
 | Couchbase | `couchbase` | Document | none (HTTP: Query + management REST) | SQL (SQL++) | [couchbase.md](./couchbase.md) |
+| Google Cloud Firestore | `firestore` | Document | none, REST over the shared `node:https` transport (the Firestore REST API v1); `jose` signs service-account grants | The Admin SDK query chain (a read-only subset, parsed by Studio) | [firestore.md](./firestore.md) |
 | ClickHouse | `clickhouse` | SQL | none (HTTP interface) | SQL | [clickhouse.md](./clickhouse.md) |
 | Apache Druid | `druid` | SQL (analytics) | none (HTTP: SQL endpoint) | SQL (Calcite) | [druid.md](./druid.md) |
 | Elasticsearch | `elasticsearch` | SQL (search) | none (HTTP: `_sql` + REST) | SQL (Elasticsearch SQL) | [elasticsearch.md](./elasticsearch.md) |
@@ -24,6 +25,7 @@ in lockstep with the code (see the tri-sync rule in [`../../CLAUDE.md`](../../CL
 | Trino | `trino` | SQL (federated query engine) | none (HTTP: the client protocol, `POST /v1/statement`) | SQL (Trino) | [trino.md](./trino.md) |
 | Databend | `databend` | SQL (analytics) | none, HTTP over the shared `node:http(s)` transport (the query API, `POST /v1/query`) | SQL (Databend) | [databend.md](./databend.md) |
 | BigQuery | `bigquery` | SQL (analytics) | none, REST over the shared `node:https` transport (`jobs.query`); `jose` signs service-account tokens | SQL (GoogleSQL) | [bigquery.md](./bigquery.md) |
+| Snowflake | `snowflake` | SQL (analytics) | none, the SQL API v2 over the shared `node:https` transport; `node:crypto` signs the key-pair JWT | SQL (Snowflake) | [snowflake.md](./snowflake.md) |
 | Apache Cassandra | `cassandra` | SQL (wide-column) | `cassandra-driver` (pure JS) | SQL-shaped (CQL) | [cassandra.md](./cassandra.md) |
 | Prometheus | `prometheus` | Time series | none (HTTP: the Prometheus HTTP API, `/api/v1/*`) | PromQL | [prometheus.md](./prometheus.md) |
 | Apache Kafka | `kafka` | Stream | `@platformatic/kafka` (pure TypeScript) | JSON (a read request) | [kafka.md](./kafka.md) |
@@ -36,13 +38,16 @@ in lockstep with the code (see the tri-sync rule in [`../../CLAUDE.md`](../../CL
 | InfluxDB 3 (SQL) | `influxdb3` | Time series | none, HTTP over the shared `node:http(s)` transport | SQL (Apache DataFusion, read-only) | [influxdb3.md](./influxdb3.md) |
 | S3-compatible object storage | `s3` | Object storage | none, REST over the shared `node:http(s)` transport, signed by Studio's own SigV4 code; `hyparquet` for Parquet previews | AWS CLI read commands (a subset, read-only) | [s3.md](./s3.md) |
 | Kubernetes | `kubernetes` | Platform | none, HTTP over the shared `node:https` transport (the API server's REST API) | kubectl read commands (a subset) | [kubernetes.md](./kubernetes.md) |
+| MQTT | `mqtt` | Key-Value (a broker's topic tree) | `mqtt-packet` (its parser only; the packets Studio sends are Studio's own) | None: no query console | [mqtt.md](./mqtt.md) |
+| RabbitMQ | `rabbitmq` | Stream | none: the management HTTP API over the shared `node:http(s)` transport, and Studio's own read-only AMQP 0-9-1 client | A JSON stream read request | [rabbitmq.md](./rabbitmq.md) |
+| OPC UA | `opcua` | Industrial (address space) | `node-opcua-client` (pure JavaScript, `opc.tcp`) | JSON (read request) | [opcua.md](./opcua.md) |
 | LibreDB | `libredb` | Embedded (Key-Value) | `@libredb/libredb` | JSON (command grammar) | [libredb.md](./libredb.md) |
 
 ## Conventions
 
 - **Filename = canonical type-id** (`postgres.md`, `mssql.md`, …), mirroring the source file
   (`src/lib/db/providers/<family>/<type-id>.ts`, or a `<type-id>/` directory when a provider is
-  split across modules, as Couchbase, ClickHouse, Druid, Trino, Cassandra, libSQL, DuckDB, Db2, Prometheus, Kafka, etcd, Neo4j, Milvus, Qdrant, InfluxDB, Oxia, Databend, S3 and Kubernetes are). The official product name (e.g.
+  split across modules, as Couchbase, ClickHouse, Druid, Trino, Snowflake, Cassandra, libSQL, DuckDB, Db2, Prometheus, Kafka, etcd, Neo4j, Milvus, Qdrant, InfluxDB, Oxia, Databend, S3, Kubernetes, MQTT, Firestore, RabbitMQ and OPC UA are). The official product name (e.g.
   "SQL Server") is used only in each doc's title and prose. **One directory may serve two type-ids**
   — `providers/sql/search/` is `elasticsearch` and `opensearch`, and `providers/timeseries/influxdb/` is
   `influxdb` and `influxdb3`, two classes on two base classes sharing one connection layer — and each type-id still gets its own
@@ -201,11 +206,12 @@ PlanetScale, Azure Cosmos DB and Amazon DocumentDB. Their status is tracked in
 
 ## SSH tunnels: bastion host key verification
 
-Any connection but a Kafka one may reach its database through an SSH tunnel (`sshTunnel` on the connection,
+Any connection but a Kafka, BigQuery, Firestore or Snowflake one may reach its database through an SSH tunnel (`sshTunnel` on the connection,
 [`src/lib/ssh/tunnel.ts`](../../src/lib/ssh/tunnel.ts)). This is the only layer that can verify who
 terminated the SSH hop: past it the database driver is handed `127.0.0.1` and a local port, so the
 connection's own SSL settings say nothing about the bastion.
 A Kafka connection refuses a tunnel: a Kafka client reaches every broker at the address that broker advertises, which a tunnel forwarding one address does not carry, so the dialog offers no SSH panel for it and the provider refuses a tunnelled connection ([kafka.md §4.5](./kafka.md#45-no-ssh-tunnel)).
+BigQuery, Firestore and Snowflake offer no SSH panel either: each reaches its vendor's own API hosts over TLS, and its provider doc says why a tunnel is not offered.
 
 **The policy is trust-on-first-use (TOFU), pinned per connection.** Not "refuse anything unknown":
 requiring a pasted fingerprint before the first connection makes tunnelling unusable for someone
@@ -275,11 +281,18 @@ InfluxDB (InfluxQL) has a row per server line it reads, because each line is a s
 The Oxia row was verified against the running container on 2026-10-04, by the capture `tests/fixtures/oxia/README.md` records.
 The Databend row was verified against the running `databend-http` container (v1.2.951-nightly) on 2026-10-08: the user and password below sign in, and `system.databases` lists the seeded `libredb_demo` and `studio_demo`.
 
-Start the forty-four always-on services with a plain `docker compose -f database-compose.yml up -d`:
-twenty-eight engine containers plus the one-shot `couchbase-init`, `trino-init`, `kafka-init`, `etcd-seed`, `oxia-seed`, `milvus-seed`, `qdrant-seed`, `influxdb-seed`, `databend-http-seed`, `silo-principals`, `silo-seed`, `garage-keys`, `garage-setup`, `garage-seed`, `rustfs-principals` and `rustfs-seed` seed sidecars; the `Profile` column names
+Start the forty-eight always-on services with a plain `docker compose -f database-compose.yml up -d`:
+thirty engine containers plus the one-shot `couchbase-init`, `trino-init`, `kafka-init`, `rabbitmq-init`, `etcd-seed`, `oxia-seed`, `milvus-seed`, `qdrant-seed`, `influxdb-seed`, `databend-http-seed`, `silo-principals`, `silo-seed`, `garage-keys`, `garage-setup`, `garage-seed`, `rustfs-principals`, `rustfs-seed` and `firestore-seed` seed sidecars; the `Profile` column names
 the ones that need asking for. The count is derived, not written: a service in this file carries no
-`profiles:` key precisely when it backs a SHIPPED provider, so a plain `up -d` can reproduce that
-provider's integration pass.
+`profiles:` key precisely when it backs a SHIPPED provider whose fixture lives here, so a plain
+`up -d` can reproduce that provider's integration pass.
+
+**Two shipped providers have no service in this file at all**, and that is deliberate rather than an
+omission: MQTT and OPC UA are started by the commands their own fixture notes give
+([`tests/fixtures/opcua/README.md`](../../tests/fixtures/opcua/README.md) pins OPC PLC by digest and
+names the start-up flags, because this server's address space depends on them), and their
+integration suites read from captures and from a server started inside the test process. So `up -d`
+reproduces every provider in the table below and those two are reproduced by their own notes.
 
 | Provider | Compose service | Host | Port | User | Password | Database / service | Profile |
 |---|---|---|---|---|---|---|---|

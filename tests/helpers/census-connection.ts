@@ -1,5 +1,6 @@
 import type { DatabaseConnection } from "@/lib/db/types";
 import type { DatabaseType } from "@/lib/types";
+import { rabbitmqConnection } from "./rabbitmq-connection";
 
 /**
  * One unconnected connection per shipped type-id, shared by the provider censuses.
@@ -94,6 +95,9 @@ export const CENSUS_CONNECTION: Readonly<Record<DatabaseType, DatabaseConnection
   // Warehouse's among them, run in connect(), which no census reaches.
   databend: unconnected("databend"),
   bigquery: unconnected("bigquery"),
+  // No field beyond UNCONNECTED: the constructor validates nothing and opens nothing; the account, the key and the role
+  // are read at connect, which no census reaches.
+  snowflake: unconnected("snowflake"),
   // No field beyond UNCONNECTED: the constructor validates nothing and opens nothing; the fields are read at connect,
   // which no census reaches.
   s3: unconnected("s3"),
@@ -101,5 +105,11 @@ export const CENSUS_CONNECTION: Readonly<Record<DatabaseType, DatabaseConnection
   // which no census reaches.
   kubernetes: unconnected("kubernetes"),
   mqtt: unconnected("mqtt"),
+  // No field beyond UNCONNECTED: `census` is a well-formed project id, and the constructor reads no credential and
+  // opens nothing; the credential is resolved at connect, which no census reaches.
+  firestore: unconnected("firestore"),
+  // The shared test connection: the constructor validates nothing and opens nothing.
+  rabbitmq: rabbitmqConnection(),
+  opcua: unconnected("opcua"),
   libredb: unconnected("libredb"),
 });

@@ -187,7 +187,7 @@ A rule that could **not** be established is not guessed from a neighbouring dial
 at the compatibility default below, and it is listed here rather than left implicit. The default is per
 **fact**, not per dialect: a dialect whose `#` rule is known can still be undecided about its brackets.
 
-**MongoDB, Redis, Prometheus, InfluxDB (InfluxQL), Kafka, MQTT, etcd, Neo4j, Milvus, Qdrant, Oxia, S3-compatible object storage and Kubernetes are the thirteen types whose query text is not SQL at all**: `NON_SQL_DIALECTS` in `src/lib/sql/grammar.ts` holds exactly those thirteen, which is what `readsSqlText()` reports on.
+**MongoDB, Firestore, Redis, Prometheus, InfluxDB (InfluxQL), Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, Oxia, S3-compatible object storage, Kubernetes and OPC UA are the sixteen types whose query text is not SQL at all**: `NON_SQL_DIALECTS` in `src/lib/sql/grammar.ts` holds exactly those sixteen, which is what `readsSqlText()` reports on.
 Their providers never reach these readers on the query path, and the confirmation gate, which reads whatever is in the editor, asks `readsSqlText()` before applying any span-based rule to their text, so a JSON document, a Redis command, a PromQL expression, an InfluxQL statement, a Kafka read request, an etcdctl command, a Cypher statement, a Milvus request, a Qdrant request, an `oxia client` read command, an AWS CLI read command or a kubectl statement is not judged by a SQL reader that cannot parse it.
 
 The gate's SQL keyword test still reads MongoDB and Redis text first, as a backstop, which on Redis also asks about a read whose arguments include `update` and then `set` (`docs/BACKLOG.md` U43).
@@ -586,12 +586,13 @@ was invisible to the reading. It now asks instead of executing.
 
 The accepted cost, pinned by tests rather than left to be discovered, in two classes:
 
-- **A closing quote behind an odd backslash run** is reported undeterminable whatever the dialect, and
+- **A closing quote behind an odd backslash run** is reported undeterminable on most rows, and
   this is the most frequent prompt the rule buys: it covers a literal ending in a backslash (a Windows
   path) *and* `\'` as an escaped apostrophe — which is MySQL's own escape, so an everyday MySQL read
   such as `… WHERE name = 'O\'Brien'` asks on every execute.
-  Naming a shipped dialect does not narrow this one, with one exception: the grammar record carries the fact as `backslashAlwaysEscapes`, and every row declares it false, MySQL included because `NO_BACKSLASH_ESCAPES` in `sql_mode` changes its reading per session.
-  Databend's row declares it true, because its lexer escapes with a backslash in both quotes and no setting turns that off, so there `'it\'s'` is one closed literal and a backslash before a line feed leaves the literal open.
+  Naming a shipped dialect narrows this one only where the dialect has one fixed reading: the grammar record carries the fact as `backslashAlwaysEscapes`, and most rows declare it false, MySQL included because `NO_BACKSLASH_ESCAPES` in `sql_mode` changes its reading per session.
+  Databend's, BigQuery's and Snowflake's rows declare it true, because their lexers escape with a backslash and no setting turns that off, so there `'it\'s'` is one closed literal and a backslash before a line feed leaves the literal open.
+  Snowflake's row also declares `doubleQuoteBackslashEscapes` false, because a backslash inside `"..."` is part of the name there, so `"a\"` is one closed name.
   What does *not* happen is a prompt
   for a statement that merely contains a backslash — `SELECT 'a\nb' FROM t`, `… LIKE 'a\_b'` and
   `'C:\\Users\\me'` all resolve and run without one.
@@ -670,7 +671,7 @@ ordering notice beside it cannot disagree:
 
 | Condition | Where it comes from | Why |
 |-----------|--------------------|-----|
-| `supportsResultPagination === true` | the connection's `ProviderCapabilities` | Fifteen providers cannot serve page two. Cassandra and Elasticsearch throw on a positive offset; MongoDB, Redis, LibreDB, Prometheus, InfluxDB (InfluxQL), Kafka, MQTT, etcd, Neo4j, Milvus, Qdrant, Oxia and S3-compatible object storage answer it with page one. An absent flag reads as unsupported |
+| `supportsResultPagination === true` | the connection's `ProviderCapabilities` | Sixteen providers cannot serve page two. Cassandra and Elasticsearch throw on a positive offset; MongoDB, Redis, LibreDB, Prometheus, InfluxDB (InfluxQL), Kafka, MQTT, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, Oxia and S3-compatible object storage answer it with page one. An absent flag reads as unsupported |
 | `pagination.hasMore` | `POST /api/db/query` | Requires the limiter's `PreparedQuery.wasLimited` as well as a row past the page — see below |
 | the surface supplies `onLoadMore` | `BottomPanel` | A result hydrated from an agent run has no statement of its own to page |
 

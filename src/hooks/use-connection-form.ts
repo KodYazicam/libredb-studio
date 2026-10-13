@@ -15,6 +15,7 @@ import {
 import { describeWarning } from "@/components/results-grid/utils";
 import {
   connectionFieldRefusal,
+  connectionFieldShown,
   getDBConfig,
   hostUriSchemes,
   isFileBased,
@@ -94,12 +95,29 @@ const FIELD_OWNERSHIP: Record<keyof DatabaseConnection, FieldOwnership> = {
   warehouse: "edited",
   // BigQuery's Location box owns it, so emptying it clears it and detection takes over again.
   location: "edited",
+  // Snowflake's Sign-in select, Private key, Passphrase and Role boxes own them, so emptying one has to CLEAR it, as
+  // warehouse: `preserved` would go on signing in with a key or as a role the user took away.
+  authMethod: "edited",
+  privateKey: "edited",
+  privateKeyPassphrase: "edited",
+  role: "edited",
   // S3's Region box owns it, so emptying it has to CLEAR it, as warehouse.
   region: "edited",
-  // Kubernetes' API path, Namespaces and TLS server name boxes own them, so emptying one has to CLEAR it, as warehouse.
+  // Kubernetes' API path (RabbitMQ's Path prefix), Namespaces and TLS server name boxes own them, so emptying one has
+  // to CLEAR it, as warehouse.
   apiPath: "edited",
   namespaces: "edited",
   tlsServerName: "edited",
+  // The AMQP port box owns it, so emptying it has to CLEAR it, as warehouse.
+  amqpPort: "edited",
+  securityMode: "edited",
+  serverCertificateThumbprint: "edited",
+  // OPC UA's three deployment fields have no box in this dialog - they come from a seed file - so
+  // editing a seeded connection must hand them back unchanged rather than drop them. Preserved,
+  // which is what every field the form does not own is.
+  securityPolicyUri: "preserved",
+  clientCertificatePath: "preserved",
+  clientPrivateKeyPath: "preserved",
   group: "preserved",
   managed: "preserved",
   seedId: "preserved",
@@ -210,14 +228,25 @@ export const CONNECTION_FORM_DEFAULTS = {
   // A leftover warehouse would resume, and bill, the previous connection's compute for the next one.
   warehouse: "",
   location: "",
+  // Snowflake's: a leftover key, passphrase or role would sign the next connection in as a principal nobody chose for
+  // it, and the method a fresh dialog shows is the key pair.
+  authMethod: "keypair" as NonNullable<DatabaseConnection["authMethod"]>,
+  privateKey: "",
+  privateKeyPassphrase: "",
+  role: "",
   // A leftover region would sign the next S3 connection's requests for the previous server's region, which it refuses.
   region: "",
-  // A leftover API path would send the next Kubernetes connection's requests to another cluster behind the same proxy.
+  // A leftover API path would send the next connection's requests to another cluster or another broker behind the same
+  // proxy.
   apiPath: "",
   // A leftover list would draw the previous cluster's namespaces for the next connection.
   namespaces: "",
   // A leftover TLS server name would check the next connection's certificate against the previous cluster's name.
   tlsServerName: "",
+  // A leftover AMQP port would send the next connection's reads to the previous server's listener.
+  amqpPort: "",
+  securityMode: "",
+  serverCertificateThumbprint: "",
   // SSH tunnel. A leftover tunnel sends the next connection through the previous one's
   // bastion, with that bastion's password or private key.
   showSSH: false,
@@ -253,6 +282,8 @@ interface UseConnectionFormProps {
     degraded?: boolean;
     message?: string;
     warnings?: QueryWarning[];
+    /** A statement that fixes a refusal, shown beside `error` with a Copy button; absent shows the sentence alone. */
+    fixStatement?: string;
   }>;
 }
 
@@ -264,6 +295,29 @@ interface TestOutcome {
   degraded?: boolean;
   message?: string;
   warnings?: QueryWarning[];
+  /** The 401 body's statement that fixes the refusal, when the provider knows one (src/lib/api/errors.ts). */
+  fixStatement?: string;
+}
+
+/** A refusal's fix statement, as a key of the result the dialog shows, or nothing when the probe carried none. */
+function fixStatementOf(result: TestOutcome): { fixStatement?: string } {
+  return result.fixStatement ? { fixStatement: result.fixStatement } : {};
+}
+
+/**
+ * A connection without the fields its type's `fieldShownWhen` hides under the values it holds, so a credential the
+ * dialog is not drawing (Snowflake's token under a key pair, or its key under a token) is never saved or sent.
+ */
+function withoutHiddenFields(type: DatabaseType, connection: DatabaseConnection): DatabaseConnection {
+  const config = getDBConfig(type);
+  const values = connection as Partial<Record<ConnectionField, unknown>>;
+  const hidden = (Object.keys(config.fieldShownWhen ?? {}) as ConnectionField[]).filter(
+    (field) => !connectionFieldShown(config, field, values),
+  );
+  if (hidden.length === 0) return connection;
+  const shown: Partial<Record<ConnectionField, unknown>> = { ...values };
+  for (const field of hidden) delete shown[field];
+  return shown as DatabaseConnection;
 }
 
 /**
@@ -466,9 +520,12 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
   const [connectionString, setConnectionString] = useState(D.connectionString);
   const [mongoConnectionMode, setMongoConnectionMode] = useState<"host" | "connectionString">(D.mongoConnectionMode);
   const [environment, setEnvironment] = useState<ConnectionEnvironment>(D.environment);
-  const [testResult, setTestResult] = useState<{ tone: TestResultTone; message: string; latency?: number } | null>(
-    null,
-  );
+  const [testResult, setTestResult] = useState<{
+    tone: TestResultTone;
+    message: string;
+    latency?: number;
+    fixStatement?: string;
+  } | null>(null);
   const [pasteInput, setPasteInput] = useState("");
   const [showPasteInput, setShowPasteInput] = useState(false);
   /**
@@ -531,23 +588,40 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
    */
   const [dataServers, setDataServers] = useState(D.dataServers);
   /**
-   * Databend's warehouse, as typed. Drawn only for an engine that takes the field; stored as typed, because the
-   * provider checks it and names the field when it refuses it.
+   * The warehouse, as typed: Databend's header, which Databend Cloud requires, or the warehouse of every Snowflake
+   * request, optional there. Drawn only for an engine that takes the field; stored as typed, because the provider
+   * checks it and names the field when it refuses it.
    */
   const [warehouse, setWarehouse] = useState(D.warehouse);
   const [location, setLocation] = useState(D.location);
+  /**
+   * Snowflake's sign-in method, pasted private key, its passphrase and role, as typed. Drawn only for an engine that
+   * takes each field; the key is stored byte for byte, because the provider reads its armour and normalises it.
+   */
+  const [authMethod, setAuthMethod] = useState(D.authMethod);
+  const [privateKey, setPrivateKey] = useState(D.privateKey);
+  const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState(D.privateKeyPassphrase);
+  const [role, setRole] = useState(D.role);
   /**
    * S3's signing region, as typed. Drawn only for an engine that takes the field; stored as typed, spaces included,
    * because the field rule and the provider check it and name the field when they refuse it.
    */
   const [region, setRegion] = useState(D.region);
   /**
-   * Kubernetes' API path, Namespaces and TLS server name, as typed. Drawn only for an engine that takes each field;
+   * Kubernetes' API path (also RabbitMQ's Path prefix), Namespaces and TLS server name, as typed. Drawn only for an
+   * engine that takes each field;
    * stored as typed, because the provider checks each and names the field when it refuses it.
    */
   const [apiPath, setApiPath] = useState(D.apiPath);
   const [namespaces, setNamespaces] = useState(D.namespaces);
   const [tlsServerName, setTlsServerName] = useState(D.tlsServerName);
+  /**
+   * The AMQP port, as typed. Drawn only for an engine that takes the field; stored as typed, because the provider checks
+   * it and names the field when it refuses it.
+   */
+  const [amqpPort, setAmqpPort] = useState(D.amqpPort);
+  const [securityMode, setSecurityMode] = useState(D.securityMode);
+  const [serverCertificateThumbprint, setServerCertificateThumbprint] = useState(D.serverCertificateThumbprint);
 
   // SSH Tunnel
   const [showSSH, setShowSSH] = useState(D.showSSH);
@@ -599,10 +673,17 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       dataServers: setDataServers,
       warehouse: setWarehouse,
       location: setLocation,
+      authMethod: setAuthMethod,
+      privateKey: setPrivateKey,
+      privateKeyPassphrase: setPrivateKeyPassphrase,
+      role: setRole,
       region: setRegion,
       apiPath: setApiPath,
       namespaces: setNamespaces,
       tlsServerName: setTlsServerName,
+      amqpPort: setAmqpPort,
+      securityMode: setSecurityMode,
+      serverCertificateThumbprint: setServerCertificateThumbprint,
       showSSH: setShowSSH,
       sshEnabled: setSSHEnabled,
       sshHost: setSSHHost,
@@ -654,9 +735,37 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       apiPath: setApiPath,
       namespaces: setNamespaces,
       tlsServerName: setTlsServerName,
+      securityMode: setSecurityMode,
+      serverCertificateThumbprint: setServerCertificateThumbprint,
       location: setLocation,
+      amqpPort: setAmqpPort,
+      // An imported method is stored as written; the provider refuses one it does not know, naming the field.
+      authMethod: (value) => setAuthMethod(value as NonNullable<DatabaseConnection["authMethod"]>),
+      privateKey: setPrivateKey,
+      privateKeyPassphrase: setPrivateKeyPassphrase,
+      role: setRole,
     }),
     [],
+  );
+  /**
+   * The Sign-in select's setter: the method, with every field the type draws only under another method
+   * (`fieldShownWhen`) cleared from form state, so the other method's secret is not kept out of sight. Switching
+   * Snowflake to a token and back asks for the key again; loading a connection to edit sets the method directly.
+   */
+  const applyAuthMethod = useCallback(
+    (forType: DatabaseType, value: NonNullable<DatabaseConnection["authMethod"]>) => {
+      setAuthMethod(value);
+      for (const [field, condition] of Object.entries(getDBConfig(forType).fieldShownWhen ?? {})) {
+        if (condition.field !== "authMethod" || condition.equals === value) continue;
+        const key = field as keyof ConnectionFormDefaults;
+        (resetSetters[key] as (cleared: ConnectionFormDefaults[typeof key]) => void)(CONNECTION_FORM_DEFAULTS[key]);
+      }
+    },
+    [resetSetters],
+  );
+  const selectAuthMethod = useCallback(
+    (value: NonNullable<DatabaseConnection["authMethod"]>) => applyAuthMethod(type, value),
+    [type, applyAuthMethod],
   );
   const resetConnectionFields = useCallback(() => {
     for (const key of Object.keys(CONNECTION_FORM_DEFAULTS) as (keyof ConnectionFormDefaults)[]) {
@@ -759,6 +868,12 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       // edited is saved onto it.
       setWarehouse(editConnection.warehouse ?? "");
       setLocation(editConnection.location ?? "");
+      // Overwritten for the same reason: a connection that sets none of Snowflake's four fields must show the defaults,
+      // or the last one edited is saved onto it.
+      setAuthMethod(editConnection.authMethod ?? D.authMethod);
+      setPrivateKey(editConnection.privateKey ?? "");
+      setPrivateKeyPassphrase(editConnection.privateKeyPassphrase ?? "");
+      setRole(editConnection.role ?? "");
       // Overwritten for the same reason: a connection that names no region must show an empty box, or the last one
       // edited is saved onto it.
       setRegion(editConnection.region ?? "");
@@ -767,6 +882,11 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       setApiPath(editConnection.apiPath ?? "");
       setNamespaces(editConnection.namespaces ?? "");
       setTlsServerName(editConnection.tlsServerName ?? "");
+      // The reset above already empties the box for a connection that names no AMQP port; this sets the stored one.
+      setAmqpPort(editConnection.amqpPort ?? "");
+      // The same rule for OPC UA's two: a connection that pins no certificate must show an empty box.
+      setSecurityMode(editConnection.securityMode ?? "");
+      setServerCertificateThumbprint(editConnection.serverCertificateThumbprint ?? "");
       // SSL
       if (editConnection.ssl) {
         setSSLMode(editConnection.ssl.mode);
@@ -826,6 +946,19 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     setHostRefusal(refusal);
     setTestResult(refusal);
   }, []);
+
+  /**
+   * The type as the dialog chooses it. An engine that declares `defaultHost` opens its Host box holding that, never
+   * the host typed for the engine chosen before it; choosing the engine already chosen keeps what was typed for it.
+   */
+  const chooseType = useCallback(
+    (next: DatabaseType) => {
+      const opening = getDBConfig(next).defaultHost;
+      if (next !== type && opening !== undefined) setHost(opening);
+      setType(next);
+    },
+    [type],
+  );
 
   /**
    * The Host box's setter as the dialog calls it: the text, and the input kind that delivered it. For an engine
@@ -931,7 +1064,9 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     */
     const addressedFields = new Set<string>(getDBConfig(type).connectionFields);
 
-    return {
+    // A field the type hides under the values below (`fieldShownWhen`) is dropped last, so one saved Snowflake
+    // connection holds one credential.
+    return withoutHiddenFields(type, {
       // First, so a form-owned field always wins.
       ...preservedFields(editConnection, FIELD_OWNERSHIP),
       id: editConnection?.id || newLocalId(),
@@ -992,14 +1127,31 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       // The dataServers rule: only for an engine that takes it, and only when something is typed.
       ...(addressedFields.has("warehouse") && warehouse.trim() !== "" ? { warehouse } : {}),
       ...(addressedFields.has("location") && location.trim() !== "" ? { location: location.trim() } : {}),
+      // Snowflake's four, only for an engine that takes each. The method is always written there, so a saved
+      // connection says how it signs in; the key and the passphrase byte for byte when not empty, since the provider
+      // reads the armour; the role when typed, as written, since its quotes and case are the role's name.
+      ...(addressedFields.has("authMethod") ? { authMethod } : {}),
+      ...(addressedFields.has("privateKey") && privateKey !== "" ? { privateKey } : {}),
+      ...(addressedFields.has("privateKeyPassphrase") && privateKeyPassphrase !== "" ? { privateKeyPassphrase } : {}),
+      ...(addressedFields.has("role") && role.trim() !== "" ? { role } : {}),
       // Only for an engine that takes it, and whenever the box is not empty: unlike warehouse, a box of spaces is
       // written so the format rule refuses it, rather than signing for us-east-1 with no word.
       ...(addressedFields.has("region") && region !== "" ? { region } : {}),
       // The dataServers rule for Kubernetes' three fields: only for an engine that takes each, only when typed.
       ...(addressedFields.has("apiPath") && apiPath.trim() !== "" ? { apiPath } : {}),
       ...(addressedFields.has("namespaces") && namespaces.trim() !== "" ? { namespaces } : {}),
+      // The same rule for OPC UA's two. An empty security mode is not sent: the provider's own default
+      // is SignAndEncrypt, and writing "" here would save a connection whose mode reads as unset.
+      ...(addressedFields.has("securityMode") && securityMode.trim() !== ""
+        ? { securityMode: securityMode.trim() }
+        : {}),
+      ...(addressedFields.has("serverCertificateThumbprint") && serverCertificateThumbprint.trim() !== ""
+        ? { serverCertificateThumbprint: serverCertificateThumbprint.trim() }
+        : {}),
       ...(addressedFields.has("tlsServerName") && tlsServerName.trim() !== "" ? { tlsServerName } : {}),
-    };
+      // The dataServers rule for the AMQP port: only for an engine that takes it, only when typed.
+      ...(addressedFields.has("amqpPort") && amqpPort.trim() !== "" ? { amqpPort } : {}),
+    });
   }, [
     sslMode,
     caCert,
@@ -1039,10 +1191,17 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     dataServers,
     warehouse,
     location,
+    authMethod,
+    privateKey,
+    privateKeyPassphrase,
+    role,
     region,
     apiPath,
     namespaces,
     tlsServerName,
+    amqpPort,
+    securityMode,
+    serverCertificateThumbprint,
   ]);
 
   /**
@@ -1120,6 +1279,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
         message: result.success
           ? (caution ?? `Connected successfully${result.latency ? ` (${result.latency}ms)` : ""}`)
           : result.error || "Connection failed",
+        ...(result.success ? {} : fixStatementOf(result)),
         latency: result.latency,
       });
     } catch {
@@ -1139,7 +1299,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       const result = await probeConnection(conn);
 
       if (!result.success) {
-        setTestResult({ tone: "error", message: result.error || "Connection failed" });
+        setTestResult({ tone: "error", message: result.error || "Connection failed", ...fixStatementOf(result) });
         return;
       }
 
@@ -1239,13 +1399,21 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     }
     // A spelling the parser refuses as a whole (a Databend Flight SQL or JDBC URL, a DSN holding a #, a sign-in holding
     // a / or ?) applies nothing, its type included, and the paste stays open with its text so it can be corrected.
+    // A refusal whose text may hold a secret (a Snowflake token or key) clears the box instead, and shows that engine's
+    // form, filling nothing: its sentence names a box of that form, such as Snowflake's Private key.
     if (parsed.refusal) {
+      if (parsed.discardPaste) {
+        setPasteInput("");
+        chooseType(parsed.type);
+      }
       setTestResult({ tone: "error", message: parsed.refusal });
       return;
     }
 
     // Auto-switch DB type
-    setType(parsed.type);
+    chooseType(parsed.type);
+    // The sign-in method first, clearing the other method's secret, so the credential the paste names below wins.
+    if (parsed.authMethod) applyAuthMethod(parsed.type, parsed.authMethod);
     if (parsed.host) setHost(parsed.host);
     // A parse with no port (an np:/lpc: server, #1211) still switched the type above, so
     // the port is that type's default, as the type buttons in ConnectionModal set it,
@@ -1258,6 +1426,11 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     // A paste that names a server names its warehouse too, or none: a leftover one would go to the new host and
     // resume, and bill, the previous DSN's compute there.
     if (parsed.host) setWarehouse(parsed.warehouse ?? "");
+    // Snowflake's schema and passphrase where the paste names them; its role by the warehouse rule, because a role
+    // left from another account would sign this one in as a principal nobody chose for it.
+    if (parsed.schema) setSchema(parsed.schema);
+    if (parsed.privateKeyPassphrase) setPrivateKeyPassphrase(parsed.privateKeyPassphrase);
+    if (parsed.host && getDBConfig(parsed.type).connectionFields.includes("role")) setRole(parsed.role ?? "");
     // A Databend paste names no consent to a cleartext password, so it clears one left ticked for another host; a
     // parse that says nothing of it leaves it as it was, db2:// among them, the one other paste whose form shows it.
     if (parsed.allowInsecureAuth !== undefined) setAllowInsecureAuth(parsed.allowInsecureAuth);
@@ -1334,11 +1507,14 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
       });
       return;
     }
-    // A Databend paste: the parameters it did not apply, named and never valued, then the TLS parameters it read and
-    // did not apply in Databend's own words, then a notice on what an applied one means.
-    if (parsed.ignoredParameters || parsed.cautions) {
+    // A Databend paste: the parameters it did not apply, BendSQL's own named and never valued and the rest counted,
+    // then the TLS parameters it read and did not apply in Databend's own words, then a notice on what an applied one
+    // means.
+    if (parsed.ignoredParameters || parsed.unnamedParameters || parsed.cautions) {
       const message = [
-        parsed.ignoredParameters ? databendNotAppliedNotice(parsed.ignoredParameters) : undefined,
+        parsed.ignoredParameters || parsed.unnamedParameters
+          ? databendNotAppliedNotice(parsed.ignoredParameters ?? [], parsed.unnamedParameters)
+          : undefined,
         ...(parsed.cautions ?? []),
         parsed.notice,
       ].filter(Boolean);
@@ -1351,7 +1527,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
         .filter(Boolean)
         .join(" "),
     });
-  }, [pasteInput, name, sslMode]);
+  }, [pasteInput, name, sslMode, applyAuthMethod, chooseType]);
 
   /**
    * Fills the form from one entry of the import the type declares (`connectionImport` in db-ui-config.ts). The entry
@@ -1444,6 +1620,10 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     "s3",
     "kubernetes",
     "mqtt",
+    "firestore",
+    "rabbitmq",
+    "snowflake",
+    "opcua",
   ];
   const dbTypes = selectableTypes.map((t) => {
     const cfg = getDBConfig(t);
@@ -1462,7 +1642,7 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
   return {
     // Connection fields
     type,
-    setType,
+    setType: chooseType,
     name,
     setName,
     host,
@@ -1511,6 +1691,13 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     clientKey,
     setClientKey,
 
+    // OPC UA: the security mode is the server's own word (None, Sign, SignAndEncrypt), which
+    // Studio's SSL modes do not map onto, and the thumbprint is the certificate this connection pins.
+    securityMode,
+    setSecurityMode,
+    serverCertificateThumbprint,
+    setServerCertificateThumbprint,
+
     // Advanced (Oracle/MSSQL)
     showAdvanced,
     setShowAdvanced,
@@ -1540,6 +1727,14 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     setWarehouse,
     location,
     setLocation,
+    authMethod,
+    setAuthMethod: selectAuthMethod,
+    privateKey,
+    setPrivateKey,
+    privateKeyPassphrase,
+    setPrivateKeyPassphrase,
+    role,
+    setRole,
     region,
     setRegion,
     apiPath,
@@ -1548,6 +1743,8 @@ export function useConnectionForm({ isOpen, onConnect, editConnection, onTestCon
     setNamespaces,
     tlsServerName,
     setTlsServerName,
+    amqpPort,
+    setAmqpPort,
 
     // SSH Tunnel
     showSSH,

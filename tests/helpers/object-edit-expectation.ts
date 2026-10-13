@@ -46,6 +46,9 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   "druid",
   "duckdb",
   "elasticsearch",
+  // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: this version reads only, whatever `readOnly` says,
+  // which docs/providers/firestore.md names under "Object edit (#789)".
+  "firestore",
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: v1 is read-only (InfluxDB spec I1), which docs/providers/influxdb.md names.
   "influxdb",
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: v1 is read-only (InfluxDB spec I1), which docs/providers/influxdb3.md names.
@@ -56,11 +59,16 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: this version reads a cluster and never writes to it,
   // which docs/providers/kubernetes.md names.
   "kubernetes",
+  // A node has attributes defined by its type in the server's model, and this provider writes nothing.
+  "opcua",
   "libredb",
   "libsql",
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: this provider has no code that can write to a
   // broker at all, so object edit is not a decision it could reverse (#1635).
   "mqtt",
+  // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: the provider sends the broker GET requests and stream
+  // reads only, never a publish or a take (#1656).
+  "rabbitmq",
   // No kind declares `acceptsRowWrites` or `acceptsSourceEdits`: v1 writes no data (vector-family spec 5.7), which docs/providers/milvus.md names.
   "milvus",
   "mongodb",
@@ -82,6 +90,9 @@ export const EXPECTED_EDIT_ABSTAINERS: readonly DatabaseType[] = Object.freeze([
   // No kind declares acceptsRowWrites or acceptsSourceEdits: v1 reads only, whatever readOnly says, which
   // docs/providers/s3.md names.
   "s3",
+  // No kind declares acceptsRowWrites or acceptsSourceEdits: DDL commits implicitly and ALTER COLUMN is limited, so
+  // v1 offers no object edit, which docs/providers/snowflake.md names.
+  "snowflake",
   "sqlite",
 ] as const);
 

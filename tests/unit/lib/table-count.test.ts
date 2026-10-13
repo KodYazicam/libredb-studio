@@ -95,11 +95,18 @@ const EXPECTED_COUNT: Readonly<Record<DatabaseType, string | null>> = Object.fre
   // `backtick-always` quoting (design 5.1) over the catalog and the database, and no declared terminator, so `;` ends it.
   databend: 'SELECT COUNT(*) AS row_count\nFROM `c0`.`c1`.`Order"Items`;',
   bigquery: 'SELECT COUNT(*) AS row_count\nFROM c0.`Order"Items`;',
+  // `double-always` quoting over the database and the schema, and no declared terminator, so `;` ends it.
+  snowflake: 'SELECT COUNT(*) AS row_count\nFROM "c0"."c1"."Order""Items";',
   // One AWS CLI subset read command: the dialect's record withholds the action, and a bucket has no row count.
   s3: null,
   // One kubectl statement: the dialect's record withholds the action, and a Kubernetes kind has no row count.
   kubernetes: null,
   mqtt: null,
+  // One aggregation statement of the console's subset, which the user runs from the tab it is written into.
+  firestore: 'db.collection("Order\\"Items").count()',
+  rabbitmq: null,
+  // No count statement: a server publishes no count of its nodes, and a node is not a table (#1677).
+  opcua: null,
 });
 
 async function censusCapabilities(type: DatabaseType): Promise<ProviderCapabilities> {

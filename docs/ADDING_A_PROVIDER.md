@@ -19,7 +19,7 @@ Three decisions. The first is the consequential one, which is why it is first.
 
 1. **Does it need a driver at all?** Score the engine against the rubric below. A database with a
    first-class HTTP API can be supported with no dependency at all, and that is worth real effort to
-   establish before you start. Fifteen shipped type-ids need no driver: SQLite uses the built-in
+   establish before you start. Sixteen shipped type-ids need no driver: SQLite uses the built-in
    `bun:sqlite`/`node:sqlite` via `sqlite-driver.ts`, and the rest reach the engine over HTTP with
    nothing but `fetch`/`node:https`. Couchbase goes over the documented REST endpoints
    ([couchbase.md](./providers/couchbase.md)), ClickHouse over its HTTP interface
@@ -33,7 +33,9 @@ Three decisions. The first is the consequential one, which is why it is first.
    `/api/v3/query_sql` ([influxdb.md](./providers/influxdb.md) · [influxdb3.md](./providers/influxdb3.md)),
    Databend over its own HTTP query API, `POST /v1/query` ([databend.md](./providers/databend.md)),
    S3-compatible object storage over the S3 REST API, signed by Studio's own SigV4 code ([s3.md](./providers/s3.md)),
-   and Kubernetes over the API server's REST API ([kubernetes.md](./providers/kubernetes.md)).
+   Kubernetes over the API server's REST API ([kubernetes.md](./providers/kubernetes.md)),
+   and RabbitMQ over its management HTTP API, with stream reads through the provider's own AMQP 0-9-1 client ([rabbitmq.md](./providers/rabbitmq.md)).
+   BigQuery over its REST API v2 ([bigquery.md](./providers/bigquery.md)), Firestore over its REST API v1 ([firestore.md](./providers/firestore.md)) and Snowflake over its SQL API v2 ([snowflake.md](./providers/snowflake.md)) need none either.
    If it does need one, it will be something like `pg`, `mysql2`, `mongodb`, `ioredis`, `oracledb`,
    `mssql` or `db2-node`.
 
@@ -238,10 +240,10 @@ The Memgraph provider is filed as `docs/BACKLOG.md` D141.
 
 ```typescript
 // Before:
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3' | 'kubernetes';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'snowflake' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3' | 'kubernetes' | 'bigquery' | 'mqtt' | 'firestore' | 'rabbitmq';
 
 // After (example: adding CockroachDB):
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3' | 'kubernetes' | 'cockroachdb';
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'libsql' | 'duckdb' | 'mongodb' | 'redis' | 'oracle' | 'db2' | 'mssql' | 'libredb' | 'couchbase' | 'clickhouse' | 'druid' | 'elasticsearch' | 'opensearch' | 'trino' | 'snowflake' | 'cassandra' | 'prometheus' | 'kafka' | 'etcd' | 'neo4j' | 'milvus' | 'qdrant' | 'influxdb' | 'influxdb3' | 'oxia' | 'databend' | 's3' | 'kubernetes' | 'bigquery' | 'mqtt' | 'firestore' | 'rabbitmq' | 'cockroachdb';
 ```
 
 A type-id may contain a digit: `db2` does.
@@ -256,7 +258,7 @@ If your database uses a new editor mode (not `'sql'` or `'mongodb'`), add it:
 ```typescript
 export interface QueryTab {
   // ...
-  type: 'sql' | 'mongodb' | 'redis' | 'libredb' | 'promql' | 'kafka' | 'etcd' | 'cypher' | 'milvus' | 'qdrant' | 'influxql' | 'oxia';  // Add your type here if needed
+  type: 'sql' | 'mongodb' | 'redis' | 'libredb' | 'promql' | 'kafka' | 'etcd' | 'cypher' | 'milvus' | 'qdrant' | 'influxql' | 'oxia' | 's3' | 'kubectl' | 'mqtt' | 'firestore' | 'rabbitmq';  // Add your type here if needed
 }
 ```
 
@@ -344,6 +346,7 @@ whole surface is built on:
 | The engine… | The answer | Why |
 |---|---|---|
 | declined the read, and said so | a PART carrying `unavailable`, holding the engine's own sentence **unprefixed** and with no `text` | the reader needs the server's words to act on. A part is never both `unavailable` and `text` |
+| has nothing to show by design, and that is a fact rather than a failure | a PART carrying `unavailable` with the sentence and `statement: true` | the viewer draws it as plain text, without the "could not be read" heading. A part never carries `statement` without `unavailable` |
 | holds no such object | RAISE a `QueryError` naming the object | a document invented for a dropped object is a claim the engine never made |
 | answered nothing, or an empty text | RAISE | an empty text puts an empty editor over a definition nobody read, which is the shape this contract exists to make unrepresentable |
 | never answered at all (a dropped socket, a timeout) | RAISE a `ConnectionError` | nobody answering is not the server answering "no", and a transport message rendered as this object's refusal is a symptom presented as a fact |
@@ -352,7 +355,7 @@ Emptiness is sometimes absence itself: measured on Redis 8.10.0,
 `FUNCTION LIST LIBRARYNAME no_such_library WITHCODE` answers an empty array rather than an error, so
 whatever reads it has to treat emptiness as the absence and raise.
 
-**Every part carries `origin` and `form`, and both are facts about the TEXT rather than decoration:**
+**Every readable part carries `origin` and `form`, and both are facts about the TEXT rather than decoration:**
 
 - `origin` is `stored` when the bytes are the author's own, as the engine kept them, and
   `regenerated` when the engine composed the statement from its catalog. Oracle's
@@ -404,6 +407,10 @@ An operation that runs on one object, and that an admin should see described bef
   `tests/unit/db/maintenance-confirmation-capability.test.ts` holds such a spec to `perEntity: true` and the provider to implementing `previewMaintenance`.
   Implement `previewMaintenance(type, path)` with it: `path` is the object's address, container levels then the object; the method reads only, checks that the object exists, raises a `QueryError` naming what is missing, and answers a `MaintenancePreview` whose `refusal`, when set, withholds the confirm button.
 - Implement `engineUser()` when the engine has a principal to name: the maintenance route writes it on every audit row, as `engine_user` on the stdout line, so it is a user name and never any part of a secret.
+- Implement `hasRunsInFlight(): boolean` when your `disconnect()` ends a statement that is still running.
+  The factory's idle sweep closes a cached provider 30 minutes after its last acquisition, and a provider that polls a long statement is not acquired again while it polls, so without it the sweep cancels that statement.
+  Answer it from your run registry (`runsInFlight() > 0`), synchronously and without throwing, and end every run you count at its own deadline.
+  `tests/unit/db/runs-in-flight-census.test.ts` pins who declares it; flip your row there.
 
 `tests/unit/db/maintenance-surface-census.test.ts` pins what every shipped provider offers today, and that only Milvus declares any of this; a provider that adds such an operation updates its row there in the same change.
 
@@ -419,7 +426,8 @@ Declare neither when your engine has nothing to caution about; `POST /api/db/tes
   Put a check here, not in `connect()`, when it needs a request, because `connect()` also runs on every background cache miss, where nobody reads a caution.
   It answers cautions and never rejects: a fact it could not check is a caution or nothing, bounded by a deadline of its own.
   A rejection is a defect: the route logs it, shows one caution in its own words in its place, and still counts the connection as tested.
-  A caution's text depends only on what the server reports, never on timing: no count a deadline cut short, and a fixed order, or the second Save meets a different caution and asks again.
+  A caution's text depends only on what the server reports, in a fixed order, or the second Save meets a different caution and asks again.
+  The one exception is a count a check deadline cut short, which can differ between the two clicks: the dialog then shows the new text once more before saving.
   A caution is your own sentence, never a caught error's or a library's text, because every user who can test the connection reads it.
 - Return `[]` when there is nothing to say: any caution turns the answer amber, so a correct connection must come back empty.
 
@@ -822,7 +830,7 @@ Every field and what it controls:
 | Field | Type | Controls |
 |-------|------|----------|
 | `queryLanguage` | `'sql' \| 'json' \| 'promql' \| 'cypher' \| 'influxql'` | Monaco editor language mode, AI prompt style, query template format. A closed union: a new member needs an arm, or a test pinning its branch, in every reader (#1085) |
-| `queryDialect` | `'libredb' \| 'redis' \| 'kafka' \| 'etcd' \| 'milvus' \| 'qdrant' \| 'oxia' \| 's3' \| 'kubectl' \| undefined` | Optional. Names the dialect's records in three registries, which the tab type, the Monaco language, the formatter, the generated statements and the Generate Code and Generate Count Query gates consult **before** `queryLanguage` (only Profile answers an SQL language first, `offersColumnProfiling` in `src/lib/db/types.ts`): `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`, the tab type and the row-menu gates), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`, the Monaco language and the formatter) and `DIALECT_GENERATORS` (`query-generators.ts`, what a tree click and Generate Query write). A new dialect adds its three records, not a check in each reader: `queryLanguage: 'json'` alone means MongoDB, which is how Redis silently got MongoDB documents until #427. Left undefined by SQL and MongoDB |
+| `queryDialect` | `'libredb' \| 'redis' \| 'kafka' \| 'etcd' \| 'milvus' \| 'qdrant' \| 'oxia' \| 's3' \| 'mqtt' \| 'firestore' \| 'rabbitmq' \| 'kubectl' \| undefined` | Optional. Names the dialect's records in three registries, which the tab type, the Monaco language, the formatter, the generated statements and the Generate Code and Generate Count Query gates consult **before** `queryLanguage` (only Profile answers an SQL language first, `offersColumnProfiling` in `src/lib/db/types.ts`): `QUERY_DIALECTS` (`src/lib/db/query-dialects.ts`, the tab type and the row-menu gates), `DIALECT_EDITORS` (`src/lib/editor/dialect-editors.ts`, the Monaco language and the formatter) and `DIALECT_GENERATORS` (`query-generators.ts`, what a tree click and Generate Query write). A new dialect adds its three records, not a check in each reader: `queryLanguage: 'json'` alone means MongoDB, which is how Redis silently got MongoDB documents until #427. Left undefined by SQL and MongoDB |
 | `supportsExplain` | `boolean` | EXPLAIN button visibility in QueryEditor toolbar |
 | `explainFormat` | `ExplainFormat \| undefined` | **Required whenever `supportsExplain` is true.** Selects the strategy in `src/lib/explain/index.ts`. Setting the flag without the format leaves the control visible and dead — the UI resets out of explain mode when metadata lacks it |
 | `supportsExternalQueryLimiting` | `boolean` | Whether route applies LIMIT to queries (SQL) or provider handles it (MongoDB) |
@@ -910,7 +918,7 @@ For the authoritative, code-verified reference for each shipped provider (extend
 driver, pooling, capabilities, labels, `prepareQuery` behaviour, and limitations), see the prime
 docs — they are the single source of truth and are kept in sync with the code:
 
-**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · databend · s3 · kubernetes · libredb
+**[docs/providers/](./providers/README.md)** → postgres · mysql · oracle · db2 · mssql · sqlite · libsql · duckdb · redis · mongodb · couchbase · clickhouse · druid · elasticsearch · opensearch · trino · bigquery · snowflake · cassandra · prometheus · influxdb · influxdb3 · kafka · etcd · neo4j · milvus · qdrant · oxia · databend · s3 · kubernetes · mqtt · firestore · rabbitmq · libredb
 
 When implementing a new provider, the closest existing analogue is the best template: a pooled SQL
 provider (postgres/mysql), an embedded SQL provider (sqlite), a non-SQL provider (mongodb/redis), a
@@ -1003,7 +1011,7 @@ transport, and it is a separate type-id when it comes. See [trino.md](./provider
 | Candidate | Verdict |
 |---|---|
 | **PrestoDB** | Shipped-adjacent: the `trino` transport already builds its headers from a dialect prefix, so this is a descriptor, a doc and an integration test. A separate type-id, because `version()` and the fault vocabulary differ |
-| **Snowflake / BigQuery / Databricks SQL** | REST SQL APIs exist and the data model fits; auth is the wall (key-pair JWT, service-account signing, OAuth) and that is where the no-dependency promise ends |
+| **Databricks SQL** | a REST SQL API exists and the data model fits; OAuth or a PAT is the work |
 | **CouchDB, ArangoDB, SurrealDB, Weaviate** | All HTTP, all non-SQL or only partially SQL. Feasible, but each needs its own query grammar the way MongoDB and LibreDB do |
 
 Contributions are welcome for any of these. Open an issue with the rubric score first, so the design
@@ -1031,8 +1039,8 @@ The integration points, all of which need an entry. This is the list the Strateg
       published engine count silently undercount; it is listed here because the count in `README.md`
       and `docs/BRAND_MESSAGING.md` is derived from it and has to move in the same PR
 - [ ] `package.json` — the driver, **if** it needs one. A driver-free provider leaves it untouched, and
-      sixteen shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
-      `libsql`, `sqlite`, `prometheus`, `qdrant`, `milvus`, `influxdb`, `influxdb3`, `oxia`, `databend` and `kubernetes`
+      twenty shipped ids do: `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`,
+      `libsql`, `sqlite`, `prometheus`, `qdrant`, `milvus`, `influxdb`, `influxdb3`, `oxia`, `databend`, `kubernetes`, `bigquery`, `firestore`, `rabbitmq` and `snowflake`
       each add nothing here (`milvus` and `oxia` only extend the `//dependencies` note).
       `s3` needs no driver but adds the Parquet decoders `hyparquet` and `hyparquet-compressors`, with their `//dependencies` note.
 - [ ] `database-compose.yml` — a service, so the next person can repeat the live pass. A distributed
@@ -1183,7 +1191,7 @@ Run them before the first edit and again before the commit, and re-derive each h
 
 ```bash
 OUT=(docs CLAUDE.md CONTRIBUTING.md 'README*.md' DOCKERHUB.md snap packaging desktop deploy charts/libredb-studio operator/config e2e ':!docs/BACKLOG.md' ':!docs/llms')
-git grep -n -I -i -E '\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty[- ](one|two|three|four|five|six|seven|eight|nine)|forty[- ](four|five|six|seven|eight|nine)|fifty|fifty[- ](one|two|three|four))\b|\b(1[0-9]|2[0-9]|4[0-9]|5[0-4]) (database backends|database engines|engines|type-ids|providers|drivers)\b|十[七八九]|二十[一二三四五六七八]?|四十[四五六七八九]|五十[一二三四]?|Diecisiete|Dieciocho|Diecinueve|Veinte|veinte|veintiuno|veintidós|veintitrés|veinticinco|veintiséis|veintisiete|veintiocho|cincuenta y (tres|cuatro)|1[789]の|2[0-8]の|सत्रह|अठारह|उन्नीस|बीस|इक्कीस|बाईस|तेईस|पच्चीस|छब्बीस|सत्ताईस|अट्ठाईस|سترہ|اٹھارہ|انیس|بیس|اکیس|بائیس|تئیس|پچیس|چھبیس|ستائیس|اٹھائیس|Dezoito|Dezenove|Vinte|vinte e (um|dois|três|cinco|seis|sete|oito)|cinquenta e (três|quatro)|Восемнадцат|Девятнадцат|Двадцат|пятьдесят (три|четыре)' -- "${OUT[@]}"   # G1
+git grep -n -I -i -E '\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty[- ](one|two|three|four|five|six|seven|eight|nine)|forty[- ](four|five|six|seven|eight|nine)|thirty|thirty[- ](one|two|three|four)|fifty|fifty[- ](one|two|three|four|five|six|seven|eight|nine)|sixty)\b|\b(1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9]|60) (database backends|database engines|engines|type-ids|providers|drivers)\b|十[七八九]|二十[一二三四五六七八]?|四十[四五六七八九]|三十[一二三四]?|五十[一二三四五六七八九]?|六十|Diecisiete|Dieciocho|Diecinueve|Veinte|veinte|veintiuno|veintidós|veintitrés|veinticinco|veintiséis|veintisiete|veintiocho|Treinta|treinta( y (uno|dos|tres|cuatro))?|cincuenta y (tres|cuatro|ocho|nueve)|sesenta|1[789]の|2[0-8]の|3[0-4]の|5[89]の|60の|3[0-4]개|5[89]개|60개|सत्रह|अठारह|उन्नीस|बीस|इक्कीस|बाईस|तेईस|पच्चीस|छब्बीस|सत्ताईस|अट्ठाईस|तीस|इकतीस|बत्तीस|तैंतीस|उनसठ|साठ|سترہ|اٹھارہ|انیس|بیس|اکیس|بائیس|تئیس|پچیس|چھبیس|ستائیس|اٹھائیس|تیس|اکتیس|بتیس|تینتیس|انسٹھ|ساٹھ|Dezoito|Dezenove|Vinte|vinte e (um|dois|três|cinco|seis|sete|oito)|Trinta|trinta( e (um|dois|três|quatro))?|cinquenta e (três|quatro|oito|nove)|sessenta|Восемнадцат|Девятнадцат|Двадцат|Тридцат|тридцат|пятьдесят (три|четыре|восемь|девять)|шестьдесят' -- "${OUT[@]}"   # G1
 git grep -n -I -E 'Databend|databend' -- "${OUT[@]}"   # G2, the closest earlier engine (Databend, for the next provider)
 git grep -n -I -i -E 'redis and libredb|redis, libredb|libredb and redis|mongodb and redis|mongodb, redis|redis and mongodb|dialect of (its|their) own|queryDialect' -- "${OUT[@]}"   # G3
 git grep -n -I -E 'Redpanda|redpanda' -- "${OUT[@]}"   # G4, the latest relative

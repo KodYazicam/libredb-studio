@@ -22,6 +22,7 @@ const EDITOR_LANGUAGES: readonly EditorLanguage[] = [
   "oxia",
   "s3",
   "kubectl",
+  "firestore",
 ];
 
 describe("DIALECT_EDITORS", () => {
@@ -29,6 +30,7 @@ describe("DIALECT_EDITORS", () => {
     expect(Object.keys(DIALECT_EDITORS).sort()).toEqual([
       "cypher",
       "etcd",
+      "firestore",
       "influxql",
       "kafka",
       "kubectl",
@@ -36,9 +38,11 @@ describe("DIALECT_EDITORS", () => {
       "milvus",
       "mongodb",
       "mqtt",
+      "opcua",
       "oxia",
       "promql",
       "qdrant",
+      "rabbitmq",
       "redis",
       "s3",
       "sql",
@@ -53,6 +57,7 @@ describe("DIALECT_EDITORS", () => {
       sql: "sql",
       mongodb: "json",
       mqtt: "json",
+      opcua: "json",
       libredb: "libredb",
       redis: "redis",
       promql: "promql",
@@ -65,15 +70,17 @@ describe("DIALECT_EDITORS", () => {
       oxia: "oxia",
       s3: "s3",
       kubectl: "kubectl",
+      firestore: "firestore",
+      rabbitmq: "json",
     });
   });
 
-  test("only the SQL tab, the three JSON tabs and the Milvus and Qdrant consoles have a formatter", () => {
+  test("only the SQL tab, the five JSON tabs and the Milvus and Qdrant consoles have a formatter", () => {
     const formatted = Object.entries(DIALECT_EDITORS)
       .filter(([, editor]) => editor.format !== undefined)
       .map(([type]) => type)
       .sort();
-    expect(formatted).toEqual(["kafka", "milvus", "mongodb", "mqtt", "qdrant", "sql"]);
+    expect(formatted).toEqual(["kafka", "milvus", "mongodb", "mqtt", "opcua", "qdrant", "rabbitmq", "sql"]);
   });
 
   test("tab types that render in one Monaco language share one formatter, or all have none", () => {

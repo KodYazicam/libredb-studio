@@ -85,7 +85,12 @@ import type {
   ReadOnlyStatementMode,
 } from "@/lib/db/types";
 import type { ContainerEnumeration } from "@/lib/db/container-walk";
-import { enumerationOf, kindsByContainer, scopeGroundingContainers } from "@/lib/db/container-walk";
+import {
+  enumerationOf,
+  kindsByContainer,
+  scopeGroundingContainers,
+  sessionDefaultContainer,
+} from "@/lib/db/container-walk";
 import {
   applicableKinds,
   containerDepth,
@@ -2498,11 +2503,16 @@ function normalizeDeclaredSchema(context: AgentToolContext, schema: string): str
 function parseToolInput<T>(
   schema: z.ZodType<T>,
   input: unknown,
+  /**
+   * Tools whose own refusal this run would meet if it followed the order, so the order is not
+   * offered. See `TOOL_OWNING_FIELD` and the comment on the clause it changes.
+   */
+  wouldRefuse?: ReadonlySet<string>,
 ): { ok: true; value: T } | { ok: false; problems: string } {
   const parsed = schema.safeParse(input);
   return parsed.success
     ? { ok: true, value: parsed.data }
-    : { ok: false, problems: describeIssues(parsed.error.issues, input) };
+    : { ok: false, problems: describeIssues(parsed.error.issues, input, wouldRefuse) };
 }
 
 /**
@@ -2613,7 +2623,11 @@ const EVIDENCE_SIBLING_FIELD: Readonly<Record<string, string>> = Object.freeze({
   fingerprint: "correlationId",
 });
 
-function describeIssues(issues: readonly z.core.$ZodIssue[], input: unknown): string {
+function describeIssues(
+  issues: readonly z.core.$ZodIssue[],
+  input: unknown,
+  wouldRefuse: ReadonlySet<string> = new Set(),
+): string {
   const renames = renamesAmong(issues, input);
   const renamedTo = new Set(renames.values());
   // A citation under the wrong branch: the path of every evidence object that sent one branch's
@@ -2661,8 +2675,25 @@ function describeIssues(issues: readonly z.core.$ZodIssue[], input: unknown): st
             being told a field lives `somewhere` is not the same instruction as being told what
             to call.
           */
-          return owner === undefined
-            ? []
+          if (owner === undefined) return [];
+          /*
+            THE ORDER IS ONLY AN INSTRUCTION WHERE THE OTHER CALL CAN SUCCEED.
+
+            The sentence above was measured as a fix and shipped as one. It is now the single most
+            frequent refusal in the ledger - 382 deliveries, beside 188
+            `present_answer: ANSWER_NOT_A_DATA_READ`, and the two numbers are one loop. A run that
+            has drafted no read holds nothing presentable, so the tool it is sent to refuses it, and
+            it returns here with the same argument. `granite4:1b` analyze lost its one failing run
+            to FIFTY refusals on 2026-10-11 while its passing runs finished in under ninety seconds.
+
+            This tool does not need the field. Where the run could satisfy the other call the order
+            stands; where it could not, the only move that ends the loop is to drop the field, and
+            saying so is the difference between an instruction and a wall.
+          */
+          return wouldRefuse.has(owner)
+            ? [
+                `${key} is not an argument of this tool and this run has nothing ${owner} would accept — call this tool again without it`,
+              ]
             : [`${key} belongs to ${owner} — call ${owner} with it first, then call this tool again without it`];
         });
         // A key that belongs to the OTHER BRANCH of this union is not surplus either: the model
@@ -3055,10 +3086,8 @@ async function walkObjectInventory(
 
   // A provider that declares a walk scope is read in its session-default container and the ones it names; the
   // rest are counted, so the inventory can say what it did not read.
-  const scoped = scopeGroundingContainers(
-    await enumerateGroundingContainers(provider, capabilities),
-    capabilities.agentWalkScope,
-  );
+  const grounding = await enumerateGroundingContainers(provider, capabilities);
+  const scoped = scopeGroundingContainers(grounding.enumeration, capabilities.agentWalkScope, grounding.parentDefault);
   const enumeration = scoped.enumeration;
   const { containers, defaultContainer } = enumeration;
   // A container that names its kinds is walked for those alone: asking it for another would meet the
@@ -3207,17 +3236,22 @@ async function walkObjectInventory(
  * reads it, with each container's kinds, off that level. This walk calls it rather than
  * `enumerateContainers` for one reason: the depth here comes from the capabilities the RUN
  * CONTEXT holds, not from `provider.getCapabilities()`.
+ *
+ * `parentDefault` is the default the level above the deepest marks, read by the same rule, for a walk scope that
+ * declares `whenNoDefault`; it is absent on an engine of one level.
  */
 async function enumerateGroundingContainers(
   provider: DatabaseProvider,
   capabilities: ProviderCapabilities,
-): Promise<ContainerEnumeration> {
+): Promise<{ readonly enumeration: ContainerEnumeration; readonly parentDefault?: readonly string[] }> {
   const depth = containerDepth(capabilities);
-  if (depth === 0) return { containers: [[]], defaultContainer: [] };
+  if (depth === 0) return { enumeration: { containers: [[]], defaultContainer: [] } };
   const listContainers = provider.listContainers.bind(provider);
 
   let level = await listContainers();
+  let parentDefault: readonly string[] | undefined;
   for (let below = 1; below < depth; below += 1) {
+    parentDefault = sessionDefaultContainer(level);
     const next: Container[] = [];
     for (const parent of level) {
       next.push(...(await listContainers(parent.path)));
@@ -3225,7 +3259,8 @@ async function enumerateGroundingContainers(
     level = next;
   }
 
-  return enumerationOf(level);
+  const enumeration = enumerationOf(level);
+  return parentDefault === undefined ? { enumeration } : { enumeration, parentDefault };
 }
 
 /** One container's counts, or none where the provider declares no counting. */
@@ -4944,6 +4979,10 @@ export function composeReportTool(
   const parsed = parseToolInput(
     reportSchema,
     readMisfiledEvidence(readSerializedClaims(input), run.events, context.workflowType),
+    // `present_answer` refuses a run holding no data read of its own - `ANSWER_NOT_A_DATA_READ`,
+    // 188 of them beside the 382 deliveries of the sentence that sends models there. Naming it as
+    // the destination for `presentation` is only an instruction where it could accept the call.
+    presentableArtifact(run.events) === undefined ? new Set(["present_answer"]) : undefined,
   );
   if (!parsed.ok) {
     return invalidEvidenceInput(

@@ -48,10 +48,16 @@ const OFFERED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // No test data (design 2.4).
   databend: false,
   bigquery: false,
+  // No test data: it would write on the warehouse, outside v1.
+  snowflake: false,
   // No test data: v1 sends no write.
   s3: false,
   kubernetes: false,
   mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  // Generating test data would be a write, and this provider has no code that can write (#1677).
+  opcua: false,
 });
 
 const TYPES = Object.keys(OFFERED) as DatabaseType[];

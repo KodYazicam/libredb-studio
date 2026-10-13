@@ -184,6 +184,8 @@ const DIALECT_TYPES: Partial<Record<DatabaseType, Partial<Record<InferredKind, s
   // pinned image and M08c read them back as `String`, `Float64` and `Binary`, unbounded. The standard `TEXT`,
   // `DOUBLE PRECISION` and `BLOB` were not measured there. `BIGINT`, `BOOLEAN` and `TIMESTAMP` were, as they are.
   databend: { text: "VARCHAR", numeric: "DOUBLE", binary: "BINARY" },
+  // Snowflake's float type is FLOAT and its byte type BINARY; it has no BLOB. Provisional until a replay on an account.
+  snowflake: { numeric: "FLOAT", binary: "BINARY" },
   oracle: {
     text: "VARCHAR2(4000)",
     integer: "NUMBER(19)",
@@ -393,6 +395,9 @@ const NOTHING_STANDS_ALONE: readonly string[] = [];
 
 const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   bigquery: NOTHING_STANDS_ALONE,
+  // Not measured: no Snowflake account read a probe column back for this change, so every bare name is re-spelled
+  // portably until one does.
+  snowflake: NOTHING_STANDS_ALONE,
   postgres: [
     "character varying",
     "varchar",
@@ -581,6 +586,12 @@ const STANDS_ALONE: Record<DatabaseType, readonly string[]> = {
   // Kubernetes has no statement form for an export.
   kubernetes: NOTHING_STANDS_ALONE,
   mqtt: NOTHING_STANDS_ALONE,
+  // Firestore has no statement form for an export.
+  firestore: NOTHING_STANDS_ALONE,
+  // RabbitMQ has no statement form for an export.
+  rabbitmq: NOTHING_STANDS_ALONE,
+  // A read request is JSON and names nodes, not rows: nothing it produces stands alone as a statement.
+  opcua: NOTHING_STANDS_ALONE,
   // Measured by M08a and M08c on the pinned image: each was created and read back unbounded (`String`, `Timestamp`
   // with microseconds, `Binary`). Every other bare name is re-spelled from its family (design 7.2, X01).
   databend: ["varchar", "timestamp", "binary"],
@@ -730,6 +741,8 @@ type BinaryLiteral = "standard-hex" | "zero-x" | "binary-hex" | "pg-bytea" | "he
 
 const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   bigquery: "text",
+  // Snowflake reads `X'0102deadbeef'` as a BINARY constant, the standard form; not yet measured on an account.
+  snowflake: "standard-hex",
   postgres: "pg-bytea",
   // Measured on MySQL 26.7.0: `SELECT HEX(X'0102deadbeef')` answers `0102DEADBEEF` and
   // `SELECT LENGTH(X'')` answers 0, so MySQL is here rather than in `zero-x` even
@@ -783,6 +796,12 @@ const BINARY_LITERAL: Record<DatabaseType, BinaryLiteral> = {
   // Kubernetes has no statement language for a value either; the inert default, as Oxia's.
   kubernetes: "standard-hex",
   mqtt: "standard-hex",
+  // Firestore has no statement language for a value either; the inert default, as Oxia's.
+  firestore: "standard-hex",
+  // RabbitMQ has no statement language for a value; the inert default, as Kafka's.
+  rabbitmq: "standard-hex",
+  // A ByteString is rendered as hex by the provider itself, so an export carries it the same way.
+  opcua: "standard-hex",
   // Measured on SQL Server 2022: `SELECT CONVERT(varchar(64), 0x0102deadbeef, 2)`
   // answers `0102DEADBEEF`, `DATALENGTH(0x)` answers 0 — so the empty case is spelled
   // — and `SELECT X'0102'` is `Msg 207 … Invalid column name 'X'`.
@@ -1023,7 +1042,8 @@ function oracleZonedTextLiteral(text: string): string | undefined {
  * no NaN at all (it stores one as NULL); Oracle AI Database 23.26.3 reads its own
  * constants into `BINARY_DOUBLE` and `BINARY_FLOAT`; Databend (M08b, on the pinned image) inserted
  * `'NaN'::FLOAT`, `'inf'::DOUBLE` and `'-inf'::FLOAT` into its `FLOAT` and `DOUBLE` columns and read back NaN,
- * Infinity and -Infinity. Every other dialect, which either
+ * Infinity and -Infinity; Snowflake's trial setup (2026-10-12) created its FLOAT infinities with `'inf'::FLOAT` and
+ * `'-inf'::FLOAT`, and `'NaN'::FLOAT` is the same documented form. Every other dialect, which either
  * cannot store these values or was not replayed, keeps writing NULL.
  */
 const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFiniteWord, string>>>> = {
@@ -1032,6 +1052,7 @@ const NON_FINITE_LITERALS: Partial<Record<DatabaseType, Readonly<Record<NonFinit
   sqlite: { NaN: "NULL", Infinity: "9e999", "-Infinity": "-9e999" },
   oracle: { NaN: "BINARY_DOUBLE_NAN", Infinity: "BINARY_DOUBLE_INFINITY", "-Infinity": "-BINARY_DOUBLE_INFINITY" },
   databend: { NaN: "'NaN'::FLOAT", Infinity: "'inf'::DOUBLE", "-Infinity": "'-inf'::FLOAT" },
+  snowflake: { NaN: "'NaN'::FLOAT", Infinity: "'inf'::FLOAT", "-Infinity": "'-inf'::FLOAT" },
 };
 
 function nonFiniteLiteral(word: NonFiniteWord, dialect: DatabaseType | undefined): string {
@@ -1125,6 +1146,13 @@ function exportTableName(source: ResultExportSource): string {
   return deriveTableName(source.tabName);
 }
 
+/**
+ * The dialects whose INSERT is written `INSERT INTO t (...) SELECT ...;`. Snowflake's `INSERT ... VALUES` refuses
+ * `PARSE_JSON`, which its semi-structured cells are written with (`typed-literals.ts`), so every Snowflake row takes
+ * the SELECT form. Provisional until a replay on an account confirms it.
+ */
+const INSERT_SELECT_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["snowflake"]);
+
 /** Build the file for `format`. The caller owns naming it and handing it to the browser. */
 export function buildResultExport(format: ResultExportFormat, source: ResultExportSource): ResultExportFile {
   const { rows, dialect } = source;
@@ -1184,6 +1212,9 @@ export function buildResultExport(format: ResultExportFormat, source: ResultExpo
           if (!(error instanceof UnwritableValue)) throw error;
           return skippedRow(rowIndex, column, error.message, dialect);
         }
+      }
+      if (INSERT_SELECT_DIALECTS.has(dialect as DatabaseType)) {
+        return `INSERT INTO ${tableName} (${quotedColumns.join(", ")}) SELECT ${values.join(", ")};`;
       }
       return `INSERT INTO ${tableName} (${quotedColumns.join(", ")}) VALUES (${values.join(", ")});`;
     });

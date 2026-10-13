@@ -97,6 +97,12 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   // no quoting; the row is the inert answer Oxia's is.
   kubernetes: "standard",
   mqtt: "standard",
+  // No generator calls `quoteLiteral` for Firestore: a statement spells its strings through the console's own
+  // `jsString`; the row is the inert answer Oxia's is.
+  firestore: "standard",
+  // No generator calls `quoteLiteral` for RabbitMQ: a read request writes its names with JSON.stringify.
+  rabbitmq: "standard",
+  opcua: "standard",
   // Default `sql_mode`. A server running with NO_BACKSLASH_ESCAPES reads the
   // doubled backslash as two characters, which is why binding the value beats
   // quoting it wherever a bind form exists.
@@ -119,6 +125,9 @@ const LITERAL_ESCAPE: Record<DatabaseType, LiteralEscape> = {
   databend: "double-and-backslash",
   // GoogleSQL escapes the quote as \\' and does not accept doubling.
   bigquery: "backslash",
+  // Snowflake reads both escapes in a single-quoted string constant: a doubled quote is one quote, and a backslash
+  // escapes the next character, so it is doubled first, as Databend's is.
+  snowflake: "double-and-backslash",
   // SQL++ spells its literals the way JSON does — `char ::= unicode-character |
   // '\' ( '\' | '"' | "'" | 'b' | 'f' | 'n' | 'r' | 't' | 'u' hex hex hex hex )`.
   // Doubling is not in that grammar, so a doubled quote is not one literal there.

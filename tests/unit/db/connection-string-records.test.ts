@@ -150,7 +150,7 @@ describe("CONNECTION_STRING_ACCEPTED against each provider's own declaration (Sp
     expect(typeof provider.getCapabilities().supportsConnectionString).toBe("boolean");
   });
 
-  test("accepts a connection string on nine engines and refuses it on the other twenty-three", () => {
+  test("accepts a connection string on nine engines and refuses it on the other twenty-six", () => {
     expect(SHIPPED_DATABASE_TYPES.filter((type) => CONNECTION_STRING_ACCEPTED[type])).toEqual([
       "postgres",
       "mysql",
@@ -164,6 +164,7 @@ describe("CONNECTION_STRING_ACCEPTED against each provider's own declaration (Sp
     ]);
     expect(SHIPPED_DATABASE_TYPES.filter((type) => !CONNECTION_STRING_ACCEPTED[type])).toEqual([
       "bigquery",
+      "snowflake",
       "duckdb",
       "mssql",
       "druid",
@@ -185,6 +186,9 @@ describe("CONNECTION_STRING_ACCEPTED against each provider's own declaration (Sp
       "s3",
       "kubernetes",
       "mqtt",
+      "firestore",
+      "rabbitmq",
+      "opcua",
       "libredb",
     ]);
   });

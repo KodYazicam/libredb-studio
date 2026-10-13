@@ -11,7 +11,7 @@ import { storage } from "@/lib/storage";
 import { isDangerousQuery } from "@/components/QuerySafetyDialog";
 import { consoleTextByteLimit, statementRefusal } from "@/lib/db/destructive-commands";
 import { countCodeStatements, isMultiStatement } from "@/lib/sql/statement-splitter";
-import { resolveSqlGrammar } from "@/lib/sql/grammar";
+import { readsSqlText, resolveSqlGrammar } from "@/lib/sql/grammar";
 import { hasUnterminatedSpan } from "@/lib/sql/spans";
 import { DEFAULT_QUERY_LIMIT } from "@/lib/db/utils/query-limiter";
 import { shouldRefreshSchema } from "@/lib/query-generators";
@@ -128,15 +128,14 @@ const STOPPED_WAITING = {
 };
 
 /**
- * Cancel of a run that has no id on the server: a multi-statement script
- * (`/api/db/multi-query`) or a statement inside a transaction or SANDBOX
- * (`/api/db/transaction`). Neither route hands the provider a `queryId`, so the cancel route
+ * Cancel of a run that has no id on the server: a statement inside a transaction or SANDBOX
+ * (`/api/db/transaction`). That route hands the provider no `queryId`, so the cancel route
  * could only answer `false`; this says why instead of "not confirmed".
  */
 const RUN_NOT_CANCELLABLE = {
   title: "Stopped Waiting",
   description:
-    "A multi-statement script or a statement inside a transaction cannot be cancelled on the server, so it keeps running there until it ends.",
+    "A statement inside a transaction cannot be cancelled on the server, so it keeps running there until it ends.",
   variant: "destructive" as const,
 };
 
@@ -517,8 +516,11 @@ export function useQueryExecution({
       // is not one statement either: the splitter finds no boundary in it, yet
       // `SELECT E'\''; INSERT ...` is two statements to PostgreSQL.
       const grammar = resolveSqlGrammar(activeConnection.type);
+      // An engine whose text is not SQL enforces one statement in its own parser, where the SQL counter would read a `;`
+      // inside its comment or string as a boundary, so only SQL text is counted here.
       const oneStatement =
-        countCodeStatements(queryToExecute, grammar) <= 1 && !hasUnterminatedSpan(queryToExecute, grammar);
+        !readsSqlText(activeConnection.type) ||
+        (countCodeStatements(queryToExecute, grammar) <= 1 && !hasUnterminatedSpan(queryToExecute, grammar));
       const explainSupported = !metadata || metadata.capabilities.supportsExplain;
       const explainAccepted =
         isExplain &&
@@ -564,11 +566,13 @@ export function useQueryExecution({
       // without one, measured on PostgreSQL 18.6, Cancel left the plan statement
       // `active` after the run's own backend went idle (#1311). Its own rather than the
       // run's, because a provider tracks one statement per id.
+      // A strategy that declares backgroundPlan: false is never asked beside a run: its engine bills the plan.
       const sendsPlan =
         !isExplain &&
         !isLoadMore &&
         oneStatement &&
         explainStrategy !== null &&
+        explainStrategy.backgroundPlan !== false &&
         explainStrategy.buildSql(queryToExecute, "estimate") !== null;
       const planQueryId = sendsPlan ? `${queryId}-plan` : undefined;
       const run = { controller: abortController, queryId, planQueryId, serverCancellable: false };
@@ -680,8 +684,9 @@ export function useQueryExecution({
           : useMultiQuery
             ? "/api/db/multi-query"
             : "/api/db/query";
-        // Only this route carries the run's `queryId` to the provider (see the body below).
-        run.serverCancellable = queryEndpoint === "/api/db/query";
+        // The two routes that hand the provider the run's queryId: one statement, and a script,
+        // whose route binds it to each unit in turn.
+        run.serverCancellable = queryEndpoint !== "/api/db/transaction";
         const mainQueryPromise = appFetch(queryEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -700,7 +705,7 @@ export function useQueryExecution({
                   sql: queryToExecute,
                   options: isExplain ? {} : { limit, offset, unlimited },
                   ...(isExplain && { explain: { mode: "analyze" } }),
-                  ...(!useMultiQuery && { queryId }),
+                  queryId,
                 }),
           }),
           signal: abortController.signal,

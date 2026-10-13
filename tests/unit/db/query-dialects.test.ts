@@ -33,13 +33,16 @@ describe("QUERY_DIALECTS", () => {
   test("holds one record per member of the queryDialect union, and nothing else", () => {
     expect(Object.keys(QUERY_DIALECTS).sort()).toEqual([
       "etcd",
+      "firestore",
       "kafka",
       "kubectl",
       "libredb",
       "milvus",
       "mqtt",
+      "opcua",
       "oxia",
       "qdrant",
+      "rabbitmq",
       "redis",
       "s3",
     ]);
@@ -114,6 +117,29 @@ describe("QUERY_DIALECTS", () => {
         offersCodeGeneration: false,
         offersCountQuery: false,
       },
+      // Firestore: sampled field paths and documents, so no profile, model or SQL export; Generate Count Query writes a
+      // count() statement into a tab.
+      firestore: {
+        tabType: "firestore",
+        offersColumnProfiling: false,
+        offersCodeGeneration: false,
+        offersCountQuery: true,
+        offersSqlExport: false,
+      },
+      // A stream's columns are the fixed shape of a read result: no profile, model, count or SQL export.
+      rabbitmq: {
+        tabType: "rabbitmq",
+        offersColumnProfiling: false,
+        offersCodeGeneration: false,
+        offersCountQuery: false,
+        offersSqlExport: false,
+      },
+      opcua: {
+        tabType: "opcua",
+        offersColumnProfiling: false,
+        offersCodeGeneration: false,
+        offersCountQuery: false,
+      },
     });
   });
 
@@ -127,7 +153,7 @@ describe("QUERY_DIALECTS", () => {
     }
   });
 
-  test("a record may decline the SQL export formats, and only milvus's, qdrant's, oxia's, s3's and kubectl's do, so every other shipped engine keeps both", () => {
+  test("a record may decline the SQL export formats, and only milvus's, qdrant's, oxia's, s3's, rabbitmq's, kubectl's and firestore's do, so every other shipped engine keeps both", () => {
     // `bun run typecheck` is the assertion for the field: this literal compiles only while `DialectSpec` declares
     // `offersSqlExport`, and bun strips types, so no runtime expect on it could fail. What a declining record does
     // to the menus is pinned by the export gate's own tests.
@@ -145,7 +171,9 @@ describe("QUERY_DIALECTS", () => {
         dialect === "qdrant" ||
         dialect === "oxia" ||
         dialect === "s3" ||
-        dialect === "kubectl"
+        dialect === "rabbitmq" ||
+        dialect === "kubectl" ||
+        dialect === "firestore"
       )
         continue;
       expect(Object.hasOwn(spec, "offersSqlExport"), `the ${dialect} record declares offersSqlExport`).toBe(false);
@@ -154,13 +182,25 @@ describe("QUERY_DIALECTS", () => {
     expect(QUERY_DIALECTS.qdrant.offersSqlExport).toBe(false);
     expect(QUERY_DIALECTS.oxia.offersSqlExport).toBe(false);
     expect(QUERY_DIALECTS.s3.offersSqlExport).toBe(false);
+    expect(QUERY_DIALECTS.rabbitmq.offersSqlExport).toBe(false);
     expect(QUERY_DIALECTS.kubectl.offersSqlExport).toBe(false);
+    expect(QUERY_DIALECTS.firestore.offersSqlExport).toBe(false);
   });
 });
 
 describe("registeredDialect, dialectSpec and declaresDialect", () => {
   test("a declared, registered dialect is found, with its record", () => {
-    for (const dialect of ["libredb", "redis", "kafka", "etcd", "milvus", "qdrant", "oxia", "s3"] as const) {
+    for (const dialect of [
+      "libredb",
+      "redis",
+      "kafka",
+      "etcd",
+      "milvus",
+      "qdrant",
+      "oxia",
+      "s3",
+      "firestore",
+    ] as const) {
       const caps = makeCaps({ queryDialect: dialect });
       expect(registeredDialect(caps)).toBe(dialect);
       expect(dialectSpec(caps)).toBe(QUERY_DIALECTS[dialect]);

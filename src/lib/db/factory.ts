@@ -231,6 +231,13 @@ export async function createDatabaseProvider(
       return new BigQueryProvider(connection, options);
     }
 
+    case "snowflake": {
+      // The explicit /index specifier keeps this dynamic import statically analysable. Two arguments only: the
+      // transport deps are a test's seam, and the origin comes from the Account field alone.
+      const { SnowflakeProvider } = await import("./providers/sql/snowflake/index");
+      return new SnowflakeProvider(connection, options);
+    }
+
     case "cassandra": {
       // The explicit /index specifier keeps this dynamic import statically
       // analysable: a bare directory resolves only at runtime, which the bundler
@@ -265,6 +272,13 @@ export async function createDatabaseProvider(
       // cannot trace into a chunk.
       const { CouchbaseProvider } = await import("./providers/document/couchbase/index");
       return new CouchbaseProvider(connection, options);
+    }
+
+    case "firestore": {
+      // The explicit /index specifier keeps this dynamic import statically analysable. Read-only whatever the flag
+      // says, so no execution context rides along, as for Kubernetes.
+      const { FirestoreProvider } = await import("./providers/document/firestore/index");
+      return new FirestoreProvider(connection, options);
     }
 
     // Key-Value Stores - dynamically imported
@@ -359,6 +373,32 @@ export async function createDatabaseProvider(
       return new MqttProvider(connection, options);
     }
 
+    // RabbitMQ: the second member of the stream family, read-only whatever the flag says. No seam is passed: the
+    // provider runs on its production management transport, AMQP dial and clock.
+    case "rabbitmq": {
+      // The explicit /index specifier keeps this dynamic import statically analysable.
+      const { RabbitMQProvider } = await import("./providers/stream/rabbitmq/index");
+      return new RabbitMQProvider(connection, options);
+    }
+
+    // OPC UA: an industrial address space, browsed level by level. Read-only whatever the flag says,
+    // so no execution context rides along, as for Kubernetes.
+    case "opcua": {
+      // The explicit /index specifier keeps this dynamic import statically analysable.
+      const { OpcuaProvider } = await import("./providers/industrial/opcua/index");
+      // THE LIBRARY IS IMPORTED BY THE FIRST CONNECT, NOT BY CONSTRUCTION, and that is measured
+      // rather than tidy: `node-opcua-hostname` calls `prepareFQDN()` at import time, un-awaited,
+      // and its `dns.lookupService` throws inside a callback where the library's own try/catch
+      // cannot see it. Under Node 24.14.0 here the hostname resolves to `::1` and nothing happens;
+      // under Bun 1.4.2 it resolved to a zone-indexed link-local address
+      // (`fe80::…%15`) and the error surfaced as an uncaught one. Constructing a provider must not
+      // depend on that, so the import happens when a session is actually opened.
+      return new OpcuaProvider(connection, options, async (read) => {
+        const { openLibrarySession } = await import("./providers/industrial/opcua/library");
+        return openLibrarySession(read);
+      });
+    }
+
     // Platforms - dynamically imported
     case "kubernetes": {
       // The explicit /index specifier keeps this dynamic import statically analysable. Read-only whatever the flag
@@ -378,7 +418,7 @@ export async function createDatabaseProvider(
         // This list is NOT type-checked against the union - a new case above with no
         // entry here is silent - so it is kept in the same order as the cases and
         // tests/isolated/factory.test.ts pins individual names in it by regex.
-        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, cassandra, elasticsearch, opensearch, mongodb, couchbase, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, kubernetes, libredb`,
+        `Unknown database type: ${connection.type}. Supported types: postgres, mysql, sqlite, duckdb, libsql, oracle, db2, mssql, clickhouse, druid, trino, databend, bigquery, snowflake, cassandra, elasticsearch, opensearch, mongodb, couchbase, firestore, redis, etcd, oxia, prometheus, influxdb, influxdb3, kafka, neo4j, milvus, qdrant, s3, mqtt, opcua, rabbitmq, kubernetes, libredb`,
         connection.type,
       );
   }
@@ -684,6 +724,27 @@ const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
+ * Whether an idle entry's provider reports a run in flight, so the sweep keeps it for the next sweep.
+ * A throw is the provider's defect: logged at error, and the entry is evicted as one without the method, because
+ * rethrowing would abandon the rest of the sweep and reading it as busy would let such a provider pin its entry.
+ */
+function keepsRunInFlight(
+  provider: DatabaseProvider,
+  id: string,
+  noun: "idle provider" | "idle profiled provider",
+): boolean {
+  if (provider.hasRunsInFlight === undefined) return false;
+  try {
+    return provider.hasRunsInFlight() === true;
+  } catch (error) {
+    logger.error(`[DB] hasRunsInFlight() threw for ${noun} ${sanitize(id)}, so it is evicted as idle.`, error, {
+      connectionId: id,
+    });
+    return false;
+  }
+}
+
+/**
  * Evict providers that have been idle longer than maxIdleMs.
  * Called by the periodic sweep timer, but also exported for direct testing.
  *
@@ -696,9 +757,14 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
   for (const [key, entry] of providerCache) {
     if (now - entry.lastUsed >= maxIdleMs) {
       const id = entry.connectionId;
-      logger.info(
-        `[DB] Evicting idle provider: ${sanitize(id)} (idle ${Math.round((now - entry.lastUsed) / 60000)}min)`,
-      );
+      const idleMinutes = Math.round((now - entry.lastUsed) / 60000);
+      if (keepsRunInFlight(entry.provider, id, "idle provider")) {
+        logger.info(
+          `[DB] Keeping idle provider ${sanitize(id)} (idle ${idleMinutes}min): it reports a run in flight, so the next sweep checks it again.`,
+        );
+        continue;
+      }
+      logger.info(`[DB] Evicting idle provider: ${sanitize(id)} (idle ${idleMinutes}min)`);
       try {
         await entry.provider.disconnect();
       } catch (error) {
@@ -726,6 +792,12 @@ export async function evictIdleProviders(maxIdleMs: number = IDLE_TIMEOUT_MS): P
   // connection id, so it is closed only once nothing serves that connection.
   for (const [key, entry] of profiledProviderCache) {
     if (now - entry.lastUsed >= maxIdleMs) {
+      if (keepsRunInFlight(entry.provider, entry.connectionId, "idle profiled provider")) {
+        logger.info(
+          `[DB] Keeping idle profiled provider ${sanitize(entry.connectionId)}: it reports a run in flight, so the next sweep checks it again.`,
+        );
+        continue;
+      }
       logger.info(`[DB] Evicting idle profiled provider: ${sanitize(entry.connectionId)}`);
       try {
         await entry.provider.disconnect();

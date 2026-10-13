@@ -9,6 +9,11 @@ import { clearRateLimitState } from "@/lib/api/rate-limit";
 import { agentReadSqlInput } from "@/lib/db/operations/statement-guard";
 import { OXIA_MAX_TEXT_BYTES } from "@/lib/db/providers/keyvalue/oxia/constants";
 import {
+  SNOWFLAKE_ERROR_SENTENCES,
+  SnowflakeError,
+  toDatabaseError as toSnowflakeDatabaseError,
+} from "@/lib/db/providers/sql/snowflake/errors";
+import {
   QueryError,
   TimeoutError,
   DatabaseError,
@@ -478,6 +483,28 @@ describe("POST /api/db/query", () => {
 
     expect(res.status).toBe(408);
     expect(data.error).toContain("timed out");
+  });
+
+  test("a Snowflake statement past its deadline answers 400 QUERY_ERROR, not 408, so the client sends nothing again", async () => {
+    // A 408 is retryable, and a resend would start the statement on the warehouse a second time; the Snowflake
+    // provider cancels the statement at its deadline and throws a QueryError naming the timeout instead.
+    const sql = "SELECT SYSTEM$WAIT(700000)";
+    (mockProvider.query as ReturnType<typeof mock>).mockRejectedValueOnce(
+      toSnowflakeDatabaseError(new SnowflakeError("query", SNOWFLAKE_ERROR_SENTENCES.deadline(604_800)), sql),
+    );
+
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: { connection: validConnection, sql },
+    });
+
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{ error: string; code: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(res.status).not.toBe(408);
+    expect(data.code).toBe("QUERY_ERROR");
+    expect(data.error).toBe(SNOWFLAKE_ERROR_SENTENCES.deadline(604_800));
   });
 
   test("returns 500 for DatabaseError", async () => {
@@ -1106,6 +1133,25 @@ describe("POST /api/db/query with an explain request", () => {
     expect(mockProvider.query).not.toHaveBeenCalled();
   });
 
+  test("an explain on an engine whose text is not SQL is not counted as SQL statements: the provider's own gate answers", async () => {
+    // A Firestore statement enforces one statement in its own parser; the SQL counter would read a `;` in its comment as a
+    // second statement. On every other non-SQL engine no EXPLAIN is declared, so the answer moves from the statement-count
+    // sentence to this one, and no UI path sends such a request (Firestore spec 3.2).
+    const req = createMockRequest("/api/db/query", {
+      method: "POST",
+      body: {
+        connection: { ...validConnection, type: "mongodb" },
+        sql: "first; second",
+        explain: { mode: "estimate" },
+      },
+    });
+    const res = await POST(req as never);
+    const data = await parseResponseJSON<{ error: string }>(res);
+    expect(res.status).toBe(400);
+    expect(data.error).toBe("This server does not support EXPLAIN");
+    expect(mockProvider.query).not.toHaveBeenCalled();
+  });
+
   test("returns 400 and runs nothing when the provider names a format this build does not register", async () => {
     // `getExplainStrategy` indexes a Record, so a format outside the union comes back as
     // undefined rather than null. A strict null check let that fall through to
@@ -1670,5 +1716,78 @@ describe("POST /api/db/query: an oxia buffer", () => {
     );
     expect(res.status).toBe(200);
     expect((mockProvider.prepareQuery as ReturnType<typeof mock>).mock.calls[0][0]).toBe(atBound);
+  });
+});
+
+describe("POST /api/db/query: the request's abort", () => {
+  function abortableRequest(body: Record<string, unknown>, signal: AbortSignal): Request {
+    return new Request("http://localhost:3000/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  beforeEach(() => {
+    clearRateLimitState();
+    mockGetSession.mockImplementation(async () => ({ role: "admin", username: "admin" }));
+  });
+
+  test("an abort during the call cancels the bound id once", async () => {
+    let release: (() => void) | undefined;
+    const cancelQuery = mock(async (_id: string) => {
+      release?.();
+      return true;
+    });
+    const provider = Object.assign(createMockProvider(), { cancelQuery });
+    (provider.query as ReturnType<typeof mock>).mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      throw new QueryCancelledError("The query was cancelled.");
+    });
+    mockGetOrCreateProvider.mockImplementation(async () => provider as never);
+    const controller = new AbortController();
+    const answer = POST(
+      abortableRequest(
+        { connection: validConnection, sql: "SELECT 1", queryId: "q-9-one" },
+        controller.signal,
+      ) as never,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+    await answer;
+    expect(cancelQuery).toHaveBeenCalledTimes(1);
+    expect(cancelQuery).toHaveBeenCalledWith("q-9-one");
+  });
+
+  test("a request already aborted calls provider.query zero times", async () => {
+    const provider = Object.assign(createMockProvider(), { cancelQuery: mock(async () => true) });
+    mockGetOrCreateProvider.mockImplementation(async () => provider as never);
+    const controller = new AbortController();
+    controller.abort();
+    await POST(
+      abortableRequest(
+        { connection: validConnection, sql: "SELECT 1", queryId: "q-9-two" },
+        controller.signal,
+      ) as never,
+    );
+    expect(provider.query).not.toHaveBeenCalled();
+  });
+
+  test("a provider without cancelQuery sees no cancel", async () => {
+    const provider = createMockProvider();
+    mockGetOrCreateProvider.mockImplementation(async () => provider as never);
+    const controller = new AbortController();
+    const answer = POST(
+      abortableRequest(
+        { connection: validConnection, sql: "SELECT 1", queryId: "q-9-three" },
+        controller.signal,
+      ) as never,
+    );
+    controller.abort();
+    await answer;
+    expect("cancelQuery" in provider).toBe(false);
   });
 });

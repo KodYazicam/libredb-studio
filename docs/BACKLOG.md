@@ -27,23 +27,23 @@ None of it is a GitHub issue.
 
 **Sections**
 
-- [SQL statement reading](#sql-statement-reading) — S2–S7 · 5
-- [Drivers and connections](#drivers-and-connections) — D1-D292, U17 · 193
+- [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
+- [Drivers and connections](#drivers-and-connections) — D1-D344, U17 · 244
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U114 · 105
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U138 · 128
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC21 · 18
+- [Documentation](#documentation) — DOC3-DOC25 · 22
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
 - [Security Phase 2 deferrals](#security-phase-2-deferrals) — C3–C11 · 6
 - [Security Phase 3 deferrals](#security-phase-3-deferrals) — K4-K8 · 5
-- [Security scanner triage](#security-scanner-triage) — SCAN1 · 1
+- [Security scanner triage](#security-scanner-triage) — SCAN1-SCAN2 · 2
 - [Agent M1 deferrals (#328)](#agent-m1-deferrals-328) — A2–A8 · 6
-- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B106 · 42
+- [Agent M2 deferrals (#329)](#agent-m2-deferrals-329) — B2-B110 · 46
 - [Passkey deferrals (#785)](#passkey-deferrals-785) — PK1-PK9 · 8
-- [MCP server deferrals (#246)](#mcp-server-deferrals-246)
+- [MCP server deferrals (#246)](#mcp-server-deferrals-246) — MCP1-MCP3 · 3
 
 ---
 
@@ -129,6 +129,18 @@ is the same gap inside a dialect that is read: it is not a unit, so it is still 
 **Done when:** each dialect's body rule is measured on a live server and written as its `script` row, with
 a test per dialect in `tests/unit/sql/statement-splitter.test.ts` (the MySQL one there pins today's cut).
 MySQL's `BEGIN` alone is a transaction, as SQLite's is, so its rule is not Oracle's `pl-sql`.
+
+### S9. A CQL `BEGIN BATCH … APPLY BATCH` is cut at its inner `;`
+
+CQL's batch is one statement whose body holds a `;` after each inner write (`docs/providers/cassandra.md`, "`BEGIN BATCH … APPLY BATCH` is a single statement").
+The `cassandra` grammar row declares no body rule, `script: DEFAULT_SQL_GRAMMAR.script` (`src/lib/sql/grammar.ts:663`), so `splitExecutionUnits` in `src/lib/sql/statement-splitter.ts` ends a unit at every code `;`.
+On this tree a two-insert batch comes back as three units: `BEGIN BATCH` with the first `INSERT`, the second `INSERT`, and `APPLY BATCH`.
+The multi-statement route runs those units one by one (`src/app/api/db/multi-query/route.ts:213`), so the first fails with "line 0:-1 mismatched input <EOF> expecting K_APPLY" and the editor reports "Executed 0/81 statements" for a batch the splitter cut into 81 units, where the batch should have run as one statement.
+Neither `blocks` value fits: `pl-sql` and `trigger-body` read `BEGIN … END`, and a CQL batch closes with `APPLY BATCH`.
+
+Seen 2026-10-12 in the editor during other provider work; reproduced on this tree by calling `splitExecutionUnits` with the `cassandra` grammar.
+
+**Done when:** the `cassandra` row declares a body rule that keeps `BEGIN [UNLOGGED | COUNTER] BATCH … APPLY BATCH` as one unit, the rule is measured on Apache Cassandra and ScyllaDB, and `tests/unit/sql/statement-splitter.test.ts` pins a batch with several inner `;` as one unit beside a following statement as a second.
 
 ---
 
@@ -1160,9 +1172,9 @@ test pins the behaviour that was chosen.
 
 ### D85. The `@/lib/auth` mock is hand-copied across a layer, untyped, and already misses four exports
 
-`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 51 hits, re-measured 2026-10-07.
-Eighteen of them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`, the agent routes' pattern).
-Thirty write out the same five-key object - `getSession`, `signJWT`, `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token nothing reads, and one of those thirty is `tests/helpers/object-edit-route-harness.ts`, a shared harness that could have been the factory and copied the stub instead.
+`grep -rl 'mock.module("@/lib/auth"' tests/` returns exactly 53 hits, re-measured 2026-10-12.
+Nineteen of them spread the real module and replace one function (`{ ...realAuth, getSession: mockGetSession }`, the agent routes' pattern).
+Thirty-one write out the same five-key object - `getSession`, `signJWT`, `verifyJWT`, `login`, `logout` - down to the same `mock(async () => "mock-token")` for a token nothing reads, and one of those thirty-one is `tests/helpers/object-edit-route-harness.ts`, a shared harness that could have been the factory and copied the stub instead.
 The remaining three write a shorter stub of their own, two with two keys and one with a single `getSession`.
 
 `src/lib/auth.ts` exports nine names. The four no hand-written stub carries are
@@ -1823,7 +1835,7 @@ Not fixed there: the change is to the adapter's log-dir read, whose error table 
 
 ### D126. Concurrent first acquisitions of one connection and profile each open a provider
 
-`acquireExecutionProfileProvider` (`src/lib/db/factory.ts:1010-1121`) checks the profiled cache, and on a miss constructs and connects a provider, then stores it (`:1117`).
+`acquireExecutionProfileProvider` (`src/lib/db/factory.ts:1086-1197`) checks the profiled cache, and on a miss constructs and connects a provider, then stores it (`:1193`).
 Two callers that miss at the same time each construct one, and the later store overwrites the earlier entry, so the earlier provider stays connected with nothing left to close it.
 The editor and agent paths reach this function the same way.
 `/api/mcp` avoids it on its own side, with an in-flight map keyed on the exported `profiledCacheKey` (`src/lib/mcp/context.ts`).
@@ -2432,6 +2444,8 @@ The shared Source tab heads an `unavailable` part "This definition could not be 
 Oxia and etcd both show it above their own "The value is empty (0 bytes)" sentence.
 
 Found 2026-10-04 by the browser pass of the Oxia provider (step 6).
+
+The shared half is in place: `ObjectSourcePart` has a neutral member, `{ id, label, unavailable, statement: true }`, which the Source tab draws without the failure heading, so what remains is Oxia and etcd answering an empty value with it.
 
 **Done when:** an empty value reads as an empty value, with no failure heading or error icon.
 
@@ -3056,6 +3070,456 @@ Through an SSH tunnel the MQTT socket dials the local forward, a loopback addres
 Found 2026-10-12 while extracting the egress rule for a socket dial from the shared node transport.
 
 **Done when:** `dialBroker` calls `socketEgress(host, { refusesLinkLocal: true })` before it dials, passes the lookup to `net.connect` and `tls.connect` and lets its refusal through unchanged; `docs/providers/mqtt.md`, `docs/SECURITY.md` row 0.6 and "Known limits", the `DB_HTTP_BLOCK_PRIVATE_HOSTS` row of `docs/API_DOCS.md` and `.env.example` name the MQTT dial among what the flag covers; with tests for a link-local literal and a link-local DNS answer with the flag off, a private answer with the flag on, and a tunnelled connection.
+
+### D293. Firestore connections cannot write
+
+A Firestore connection reads and never writes: the transport admits seven read requests and refuses every other one before any socket (`src/lib/db/providers/document/firestore/requests.ts`), and the console refuses `set`, `add`, `update`, `delete`, `create`, `batch`, `runTransaction`, `bulkWriter` and `recursiveDelete` with one sentence.
+Writes need a design of their own, because a call made with an IAM credential is not bounded by Firebase Security Rules.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a write design is approved (which requests, which confirmation, which audit line, how Security Rules' absence is shown), the closed request table admits exactly those requests, and tests pin each one and every refusal around it.
+
+### D294. The Google credential and token code exists twice
+
+`src/lib/db/providers/sql/bigquery/auth.ts` and `src/lib/db/providers/document/firestore/google-credentials.ts` with `google-token-source.ts` hold the same Google credential parsing, Application Default Credentials chain, grants and token cache, and each provider keeps its own lane pool, because no provider imports from another provider's directory.
+The Firestore half was written with BigQuery's signatures, with the scope, the environment names and the provider label as parameters, so a hoist is a swap of imports.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** one module outside every provider directory holds the Google-generic half and the lane pool, both providers import it with their own scope, environment names and policy, and both providers' tests pass unchanged.
+
+### D295. Firestore Pipelines are not offered
+
+The console compiles the Admin SDK query chain to `runQuery` and `runAggregationQuery` only, and the transport refuses `executePipeline`.
+Pipelines answer only on Enterprise edition databases, and reading them needs a pipeline grammar and its own bounds.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a read-only pipeline subset is designed with its bounds and billing, the closed table admits `executePipeline` for it, and the console, its tests and `docs/providers/firestore.md` cover it.
+
+### D296. A Firestore database in Datastore mode is refused
+
+The connect probe reads the database resource and refuses a database whose `type` is `DATASTORE_MODE` with a sentence, because the Firestore API does not serve it (`docs/providers/firestore.md` section 12).
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** an engine for Datastore mode (the Datastore API, kinds, entities and GQL) is designed as its own type id or as a declared mode of this one, with captures from the emulator's Datastore mode.
+
+### D297. Firestore's MongoDB-compatible API is reached only through the `mongodb` type, unmeasured
+
+A Firestore Enterprise database with MongoDB compatibility speaks the MongoDB wire protocol on its own host, so it stays with the `mongodb` connection type, and the Firestore provider's refusal of a database whose Firestore API access is off says so.
+Firestore documents no support for several commands the `mongodb` type sends for its health, monitoring and kill surfaces (`listDatabases` with `authorizedDatabases`, `serverStatus`, `dbStats`, `currentOp`, `killOp`, `$indexStats`), and lists driver versions 5 and 6 while Studio ships 7.7.0; nothing was measured on a real database.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a MongoDB-compatible Firestore database is measured through the `mongodb` type, each surface's answer is recorded in `docs/providers/mongodb.md`, and each surface that fails either answers a sentence naming Firestore or is fixed, with tests.
+
+### D298. Firestore has no Firebase Auth user sign-in
+
+Studio reads as an IAM identity, so Firebase Security Rules do not apply; reading as a Firebase Auth user, under the project's rules, would need a sign-in flow and an ID token per user.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a connection can sign in as a Firebase Auth user, every request carries that user's ID token, Security Rules decide what it reads, and the doc and the dialog say which identity a connection reads as.
+
+### D299. Firestore has no service-account impersonation
+
+A credential file of type `impersonated_service_account` is refused, and a connection cannot read as one service account through another.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** an impersonated identity is resolved through the IAM Credentials API from a closed set of source credentials, its token is scoped and cached like the others, and tests pin the grant and its refusals.
+
+### D300. Firestore regional endpoints are not offered
+
+Every request goes to `https://firestore.googleapis.com`, a constant, and no connection field names a host.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a connection can pick a regional or locational endpoint from a closed allow-list, never a free host field, with tests that no other host is dialled.
+
+### D301. The Firestore console has no `limitToLast`
+
+The console refuses `limitToLast`, which the SDK implements by reversing the order and the cursors and reading the answer backwards.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** `limitToLast(n)` compiles to the reversed query with its cursors swapped, the rows come back in the statement's order, and the compiler's tests cover each cursor combination.
+
+### D302. Firestore has no point-in-time reads
+
+The transport refuses `readTime` on every request, so every read sees the current data.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a statement can name a read time within the database's retention window, the transport admits `readTime` only on read requests, and tests pin both the admitted and the refused forms.
+
+### D303. The Firestore console has no bytes literal
+
+A statement cannot compare a field with a bytes value, because the console grammar has no literal for one.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a bytes literal (such as `Bytes.fromBase64String("...")`) parses, compiles to a `bytesValue`, and is covered by the parser, compiler and fuzz tests.
+
+### D304. Firestore's Enterprise BSON types are shown but not typed for editing or filtering
+
+An Enterprise database that also serves the MongoDB API can hold `minKey`, `maxKey`, `regex`, `objectId`, `int32`, `decimal128`, `bsonTimestamp` and `bsonBinary` values; the grid names their types and shows the decoded map, and the console has no literal for any of them.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** each BSON type has a cell form, a console literal and a filter rule, measured on an Enterprise database, with tests.
+
+### D305. No CI job runs the Firestore emulator
+
+The integration test replays captures of emulator 1.22.0, and `tests/live/firestore-live-check.ts` runs by hand; no CI job starts an emulator, so a newer emulator's behaviour is noticed only when someone captures again.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** an optional CI job starts the pinned emulator, runs the live check and the capture harness in a dry mode that compares answers with the committed captures, and reports a difference without failing the required checks.
+
+### D306. A BigQuery connection sends its access token to the BigQuery emulator host
+
+With `BIGQUERY_EMULATOR_HOST` set, `apiOrigin()` points every BigQuery API request at that host over plain HTTP, while `createBigQueryTransport()` still builds the connection's token source and sends `Authorization: Bearer <token>` on each request (`src/lib/db/providers/sql/bigquery/transport.ts`).
+A connection that carries a service-account key or an authorized-user file, or a server that reads its own Google identity, therefore mints a real access token and hands it to the emulator host.
+`.env.example` already says never to set the variable on a server people use.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** with `BIGQUERY_EMULATOR_HOST` set, no token source is built and no credential is read, requests carry a fixed placeholder bearer, a connection that carries a credential is refused with a sentence naming the variable, and tests show that no request reaches the token endpoint or the metadata server.
+
+### D308. Kafka parses a JSON payload with no depth bound
+
+`src/lib/db/providers/stream/kafka/decode.ts` hands a value that looks like JSON to `JSON.parse` with no nesting bound, so a deeply nested record value likely makes the query route's `NextResponse.json` throw on Node 24, as a RabbitMQ payload did before its provider bounded the depth.
+This is inferred from the shared pattern and not measured on Kafka.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** a Kafka record value nested deeper than a named bound is shown in its base64 or text form rather than parsed, with a test that sends one through the query route on Node 24 and Bun.
+
+### D309. Kafka declares `READ_ONLY_ENFORCED: false` by default, not by reason
+
+`READ_ONLY_ENFORCED.kafka` is false although the provider has no write path, which reads as a decision while it is an older provider's default; the RabbitMQ, S3 and Kubernetes rows declare true for the same reason Kafka could.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** `READ_ONLY_ENFORCED.kafka` is true with the S3 and Kubernetes comment wording, or the row says why it is false, with the capability test updated.
+
+### D310. Kubernetes runs its access reviews and namespace listing on every background cache miss
+
+The Kubernetes provider's `connect()` runs its self-review calls and the namespace listing, so every background provider build pays them, not only a user's Test Connection.
+`testConnectionWarnings?()` now gives a provider a place that only Test Connection calls.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the checks that only a person needs to see move to `testConnectionWarnings()`, `connect()` keeps what every build needs, and a route-sequence test pins both.
+
+### D311. Two MQTT error sentences interpolate runtime or library text
+
+`src/lib/db/providers/keyvalue/mqtt/session.ts` builds `The broker could not be reached: ${error.message}` and `The broker sent a packet we cannot read: ${String(value)}`, so a runtime's or the parser's own words reach the user and the query history.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** both sentences are fixed text chosen by error code or case, with a test that a sentinel in the underlying error never reaches the route's answer.
+
+### D312. MQTT raises network failures and timeouts as `QueryError`
+
+`session.ts` raises a refused connection, a reset and a timeout as `QueryError`, which the API answers with 400 and no `retryable`, where a `ConnectionError` answers 503 retryable and a `TimeoutError` its own status.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** each network failure is a `ConnectionError` and each timeout a `TimeoutError`, with the route's status and `retryable` pinned per case.
+
+### D313. MQTT shows a payload that is not UTF-8 with replacement characters
+
+`src/lib/db/providers/keyvalue/mqtt/objects.ts` decodes a payload with `fatal: false`, so bytes that are not UTF-8 become U+FFFD with no base64 form and no notice.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** a payload that does not decode as UTF-8 is shown in a base64 form with a notice, with a test on invalid bytes.
+
+### D314. Two readers of `allowInsecureAuth` omit MQTT
+
+The `allowInsecureAuth` docblock in `src/lib/types.ts` and the comment in `src/lib/db/provider-cache-key.ts` list the engines that read the consent and leave MQTT out, while `docs/API_DOCS.md` and `docs/SEED_CONNECTIONS.md` include it; RabbitMQ's clause, added to all of them, does not fix MQTT's.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** every line that lists the readers names MQTT, held by a test that compares the lists with the types that declare the field.
+
+### D315. The API replaces every provider's timeout sentence with one shared sentence
+
+`createErrorResponse` in `src/lib/api/errors.ts` answers every `TimeoutError` with "Query timed out. Please try a simpler query or increase timeout.", so a provider's phase-specific sentence, such as RabbitMQ's "No answer from {host}:{port} within {n} s.", never reaches the user; 19 provider files write such sentences today.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the route passes a provider's own `TimeoutError` message through for every provider, in a shared PR with a route test per class.
+
+### D316. The package does not export the object source part predicates
+
+`@libredb/studio` exports the `ObjectSourcePart` type (`src/exports/types.ts`) but neither `isSourcePartStatement` nor `isSourcePartUnavailable` (`src/lib/db/object-kinds.ts`), so an embedder that renders an object source itself cannot narrow a part to its statement or its refusal without copying the two predicates.
+The refusal predicate has never been exported.
+The statement predicate was kept unexported on purpose when the statement part was added, so that the package surface grows only by the owner's decision, not as a side effect of that change.
+
+Found 2026-10-12 in an external review of the object source statement change; pre-existing for the refusal predicate.
+
+**Done when:** the owner decides whether the package exports the predicates, and either both are exported from `src/exports/` with a test that imports them from the built package entry and the `attw` check passing, or this entry is closed as accepted.
+
+### D317. Snowflake has no OAuth sign-in
+
+A Snowflake connection signs in with a key pair or a programmatic access token only (`docs/providers/snowflake.md` section 2).
+OAuth needs two different designs: a local application for npx and the desktop app, and a custom security integration with a callback route and per-user refresh-token storage for a hosted Studio.
+Either one carries its own security review.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a Snowflake connection can sign in through OAuth on npx, desktop and a hosted Studio, refresh tokens are stored per user under the same secret rules as a password, the callback route is covered by the security suite, and the provider doc states which flow each build uses.
+
+### D318. Snowflake has no workload identity federation for SERVICE users
+
+A Snowflake SERVICE user on a cloud host could sign in with the host's own cloud identity instead of a stored key or token.
+The provider reads its credential from the connection alone (`src/lib/db/providers/sql/snowflake/auth.ts`), so a server-side identity is not offered.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** an operator-seeded Snowflake connection can sign in with workload identity federation behind an explicit server opt-in, in the shape BigQuery's server credentials take, with tests that a user-created connection cannot reach it.
+
+### D319. Snowflake results have no Load More
+
+`supportsResultPagination` is false for Snowflake, because each page would re-run the statement on the warehouse and pages without ORDER BY can repeat or drop rows.
+Snowflake keeps a statement's result for later reads, by partition or through `RESULT_SCAN('<handle>')`, so a page could be read without running the statement again.
+Doing so needs the handle kept per provider instance and shared between the users of a connection, which no other engine does today.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a Snowflake result past the first page loads by partition or by `RESULT_SCAN`, measured on a live account, with the handle kept under an owner check, and `supportsResultPagination` is true with its census row and doc section updated.
+
+### D320. The column profiler cannot sample a column
+
+The profile route counts whole columns, so a billed engine either scans every row or opts out, as Snowflake does with `supportsColumnProfiling: false`.
+A per-dialect sampled form (`SAMPLE (n ROWS)` on Snowflake, `TABLESAMPLE` elsewhere) would let such an engine offer a profile that bills a bounded scan.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the shared profile route can build a sampled statement per dialect, the profile says it was sampled and from how many rows, and Snowflake turns the profiler on with a test pinning the sampled text.
+
+### D321. Snowflake's grammar row has no Scripting block member
+
+The Snowflake row in `src/lib/sql/grammar.ts` reads `script.blocks` as `"none"`, so a bare `BEGIN ... END` block splits at its first `;` and Snowflake refuses the fragment; the doc tells the user to wrap it in `EXECUTE IMMEDIATE $$ ... $$`.
+The trial capture measured that the SQL API takes a bare block (M58).
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the grammar row reads a bare block as one unit and the grammar tests pin it.
+
+### D322. Snowflake sends a script one statement per request
+
+Every Snowflake request carries `multi_statement_count: "1"`, so a script is split by the editor and sent unit by unit.
+Sending a whole script in one request with a higher count would keep one session context across its statements, but the split is then Snowflake's, and the confirmation gate and the cancel bridge are built on Studio's own split.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a decision is recorded on whether a script may go as one request, and if so the gate reads every statement first, the cancel covers the request, and the results map back to their statements, with tests.
+
+### D323. Snowflake's `connections.toml` cannot be pasted
+
+The paste box reads Snowflake URLs and JDBC and SQLAlchemy strings, but not a `connections.toml` section, which is how the Snowflake CLI stores a connection.
+Reading it needs a small TOML parser in the browser, so the text never leaves it, with the same refusals for key and path parameters the URL paste has.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a pasted `connections.toml` section fills the Snowflake fields in the browser, refuses inline keys and file paths by name as the URL paste does, and keeps nothing of the text, with parser tests over sentinel secrets.
+
+### D324. Snowflake has no agent execute mode and no MCP `run_read_query`
+
+The provider declares no `queryReadOnly`, so an Agent-mode run and MCP `run_read_query` are refused for Snowflake before any statement is sent.
+A read-only path needs an enforcement Snowflake itself holds, such as a role that can only read, checked before each run, and a live adversarial probe of what that role can still change.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** Snowflake implements `queryReadOnly` on an engine-side read-only boundary, an adversarial live probe shows writes refused, and the agent and MCP census rows flip with their doc lines.
+
+### D325. Snowflake has no inline row edit
+
+`supportsInlineRowEdit` is false, because one apply would be N + 2 warehouse statements and N separate commits.
+The owner may want it once the warehouse cost of an apply is stated in the provider doc.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the cost of one apply is measured and stated in `docs/providers/snowflake.md`, the owner decides, and if it ships, an apply runs inside one `EXECUTE IMMEDIATE` block with tests of the generated text.
+
+### D326. Snowflake's ER diagram has no foreign keys
+
+`declaresForeignKeys` is false, because no documented source maps a foreign key's columns, so the diagram draws Snowflake tables without relations.
+`SHOW IMPORTED KEYS` lists declared foreign keys, but its answer shape is not yet captured.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** `SHOW IMPORTED KEYS` is captured on a live account, describe reads it into foreign keys, `declaresForeignKeys` is true, and the diagram and provider doc show the relations.
+
+### D327. Snowflake stages cannot be browsed, and streams, tasks and pipes show only their SHOW columns
+
+The tree lists stages, streams, tasks and pipes, but a stage's files are not listed (`LIST @stage`) and the other three open with the columns their `SHOW` returns, nothing more.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a stage opens to its file listing under the shared row budget, and streams, tasks and pipes have detail views of their own, with tests over captured answers.
+
+### D328. Databend does not declare `hasRunsInFlight()`
+
+The idle sweep spares a cached provider while `hasRunsInFlight()` answers true, and Snowflake declares it from its run registry.
+Databend keeps a run registry too but does not declare the method, so a Databend statement running longer than 30 minutes on an otherwise idle connection is still ended by the sweep's `disconnect()`.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** Databend declares `hasRunsInFlight()` from its run registry in a change of its own, its census row flips, and a test shows the sweep keeps a Databend provider with a run in flight.
+
+### D329. `identifierQuoting` has no upper-fold member
+
+Snowflake declares `identifierQuoting: "double-always"`, so every name Studio writes is quoted, which round-trips but makes generated SQL noisier than Snowflake users write it.
+A member that leaves an upper-case bare name unquoted and quotes everything else would match how Snowflake folds identifiers.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** `ProviderCapabilities.identifierQuoting` has an upper-fold member, Snowflake declares it, and the quoting tests cover a lower-case, a mixed-case and an upper-case name.
+
+### D330. The shared limiter misses Snowflake's `FETCH n` and `SELECT DISTINCT TOP n`
+
+The shared limiter appends `LIMIT 500` to a SELECT-shaped statement, but does not read a short `FETCH n` or `SELECT DISTINCT TOP n` as the statement's own bound.
+On Snowflake the provider's 16 MiB and 100,000-row budget still bounds such a result, so the gap costs rows, not memory.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the limiter reads both forms as an existing bound on the Snowflake dialect, with tests that it neither appends a second bound nor misses a larger one.
+
+### D331. The confirmation gate's per-dialect forms exist only for Snowflake
+
+`SqlGrammar.confirmForms` and `confirmCodeForms` let a dialect name the destructive forms the shared keyword set misses, and only Snowflake's row declares them.
+Other engines' replace, merge, call, unload and opaque-text forms still run unconfirmed; D246 covers Databend's, and the rest have no entry.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** every SQL engine's row declares its own confirmation forms, each form is pinned by `isDangerousQuery` for that engine, also behind comments, and each provider doc lists what its gate asks for.
+
+### D332. The seed plaintext warning knows only `password`
+
+`resolveField` in `src/lib/seed/credential-resolver.ts` warns about a plaintext value only when the field is `password`.
+A seed that writes a Snowflake `privateKey` or `privateKeyPassphrase`, or any other secret field, in plain text gets no warning.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the warning is derived from the secret fields of `CONNECTION_FIELDS`, so every secret field written in plain text warns once per connection, with a test over each secret field.
+
+### D333. The connection-string redactor misses several credential names, and `getConnectionInfo` is never called
+
+`redactConnectionString` in `src/lib/db/base-provider.ts` masks a parameter whose name holds `password`, `token`, `sslkey` or `secret`, so `pwd`, `passphrase` and a PEM block written into a parameter pass through.
+`getConnectionInfo`, the only caller of that redactor in the base provider, is declared and called nowhere.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the redactor masks `pwd`, `passphrase` and PEM armour with tests, and `getConnectionInfo` is either used where connection details are shown or removed.
+
+### D334. No census records which fields each engine's connection identity frames
+
+`connectionIdentity` in `src/lib/agent/context-snapshot.ts` and `credentialDigest` in `src/lib/db/provider-cache-key.ts` each frame a hand-kept list of fields, and nothing compares the two lists engine by engine.
+A field one frames and the other does not is a silent difference between what the agent treats as the same connection and what the provider cache does.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** one census test lists, per engine, the fields each function frames and fails when a connection field is added without a decision in both.
+
+### D335. A token that names its own principal can hide that principal from the connection identity
+
+On engines whose password field carries a token, the token decides who the connection signs in as, while the identity is built from `user` and the other public fields.
+Two connections with the same public fields and tokens of different principals then share one identity.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** each engine whose secret names its principal frames a digest of that principal (or the secret) in its identity, with a test per engine that two principals give two identities.
+
+### D336. BigQuery has no seam guard
+
+Most HTTP providers have a `seam-guard.test.ts` that parses every source of the provider's directory and fails when a module imports another provider's code, opens a socket outside its transport, or imports outside a declared set; BigQuery's tests (`tests/unit/db/bigquery/`) have none.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** `tests/unit/db/bigquery/seam-guard.test.ts` holds the same layered rules as Databend's guard, each proven against the real sources and against a planted violation.
+
+### D337. BigQuery's `location` is not part of the connection identity
+
+`credentialDigest` in `src/lib/db/provider-cache-key.ts` frames BigQuery's `location`, so a moved location gets a new provider, while `connectionIdentity` in `src/lib/agent/context-snapshot.ts` does not frame it.
+A plan held under one location is therefore still matched after the location changes; adding the field moves every existing BigQuery identity, which is why it is a decision and not a fix.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the decision is recorded, and if `location` joins `connectionIdentity`, the identity tests pin it and the release note says existing BigQuery plans are re-grounded.
+
+### D338. BigQuery offers the column profiler, and each profile bills scanned bytes
+
+The profiler opt-out (`supportsColumnProfiling: false`) exists and Snowflake takes it; BigQuery does not, so each profile click runs up to 20 full-column statements that bill the bytes they scan and cannot be cancelled.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** BigQuery declares the opt-out, or a sampled profile replaces the full scans, with its census row and doc section updated.
+
+### D339. The idle sweep can hand out a provider it is closing
+
+The idle sweep that `startIdleSweep` in `src/lib/db/factory.ts` runs awaits `entry.provider.disconnect()` and only then calls `providerCache.delete(key)`.
+A request that reaches `getOrCreateProvider` in between is handed the closing provider whenever its `isConnected()` still answers true, so its statement can start on a connection that is being closed.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the entry leaves the cache before its `disconnect()` starts, or the cache hit refuses an entry being closed, with a test that a request arriving during the close gets a fresh provider.
+
+### D340. A listing cannot say it was cut, so the Snowflake tree truncates in silence
+
+`listObjects` in the provider contract (`src/lib/db/types.ts`) answers a bare `DatabaseObject[]`, so it has no channel to say a listing stopped at a cap.
+Snowflake's `listObjects` (`src/lib/db/providers/sql/snowflake/introspect.ts`) reads a pageable kind up to `SNOWFLAKE_TREE_PAGE_LIMIT` pages of `SNOWFLAKE_SHOW_PAGE_ROWS`, 50,000 rows, then answers what it read with the stop reason dropped.
+The object inventory carries the cap sentence (`treeCap` in `SNOWFLAKE_INTROSPECT_SENTENCES`), so the agent and the inventory route are told, while the tree shows the first 50,000 objects of a pageable kind as if that were all of them.
+The provider doc's section 7 states the gap.
+
+Found 2026-10-12 while building the Snowflake provider.
+
+**Done when:** a listing can carry a truncation field (a cap reached, with its sentence), Snowflake's `listObjects` fills it from its stop reason, the tree renders the sentence under the cut folder, and the provider doc's tree section says the tree names the cut, with tests on the provider answer and the rendered folder.
+
+### D341. A region and locator Snowsight URL is read as an organisation account
+
+`readUrl` in `src/lib/db/providers/sql/snowflake/account-host.ts` reads any `https://app.snowflake.com/<a>/<b>/...` as the identifier `<a>-<b>`, so a path such as `us-west-2/xy12345` becomes the host `us-west-2-xy12345.snowflakecomputing.com`, which does not exist.
+Whether Snowsight still issues that region and locator path shape is not established, and the failure is loud: the connect fails with the unreachable-host sentence.
+
+Found 2026-10-12 in the external review of the Snowflake provider (#1714).
+
+**Done when:** the path shape is confirmed on a live account, and a region and locator Snowsight URL is either read as `<locator>.<region>` or refused with the Account format sentence, with a case in `tests/unit/db/snowflake/account.test.ts` and the doc's section 2.2 updated.
+
+### D342. A failed Snowflake monitoring panel's QueryError carries no SQL
+
+The monitoring panels are built over `statements.runSurface` in `connect()` (`src/lib/db/providers/sql/snowflake/index.ts`), not over the runner `surface()` records the statement with, so a failed panel reaches `toDatabaseError(error, undefined)` and its `QueryError.sql` is empty.
+Every other surface read carries the statement it sent.
+Threading the recording runner through `createSnowflakeMonitoring` (`monitoring.ts`) means a runner per call through its cache and all seven methods, more than a follow-up fix.
+
+Found 2026-10-12 in the external review of the Snowflake provider (#1714).
+
+**Done when:** a failed monitoring panel's `QueryError.sql` is the statement it sent, cached reads included, with a test in `tests/unit/db/snowflake/provider.test.ts` or `monitoring.test.ts`.
+
+### D343. A Snowflake cancel during a retried submit reports failure after a fixed 10 s
+
+`cancel()` in `src/lib/db/providers/sql/snowflake/statements.ts` races the run's end against `SNOWFLAKE_CANCEL_TIMEOUT_MS * 2`, 10 s.
+The submit runs under `run.deadline`, not `run.signal`, so it is not cut by a cancel, and a submit answered 429 or 5xx walks the transport's retry ladder (`transport.ts`, up to 5 sends with backoffs up to 8 s) before the run's own 5 s cancel can go out.
+A cancel during that ladder answers false although the run then ends cancelled.
+
+Found 2026-10-12 in the external review of the Snowflake provider (#1714).
+
+**Done when:** a cancel during a retried submit answers true once the run ends cancelled, the race bounded by the submit work still to come plus the cancel's 5 s, with a test in `tests/unit/db/snowflake/statements-cancel.test.ts` over a 429 then 503 submit.
+
+### D344. Test Connection passes when a database, schema or warehouse name does not resolve
+
+The SQL API reads the request's database, schema and warehouse as exact names, and one it cannot resolve leaves that context unset without an error (measured on the trial account 2026-10-13: `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` or `CURRENT_WAREHOUSE()` answered NULL).
+The role check, `SNOWFLAKE_ROLE_CHECK_SQL` in `src/lib/db/providers/sql/snowflake/statements.ts`, reads only `CURRENT_ROLE()` and `CURRENT_SECONDARY_ROLES()`, so a misspelt database or schema passes Test Connection with no word and fails at the first query that needs it; a warehouse that does not resolve passes too, with only the connect caution its `SHOW WAREHOUSES` row match gives (`noWarehouseRow`).
+Reading the other three in the same statement changes the captured exchanges under `tests/fixtures/snowflake/`, so it needs a re-capture on the trial account.
+
+Found 2026-10-13 while fixing the Snowflake request's name folding.
+
+**Done when:** the role check also reads `CURRENT_DATABASE()`, `CURRENT_SCHEMA()` and `CURRENT_WAREHOUSE()`, a configured field that answers NULL adds a connect caution naming the field, the fixtures are re-captured on the trial account, and the provider doc's sections 2.5 and 4 state the caution.
 
 ## Value interpolation
 
@@ -3888,28 +4352,6 @@ X13 already names this site in its **Done when**, so the change that settles X13
 
 **Done when:** the comment names the flag's readers as the code has them, or names none, and says how the profile route refuses this provider today.
 
-### U42. The export menu says it writes every row of a result a provider cut at its own bound
-
-`describeExportScope` in `src/lib/export/scope.ts` words the export menu's summary from one condition: the grid can fetch a next page (the `pageOfferFor` answer `src/components/studio/BottomPanel.tsx` passes in) and the route's `pagination.hasMore` is true.
-Only then does it say "Writes the N rows loaded here." with its shortfall sentence; otherwise it says "Writes all N rows.", and it never reads `pagination.wasLimited`.
-A result a provider cut at its own bound meets neither half: since #1085 (section 5.4) `POST /api/db/query` keeps the Prometheus provider's `wasLimited: true` for a vector cut at the series cap, with `hasMore` false, and the engine cannot page, so no page is offered.
-So the stats strip shows "limited", whose sentence says the result was bounded and that anything beyond the bound is not in it, while the export menu over the same result says every row is in the file.
-
-Measured 2026-09-23 end to end: the Prometheus provider's own `query`, over an injected `send` answering 501 series, returned 500 rows with its series notice; the route's rule gave `pagination` `{ hasMore: false, wasLimited: true }` and `pageOfferFor` no offer, and `describeExportScope` answered "Writes all 500 rows." with no shortfall.
-The control, 500 series with nothing cut, answers the same sentence, so the menu cannot tell a cut result from a whole one.
-The two shapes alone, from the repository root:
-
-    bun -e 'import { describeExportScope } from "./src/lib/export/scope"; const rows = Array.from({ length: 500 }, () => ({})); console.log(describeExportScope({ rows, pagination: { limit: 500, offset: 0, hasMore: false, totalReturned: 500, wasLimited: true } }, false).summary); console.log(describeExportScope({ rows }, false).summary);'
-
-Both lines print `Writes all 500 rows.`.
-The same sentence is written for an engine that cannot page over a preview that filled its bound: "an engine that cannot page is not asked to load more first" in `tests/unit/lib/export/scope.test.ts` expects "Writes all 50 rows." for a preview whose `hasMore` is true, where that test's subject is the shortfall's instruction to load more, which rightly stays absent there.
-X2 is the other half of the same problem, an export that writes the whole result rather than the page the grid holds.
-
-Found 2026-09-23 while making the query route keep a provider-reported `wasLimited` for #1085 (section 5.4).
-Not fixed in #1085: the export dialog is shared by every engine, and that PR changes only how the route reports the bound.
-
-**Done when:** the summary says "all" only for a result nothing cut, a result whose `pagination.wasLimited` is true reads as the rows loaded here without an instruction to load more where no page can be fetched, and tests pin a result a provider cut, a bounded preview on an engine that cannot page, and a complete result.
-
 ### U43. The gate's SQL keyword test prompts on a Redis read whose arguments include `update` and then `set`
 
 `isDangerousQuery` in `src/components/QuerySafetyDialog.tsx` runs its SQL keyword test in front of the Redis row of `NON_SQL_DESTRUCTIVE_VOCABULARY`, and that test's unanchored `UPDATE ... SET` probe finds the two words anywhere in the buffer.
@@ -4675,13 +5117,235 @@ Found 2026-10-11 in a live test of the Kubernetes provider against a kubeadm 1.3
 ### U114. Test Connection puts every caution after "The server reported:", on one line
 
 `cautionSentence` in `src/hooks/use-connection-form.ts` shows the cautions of a successful Test Connection as "The server reported: " followed by every caution joined by "; ".
-The prefix is true of a server's own notice (`connectWarnings()`, #1401), and false of a caution the provider computed itself, such as a probe result from `testConnectionWarnings()` or the route's own sentence when that method rejects: the dialog attributes Studio's words to the server.
+The prefix is true of a server's own notice (`connectWarnings()`, #1401), and false of a caution the provider computed itself, such as a probe result from `testConnectionWarnings()`, the route's own sentence when that method rejects, or a sentence a provider writes into `connectWarnings()` itself: the dialog attributes Studio's words to the server.
+RabbitMQ does both: its `connectWarnings()` says that AMQP port is empty, and it is the one provider that implements `testConnectionWarnings()`, so a browse-only RabbitMQ connection reads "Connected. The server reported: AMQP port is empty, ..." with up to three more cautions on the same line.
 Joining every caution into one line also makes several long cautions hard to read.
 The prefix is shared by every provider, so changing it changes every provider's dialog, and it was left as it is when `testConnectionWarnings()` was added.
 
 Found 2026-10-11 while designing the Test Connection checks.
 
 **Done when:** a successful Test Connection with cautions shows a prefix that attributes them to nobody in particular (for example "Connected, with cautions:") and one caution per line, for every provider, with `tests/hooks/use-connection-form.test.ts` updated to the new sentences and a dialog test that renders two cautions on two lines.
+
+### U115. A billed engine has no read budget meter
+
+Firestore bills every document read, and Studio states the bound of each surface (`docs/providers/firestore.md` section 8) but does not count what a session has read.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a provider can report the billed reads of each request, the UI shows a running count per connection and session, and an optional per-connection budget warns before a gesture that would pass it.
+
+### U116. The grid shows an absent field and a stored null alike
+
+The results grid renders `null` and `undefined` as the same NULL, so a Firestore document that lacks a field and one that stores null in it look the same, while `where(f, "==", null)` matches only the second.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** a result can mark a cell as absent, the grid draws it apart from NULL, export keeps the difference, and the Firestore results use it.
+
+### U117. The Keys panel counts a key and its folder as two entries
+
+On an engine whose keys are also folders, such as a Firestore document with subcollections, each document is one key and one folder, so the panel's "Listed n" reads twice the number of documents.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** the panel counts a row that is both a key and a folder once, the level route's count rule says how such a pair is counted, and the Keys panel tests cover an engine whose every key is a folder.
+
+### U118. The row detail pretty-prints any depth, which throws past depth 5,160 in Chromium
+
+`RowDetailSheet` (`src/components/results-grid/RowDetailSheet.tsx`) renders a cell with `JSON.stringify(value, null, 2)`, whose cost grows with the square of the depth and which throws a `RangeError` past depth 5,160 in Chromium, for every provider that returns deep JSON.
+RabbitMQ shows a payload deeper than 64 levels in its base64 form so the shared classifier never hands it over, and keeps its headers to depth 8; other providers have no such bound.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** `classifyValue` and `renderDetail` bound the depth they render for every provider, with a component test that opens and copies a depth-6,000 value.
+
+### U119. The results grid renders any object shaped like a Node Buffer as binary
+
+`src/lib/export/binary.ts` and `src/components/results-grid/renderers/classify.ts` treat an object cell with `type: "Buffer"` and a `data` array as binary hex and hide its other members, so a JSON payload or header that happens to have that shape is shown as bytes.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** only a value the provider marks as binary renders as hex, and a test pins a Buffer-shaped JSON object rendering as JSON; the RabbitMQ integration test's `st-buffer-shape` case, which pins today's `binary`, then expects `json`.
+
+### U120. Every connection select lists every container of a one-level engine
+
+The connection-select inventory read in `src/hooks/use-connection-manager.ts` scopes containers only at depth 2, so a one-level engine lists every container on each select: 1 + min(V, 1,000) management GETs for a RabbitMQ broker with V virtual hosts, the embedded workspace included; `skipObjectScan` is the per-connection control.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the owner decides whether the read honours `agentWalkScope` at depth 1, and either a shared change scopes it with a route-sequence test, or this entry is closed as accepted and the provider docs say so.
+
+### U121. The object source view's muted text is not muted in an embedded host without shadcn variables
+
+`src/components/object-source/ObjectSourceView.tsx` colours its secondary text with `text-muted-foreground`, and the package's `styles.css` defines no `--muted-foreground` (`src/styles/theme.css` has no such variable), so in a host that brings no shadcn variables of its own that text takes the body colour.
+An embedded browser pass measured it as rgb(24, 24, 27), the body text, while the view's warning colour, which the package does define, resolved.
+It is older than the object source statement change, which adds one more sentence in that colour.
+
+Found 2026-10-12 in an embedded browser pass of the object source statement change; pre-existing.
+
+**Done when:** the view's secondary text is muted in an embedded host that brings no shadcn variables, by a colour the package's own stylesheet defines, with a test that the packaged stylesheet defines every colour variable the view's classes read, and an embedded browser pass that measures it.
+
+### U122. A Source tab names an object by its dotted path, so an empty segment shows as "/."
+
+`sourceTab` in `src/hooks/use-tab-manager.ts` names the tab and its header `Source: ` plus the object's path joined with dots, not the label the tree draws.
+On RabbitMQ the default exchange's name is the empty string, so its tab reads `/.` while the tree labels it `(AMQP default)`, and a queue's tab reads `/.q-quorum-payments`.
+
+Found 2026-10-12 in a browser pass of the RabbitMQ provider.
+
+**Done when:** a Source tab names an object whose own segment is empty, or whose container is `/`, in words a reader can match to the tree row it was opened from, with a test over the default exchange's path and a browser pass.
+
+### U123. Switching the part of a read-only multi-part source saves the next part's text as the previous part's draft
+
+On a source with several parts and no editable one, such as a RabbitMQ queue (Queue, Counts, Bindings, Consumers), clicking from one part to the next writes a draft into `libredb_source_drafts_v1` (`SOURCE_DRAFTS_KEY`, `src/lib/storage/local-storage.ts`) under the part being left, holding the text of the part being opened: the queue part held the Counts JSON, Counts held Bindings, Bindings held Consumers.
+The tab is then marked "(unsaved edit)" although nothing was edited; after a reload every part shows its own fresh read, so no wrong text is shown, only the false mark and the stored drafts.
+`src/components/object-source/ObjectSourceView.tsx` is shared code.
+
+Found 2026-10-12 in a browser pass of the RabbitMQ provider, reproduced with scripted clicks.
+
+**Done when:** switching parts of a source writes no draft unless the user edited the part, a draft is stored under the part it was typed in, and a component test clicks through four read-only parts and finds no draft and no unsaved mark.
+
+### U124. Firestore's Database ID box carries a sentence about Create Table and SHOW SCHEMAS
+
+The connection dialog draws one fixed sentence under the schema box for every engine that takes the field (`src/components/ConnectionModal.tsx:1063`, `:1080-1083`): "Used for unqualified table names in queries and Create Table. Leave empty to qualify names yourself. Run SHOW SCHEMAS to list the catalog's schemas."
+It was written for Trino, and the box is also Firestore's "Database ID" (`src/lib/db-ui-config.ts:987-992`), where the provider declares `supportsCreateTable: false` (`src/lib/db/providers/document/firestore/index.ts:200`) and there is no `SHOW SCHEMAS`.
+So a Firestore user reads, under the engine's own hint ("Empty for the (default) database"), advice about table names and a statement the engine does not have.
+BigQuery's "Default dataset" box (`src/lib/db-ui-config.ts:859`) takes the same sentence, and whether it holds there is not measured.
+The sentence is not a declared field, so an engine entry cannot replace or drop it the way `fieldHints` and `fieldPlaceholders` do.
+
+Found 2026-10-12 while reading the connection dialog for a new provider.
+
+**Done when:** the sentence under the schema box comes from the engine's declaration, or is drawn only for an engine whose declaration says it applies, Firestore's box carries no Create Table or `SHOW SCHEMAS` advice, and a component test renders the dialog for Firestore and for Trino and pins which of the two draws it.
+
+### U125. A Test Connection answer lands below the fold, so pressing the button looks like nothing happened
+
+The result of Test Connection is drawn where it sits in the dialog's form (`src/components/ConnectionModal.tsx`), and the dialog scrolls; nothing scrolls the answer into view after the press.
+Measured 2026-10-12 in a browser on an OPC UA connection: after pressing the button, the answer's box was at y≈2798 while the dialog's scroll viewport ended at y=578, so the screen was unchanged and the sentence sat behind the sticky footer until the reader scrolled. Scrolled to, the same sentence is legible at 6.87:1.
+Reproduced identically on a Redis connection and an MQTT connection, so it belongs to the dialog rather than to any provider; it is the only feedback the connect path has before Establish Connection.
+
+Found 2026-10-12 by the browser pass of the OPC UA provider; pre-existing.
+
+**Done when:** pressing Test Connection brings its answer into view (scrolling the result into the dialog's viewport, or drawing it beside the button), with a dialog test that asserts the answer is inside the viewport after the press.
+
+### U126. Deep key rows whose names share a long prefix clip to the same text
+
+A key row's label is truncated from the END (`truncate` in `src/components/key-browser/KeyBrowser.tsx`), and at depth the row has little width left: measured 2026-10-12 in a browser on the OPC UA fixture, level `OpcPlc/Telemetry/Historian/HistorianInt32/HA Configuration/` draws its rows at 8 + 6x12 = 80px of indent plus a twisty, a glyph and the type cell, leaving about 100px for the name in a 280px sidebar.
+Eleven of its thirteen rows clip, and two adjacent rows both read `Exceptio...`: `ExceptionDeviation` and `ExceptionDeviationFormat` share their first 18 characters, so no width this panel can give them tells them apart - the part that differs is the part cut off.
+Drawing each row by its own segment rather than the whole key (this round) fixed the shallow case and narrowed this one to names that share a long prefix; the row's `title` carries the full name, and the grid's own cells are unaffected.
+S3 shares the level walk and the same drawing.
+
+Found 2026-10-12 by the browser pass of the OPC UA provider.
+
+**Done when:** a key row whose name does not fit keeps the part that distinguishes it - a middle ellipsis (`Exception...Format`) or an end-anchored truncation - with a test that renders two siblings sharing a long prefix and asserts the two labels differ.
+
+### U127. A connection cannot be edited on a phone, and its row's controls are invisible there
+
+The mobile DB tab renders `ConnectionsList` without `onEditConnection` (`src/components/Studio.tsx`), so no Edit control exists on a phone, and the row's remaining controls are drawn at `opacity: 0` behind a hover gate that a touch screen never satisfies.
+Measured 2026-10-12 at 390x844 in a browser: the four controls on a connection row report 20x20 px at opacity 0, below the 44x44 a touch target needs and invisible until tapped blind; the Edit control is absent from the DOM.
+So a connection created on a phone can never have its endpoint, username or security mode changed there. It is not engine-specific - the same list draws every engine - and the delete prompt, which does render, was confirmed to ask first on the phone.
+
+Found 2026-10-12 by the browser pass of the OPC UA provider; pre-existing.
+
+**Done when:** a touch viewport draws the row's actions visibly at 44x44 or larger and offers Edit, with a mobile test that taps Edit on a connection row and asserts the dialog opens filled.
+
+### U128. The results grid truncates the column that identifies a row while leaving the width beside it empty
+
+Grid columns are sized without regard to the free width of the panel, so a long first column is clipped at every window size even when hundreds of pixels sit unused to its right.
+Measured 2026-10-12 in a browser on an OPC UA read, whose first column is the node id: at 1280, 1440 and 1920 px the `nodeId` cell read `ns=3;s=His...` on every row while the grid's own right edge had free space; WRAP makes it readable, and WRAP is not the default a reader meets.
+The identifying column being the clipped one is what makes it a defect rather than a preference: the rows of a read differ only there.
+
+Found 2026-10-12 by the browser pass of the OPC UA provider; pre-existing.
+
+**Done when:** columns consume the panel's free width (or size to content) before truncating, with a test that renders a result whose first column is long and asserts no cell is clipped while free width remains.
+
+### U129. The Docs tab reports "0 tables" on an engine that has none
+
+The Docs panel is built around a table reference, so on an engine whose `objectKinds` hold no table-shaped kind it draws "0 tables" and an empty "Table Reference" - a count about a thing the engine does not have, next to an Objects tree that says in words where the nodes are.
+Measured 2026-10-12 in a browser on an OPC UA connection; MQTT has the same shape.
+
+Found 2026-10-12 by the browser pass of the OPC UA provider.
+
+**Done when:** the Docs tab says what the Objects tree says for such an engine, or is not offered there, with a test over an engine whose kinds are all `enumeratedBy: "key-browser"`.
+
+### U130. The OPC UA certificate pin is compared against a different dial's certificate than the session uses
+
+The pin (`serverCertificateThumbprint`) is computed in `src/lib/db/providers/industrial/opcua/library.ts` from the certificate returned by this provider's OWN `GetEndpoints` dial, which is built with `MessageSecurityMode.None` and the None policy, and it is compared once in `session.ts` before the session opens.
+The certificate the session then uses does not come from that reply. `node-opcua` performs a second, independent discovery inside `connect` whenever the mode is not None (`client_base_impl.js`, `fetchServerCertificate` to `__findEndpoint`), and that TmpClient carries no security mode or policy either.
+Nothing binds the two dials, so a host answering the typed address can serve the genuine certificate on the pin dial and a different one on the channel dial, and the pin matches.
+
+This grants no access on its own: the strict certificate manager still pushes the session's certificate through `checkCertificate`, which answers `BadCertificateUntrusted` for anything the administrator's trust list does not hold, so the trust list remains the gate.
+What is wrong is the promise. `connection.ts` already says of the None mode that the check "catches an honest certificate rotation and nothing an attacker does"; the same is true on Sign and SignAndEncrypt, where the pin IS enforced, and only the provider doc said so.
+Found 2026-10-12 by an audit of CodeQL alert 660, which was looking at something else (see SCAN2).
+Not measured against a server that answers the two dials differently.
+
+**Done when:** the pin is compared against the certificate the open session actually negotiated rather than against the discovery reply, with a test that a differing second certificate refuses.
+
+### U131. The OPC UA screenshot walkthrough waits by the clock rather than on a condition
+
+`e2e/opcua-screens.spec.ts` holds fifteen `page.waitForTimeout` calls between 500ms and 8s, which SonarCloud reports as `typescript:S2925` ("Replace this fixed wait with a synchronization on an observable condition") on exactly those fifteen lines, and which is the shape that makes a spec slow when it passes and flaky when it does not.
+The #1719 E2E run put two specs under "flaky", `e2e/mqtt-provider.spec.ts` and `e2e/session-expired.spec.ts`, and neither is this one: `e2e/opcua-provider.spec.ts` was one of the two FAILED, on a stale assertion since fixed.
+So the cost here is the shape rather than a failure already observed in it.
+The waits stand in for a walk settling, which has no single observable the spec can currently await.
+
+**Done when:** every fixed wait in that spec is replaced by a wait on an observable condition, or the panel exposes a settled marker the spec can await.
+
+### U132. Studio has no shared result cursor for paging
+
+Each engine that offers Load More pages its own way, and an engine whose server keeps a result, such as Snowflake, has no contract to page it by.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a provider can return an opaque cursor with a result, the routes and the grid page by it under an owner check, and one engine uses it end to end, with tests.
+
+### U133. The connection dialog shows no key fingerprint before Test
+
+A Snowflake key's fingerprint reaches the user only inside the key-pair refusal, so a user cannot check which key is loaded before a request is sent.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a provider can declare a pre-request panel on `DatabaseUIConfig`, the dialog shows the key's SHA-256 fingerprint and registration name as soon as the key reads, and the component test covers it.
+
+### U134. `ConnectionModalProps.onTestConnection` does not declare what the form reads
+
+The exported `ConnectionModal` types its `onTestConnection` result as `success`, `latency`, `error` and `fixStatement`, while the form hook also reads `degraded`, `message` and `warnings` from it (`src/hooks/use-connection-form.ts`).
+An embedding host that returns Snowflake's cautions has to step outside the declared type to do it.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the exported result type declares every field the hook reads, the type test pins it, and the embedding docs show an adapter returning warnings.
+
+### U135. `WorkspaceProps.onTestConnection` is declared and never read
+
+`WorkspaceProps` in `src/workspace/types.ts` declares `onTestConnection`, and `StudioWorkspace` never calls it, so a host that supplies it gets no effect.
+Its fixed field list also carries none of the newer connection fields, Snowflake's among them.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the prop is either wired to the workspace's connection dialog with the full connection shape, or removed, with the package type test updated.
+
+### U136. Plan mode's walk enumerates containers without regard to scope
+
+Plan mode grounds through the provider walk scoped to the session-default container; on Snowflake a connection with a Database and no Schema walks that database's schemas instead, INFORMATION_SCHEMA left out, and one with neither walks nothing, all inside the walk's 10 s timer (`src/lib/agent/tools.ts`).
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the walk can enumerate the containers a run's objective names, within the same timer, with tests on an engine with several databases.
+
+### U137. Snowflake SQL has no editor language of its own
+
+The editor highlights Snowflake statements as generic SQL, so `//` comments, backslash escapes in strings and `$$` bodies are coloured as if they were code.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** a Snowflake Monarch language reads `//`, `\'` and `$$` as the grammar row does, is registered for the `snowflake` type, and the editor tests cover each form.
+
+### U138. A result cut inside a script gets no limited badge
+
+The multi-query route in `src/app/api/db/multi-query/route.ts` builds a script's main result from the last result with rows, carrying its warnings and column types but no `pagination`.
+So a result the provider cut inside a script gets neither the grid's limited badge nor the export menu's cut sentence, only the provider's own warning.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the multi-query route carries the main result's `pagination`, and the route and component tests show the badge and the export wording over a cut result inside a script.
 
 ## Dependencies
 
@@ -5100,6 +5764,41 @@ The other stale fleet counts the same sweep found (`docs/providers/mongodb.md` t
 Found 2026-10-10 by the documentation sweep of the S3 provider; pre-existing.
 
 **Done when:** the TOOLCHAIN.md sentence names the set those two files construct, or the number that set has, derived from the factory, and DOC6's entries are settled by its own Done when.
+
+### DOC22. docs/ADDING_A_PROVIDER.md names none of six guards a new provider meets
+
+A new type-id turns these guards red, and the guide names none of them, so an author finds each one only when it fails: `tests/unit/lib/table-count.test.ts` (the count statement per engine), `tests/unit/db/test-data-generation-capability.test.ts`, `tests/isolated/dialect-golden.test.ts` with its golden dialect outputs, `tests/unit/db/s3/provider-doc.test.ts` (the pinned chart description and engine lists), `CONNECTION_FORM_URI_MODE` and `CONNECTION_STRING_ACCEPTED` (`src/lib/db/compatibility.ts`).
+The guide's two driver-free counts are DOC20's.
+
+Found 2026-10-12 while designing the Firestore provider; pre-existing.
+
+**Done when:** the guide's checklist names each of these guards beside the step that trips it, or a test derives the checklist's guard list from the files that read `DatabaseType`, so the next guard added is named too.
+
+### DOC23. `docs/providers/README.md` went without an MQTT row, and no guard caught it
+
+The provider table had no MQTT row from the MQTT provider's merge until the Firestore provider's change added one, and the modules note still names no MQTT.
+No test compares the table with the shipped type ids.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the modules note names MQTT and a test holds the table's type ids equal to `SHIPPED_DATABASE_TYPES`.
+
+### DOC24. Two docs undercount what `readme:check` gates
+
+`docs/ADDING_A_PROVIDER.md` says `readme:check` gates "the seven translations" and lists seven, omitting `README_ko.md`, which `scripts/readme-check.mjs` gates as the eighth; the script's own docblock speaks of "Three invariants" and "all three files" while it lists four invariants over nine files.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** both texts name the eight translations and the four invariants, with the guide's list read from the script's `LOCALIZED` array by a test.
+
+### DOC25. docs/providers/bigquery.md says a dropped connection cancels the job
+
+Section 5.1 says the provider sends `jobs.cancel` when the call fails or is aborted, "a dropped connection" among the causes.
+`BigQueryProvider.query` takes no query id or caller signal and the provider has no `cancelQuery`, so a closed tab or a dropped request does not reach it; only the deadline does.
+
+Found 2026-10-12 while designing the Snowflake provider.
+
+**Done when:** the sentence names only what aborts the call today, or BigQuery gains `cancelQuery` and the route's abort reaches it, with the doc and a test saying which.
 
 ## Release pipeline
 
@@ -5571,6 +6270,27 @@ Not fixed there: it needs a new audit reason, a security control count change an
 
 A scanner finding that is open, is not failing a required check, and needs a written ruling before it can be dismissed or fixed.
 CodeQL alerts anchor to a source location, so moving the code re-reports them and a dismissal made against the wrong location does not hold.
+
+### SCAN2. CodeQL alert 660, SHA-1 in the OPC UA certificate thumbprint, closed by moving the pin to SHA-256
+
+`js/weak-cryptographic-algorithm`, security severity high, raised against `refs/pull/1719/merge` at `src/lib/db/providers/industrial/opcua/library.ts:78`, and the same line as `typescript:S4790` on SonarCloud.
+CodeQL's text: "A broken or weak cryptographic algorithm depends on sensitive data from an access to serverCertificate."
+
+The line computed the SHA-1 thumbprint of the server's DER certificate, which `session.ts` compares against the operator's pin.
+
+The stated CONSEQUENCE was measured on 2026-10-12 and does not hold, and that is worth recording because it is what the next reader will want.
+The hashed DER is not sensitive: an OPC UA server publishes it to any unauthenticated caller in its `GetEndpoints` reply (Part 4 5.5.4), and this repository already classifies the derived thumbprint as `public` in `src/lib/storage/connection-secrets.ts`.
+Nor was the pin defeatable: defeating a pin of a certificate that already exists needs a SECOND PREIMAGE, which SHA-1 still resists, and not the collision resistance that SHAttered 2017 and Leurent and Peyrin 2020 broke.
+The thing actually worth fixing that the audit turned up is U130, which is about which certificate the pin is compared against rather than about the hash.
+
+The ALGORITHM was weak all the same, and nothing had shipped with a SHA-1 pin, so there was no compatibility to keep.
+The thumbprint is SHA-256 now, 64 lowercase hex, which is what `openssl x509 -fingerprint -sha256` prints. The digest has to be named: measured on OpenSSL 3.6.3, `-fingerprint` with no digest still prints the SHA-1 one.
+Measured against the running fixture on 2026-10-13: the same certificate is `451da1b4...` under SHA-1 and `b9432ed1...` under SHA-256, and the recorded endpoints fixture was re-derived from the DER it already carries rather than retyped.
+One thing this does NOT buy, and a reader should not believe it does: `node-opcua-pki` keys its own trust list on a SHA-1 fingerprint with no comparison of the stored bytes, so the library's trust decision is still SHA-1 whatever this provider writes.
+
+A SonarCloud `typescript:S5332` finding on the same provider ("Using http protocol is insecure") is the OPC Foundation's own policy URI, `http://opcfoundation.org/UA/SecurityPolicy#None`, which is an identifier nothing dereferences and which a server compares as bytes; `https` there would stop matching every server. It is declared once, in `constants.ts`, with that reason.
+
+**Done when:** alert 660 is closed by the SHA-256 change on `main`, and the `S5332` finding on the one declaration of that URI is marked as the protocol identifier it is.
 
 ### SCAN1. CodeQL alert 536, polynomial ReDoS in the MCP error redactor, needs a ruling
 
@@ -6473,6 +7193,41 @@ Found 2026-10-10 while designing the Kubernetes provider; an open question of th
 
 **Done when:** the owner decides whether a provider may withhold container names from machine surfaces, and either a declaration does it with a test, or the item is closed as accepted and `docs/AGENT.md` says so.
 
+### B107. Firestore has no agent execution and no MCP surface
+
+`MCP_EXPOSABLE.firestore` is false and the provider implements no `queryReadOnly`, so agent execution and MCP `run_read_query` refuse it; plan mode works, grounding on collection names with no document read (`docs/providers/firestore.md` section 3.5).
+Every Firestore read is billed, and no read contract for the query chain under an agent's budget is designed yet.
+
+Found 2026-10-12 while designing the Firestore provider.
+
+**Done when:** an MCP metadata surface that reads no document is designed, `MCP_EXPOSABLE.firestore` turns true for it, and `run_read_query` and agent execution serve a `queryReadOnly` that runs one console statement under a per-run read bound, with tests; cited in `docs/AGENT.md` beside B106.
+
+### B108. RabbitMQ has no agent execution and no MCP `run_read_query`
+
+`MCP_EXPOSABLE.rabbitmq` is true for the metadata tools, and the provider implements no `queryReadOnly`, so agent execution of a workflow that sends statements and MCP `run_read_query` refuse it; plan mode works, walking the virtual host `/` only (`docs/providers/rabbitmq.md` section 8).
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** a stream read request is designed as an agent statement with its own read policy and bounds, `queryReadOnly` serves it, and `run_read_query` and agent execution run it, with tests; cited in `docs/AGENT.md` beside B105.
+
+### B109. The schema docs route puts database-written names in the prompt without the untrusted-content fence
+
+`POST /api/ai/describe-schema` (`src/app/api/ai/describe-schema/route.ts`) places the schema text the client built, which holds names anyone with write access to the database or broker chose, in the prompt with no untrusted-content fence, for every provider; the Docs tab posts it.
+The route has no tools, so the exposure is a spoofed document on the user's own screen, not an action.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the route fences the names as plan mode and MCP do (`src/lib/agent/untrusted-content.ts`), with a test that a table named as an instruction is found only inside the fence.
+
+### B110. The answer card counts every inventoried object under the engine's entity noun
+
+The inventory chip of `src/components/agent/AnswerCard.tsx` prints the capture's object count with `capture.noun`, the engine's entity noun, so on an engine whose inventory holds several kinds the chip names them all by one kind.
+A RabbitMQ plan run's chip read "41 streams read" while the capture held 17 streams, 6 queues and 18 exchanges.
+
+Found 2026-10-12 in a plan-mode pass of the RabbitMQ provider.
+
+**Done when:** the chip names objects of several kinds as what they are, by kind or by a neutral noun, with a test over a capture that holds three kinds.
+
 ## Passkey deferrals (#785)
 
 Each was decided when passkey sign-in was designed, not overlooked.
@@ -6563,3 +7318,20 @@ Two tests belong to this work and are written first:
 Under a `basePath`, the root `/.well-known/` path cannot be served by a route inside the app; a redirect, a rewrite to an absolute URL or a proxy in front can serve it, and a live test pins the one chosen.
 
 **Done when:** an authorization server issues tokens audience-bound to the canonical MCP URL, `/api/mcp` validates them, the metadata document and the challenge pointer exist, and the two tests above pass.
+
+### MCP2. `inspect_schema` reports a capped listing as complete
+
+`src/lib/mcp/tools/inspect-schema.ts` builds its page from `listObjects` alone and never reads `KindCount.sampledFrom`, so a listing the provider capped is reported with `total_tables` equal to the cap and `has_more` false, and a named object outside it is not found: Kafka's topics above 2,000 today, RabbitMQ's streams above 500.
+A unit test of the RabbitMQ provider pins today's answer at 501 streams, so the fix moves a known test.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** `inspect_schema` reports a sampled count as a floor with `has_more` true and says how to reach an object outside the sample, for every provider, in a shared change.
+
+### MCP3. `inspect_schema` matches a named container case-insensitively
+
+`chooseContainer` compares names lower-cased, so on a RabbitMQ broker with virtual hosts `Billing` and `billing` a call naming `billing` reads whichever is listed first; Kubernetes namespaces are lower case, so it never mattered before.
+
+Found 2026-10-12 while designing the RabbitMQ provider.
+
+**Done when:** the chooser prefers an exact match and falls back to the case-insensitive one only when no exact match exists, for every provider, with a test on two names that differ by case.

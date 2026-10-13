@@ -76,9 +76,13 @@ const SeedDatabaseType = z.enum([
   "oxia",
   "databend",
   "bigquery",
+  "snowflake",
   "s3",
   "kubernetes",
   "mqtt",
+  "firestore",
+  "rabbitmq",
+  "opcua",
 ]);
 
 export const SeedDefaultsSchema = z.object({
@@ -182,22 +186,88 @@ export const SeedConnectionSchema = z
     // Oxia only (O6): an address list the provider parses and refuses entry by entry; resolvable as `host` is
     // (`RESOLVABLE_FIELDS`).
     dataServers: z.string().optional(),
-    // Databend only (design 6.1): the warehouse every statement runs on, a compute name rather than a credential.
-    // Declared for the reason skipObjectScan is: zod strips an undeclared key silently, and a seeded Databend Cloud
-    // connection would lose the warehouse Cloud refuses to run without.
+    // Databend and Snowflake: the warehouse statements run on, a compute name rather than a credential. Declared
+    // for the reason skipObjectScan is: zod strips an undeclared key silently, and a seeded Databend Cloud connection
+    // would lose the warehouse Cloud refuses to run without, a Snowflake one the warehouse it names over the user's
+    // default.
     warehouse: z.string().optional(),
     // BigQuery only: the job location; absent, the provider detects it.
     location: z.string().optional(),
+    // Snowflake only: the sign-in method. A string rather than an enum of `keypair` and `pat`, unlike saslMechanism,
+    // because it is resolvable (`RESOLVABLE_FIELDS`) and the file is validated before anything is resolved, so an enum
+    // would refuse a `${ENV}` reference here; the provider refuses any value other than `keypair` and `pat`.
+    authMethod: z.string().optional(),
+    // Snowflake only: the PEM private key's contents and the passphrase of an encrypted key, both secrets and both
+    // resolvable, so a deployment keeps them in its environment or Vault. Declared for the reason skipObjectScan is:
+    // zod strips an undeclared key silently, and a seeded key-pair connection would be refused for a key the file did
+    // name.
+    privateKey: z.string().optional(),
+    privateKeyPassphrase: z.string().optional(),
+    // Snowflake only: the role every statement runs as, which the provider requires. Declared for the reason
+    // skipObjectScan is.
+    role: z.string().optional(),
     // S3-compatible object storage only: the signing region. Declared for the reason skipObjectScan is: zod strips an
     // undeclared key silently, and a seeded connection to a server with a region of its own would be refused for a
     // region the file did name.
     region: z.string().optional(),
-    // Kubernetes only: the API path, the namespaces the tree lists and the TLS server name. Declared for the reason
-    // skipObjectScan is: zod strips an undeclared key silently, and a seeded connection behind a Rancher proxy would
-    // reach the proxy's own API with no word.
+    // Kubernetes: the API path (also RabbitMQ's Path prefix), the namespaces the tree lists and the TLS server name,
+    // the last two Kubernetes only. Declared for the reason skipObjectScan is: zod strips an undeclared key silently, and
+    // a seeded connection behind a Rancher proxy or a reverse proxy would reach the proxy's own API with no word.
     apiPath: z.string().optional(),
     namespaces: z.string().optional(),
     tlsServerName: z.string().optional(),
+    // An AMQP 0-9-1 port, digits as a string; read by no engine yet. Declared for the reason skipObjectScan is: zod
+    // strips an undeclared key silently. A string, not a number, as the connection field is; resolvable as `host` is.
+    amqpPort: z.string().optional(),
+    /*
+     * OPC UA only (#1677): the security mode the connection asks the server for, and the SHA-256
+     * thumbprint the server's certificate must present.
+     *
+     * DECLARED BECAUSE THE PIN IS THE PROVIDER'S WHOLE SAFETY PROPERTY AND ZOD WOULD HAVE DROPPED
+     * IT IN SILENCE, the way it would drop `skipObjectScan`. Measured before this was declared: a
+     * seed file naming `securityMode: SignAndEncrypt` and a thumbprint parsed, validated, and
+     * reached the provider with neither field - an UNPINNED connection, dialled with the library's
+     * default, which trusts a server on first sight. An operator who seeded a pinned plant
+     * connection would have been given the one thing the mode exists to prevent, with no warning.
+     *
+     * The mode is an enum rather than a string, for the reason `saslMechanism` is: it names no
+     * credential and no address, so it is not resolved from `${ENV}` or `${vault:...}`
+     * (RESOLVABLE_FIELDS), and this enum refuses a reference here at load, naming the field. The
+     * thumbprint is a literal 64 hexadecimal characters, case-insensitive and separators removed by
+     * the provider, and it is not a secret: it is published by the server it names.
+     */
+    securityMode: z.enum(["None", "Sign", "SignAndEncrypt"]).optional(),
+    serverCertificateThumbprint: z.string().optional(),
+    /*
+     * And the three OPC UA fields the dialog has no box for, because they are deployment facts: the
+     * policy to insist on, and the client certificate and key to present. A server with a trust
+     * list of its own has to be given a STABLE client certificate before it will accept a secured
+     * channel, and a file path is how a deployment names one - which is this file's job and not a
+     * text box's. Supplied together or not at all; the provider refuses one without the other.
+     */
+    securityPolicyUri: z.string().optional(),
+    clientCertificatePath: z.string().optional(),
+    clientPrivateKeyPath: z.string().optional(),
+  })
+  // Every OPC UA field here is OPC UA's own: on any other engine the provider never reads them, so
+  // a seed that carries one would be listed as pinned or as encrypted and be neither. Refused at
+  // load by name, as the Elasticsearch API-key pair is.
+  .superRefine((conn, ctx) => {
+    if (conn.type === "opcua") return;
+    for (const field of [
+      "securityMode",
+      "serverCertificateThumbprint",
+      "securityPolicyUri",
+      "clientCertificatePath",
+      "clientPrivateKeyPath",
+    ] as const) {
+      if (conn[field] === undefined) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${field} is OPC UA only: no other engine's provider reads it, so this connection would be listed as carrying it and would not. Remove ${field} from this connection.`,
+        path: [field],
+      });
+    }
   })
   .superRefine((conn, ctx) => {
     if (conn.type === "elasticsearch") return;

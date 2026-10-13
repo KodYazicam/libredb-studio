@@ -21,6 +21,7 @@ import type { VectorColumn } from "@/lib/db/vector/types";
 export type DatabaseType =
   | "postgres"
   | "bigquery"
+  | "snowflake"
   | "mysql"
   | "sqlite"
   | "mongodb"
@@ -165,7 +166,26 @@ export type DatabaseType =
   // credential, with the discovery filter below naming what to subscribe to. Read-only is structural rather
   // than a mode: the outbound path can encode only CONNECT, SUBSCRIBE, UNSUBSCRIBE, PINGREQ and DISCONNECT, so
   // no PUBLISH and no Will exists to send.
-  | "mqtt";
+  | "mqtt"
+  // Google Cloud Firestore in Native mode, read only, over Firestore REST v1 by a client of this repository's own on
+  // the shared node transport (`src/lib/db/providers/document/firestore/`). The editor text is one statement of a
+  // read-only subset of the Admin SDK's query chain. Read-only whatever `readOnly` says: the client builds only the
+  // read requests of its closed request table. The connection's Database field is the project id, Schema the
+  // database id (empty for `(default)`), and Password a service-account key, an ADC JSON or an access token; empty,
+  // the credential comes from an emulator server or an operator-seeded server identity.
+  | "firestore"
+  // RabbitMQ (#1656), one broker read only: virtual hosts, streams, queues and exchanges from the management HTTP API,
+  // and a bounded, non-destructive read of a stream's messages over AMQP 0-9-1 by a client of this repository's own
+  // (`src/lib/db/providers/stream/rabbitmq/`). Never takes a message from a queue and never writes to the broker. The
+  // connection's Port is the management port, `amqpPort` the AMQP port of stream reads (empty means browse only), and
+  // `apiPath` the management API's path prefix.
+  | "rabbitmq"
+  // OPC UA (#1677). A plant's address space, read only, over `opc.tcp` by `node-opcua-client`
+  // (`src/lib/db/providers/industrial/opcua/`), the first member of the `industrial/` family. One connection is
+  // one endpoint URL, which carries its own host and port; `securityMode` and `serverCertificateThumbprint`
+  // below are its own fields. Read-only is structural rather than a mode: the client seam names eight read
+  // services and none of them writes, so there is no Write, Call or HistoryUpdate to send.
+  | "opcua";
 
 export type ConnectionEnvironment = "production" | "staging" | "development" | "local" | "other";
 
@@ -368,8 +388,10 @@ export interface DatabaseConnection {
    * for its password, which it refuses to send with no TLS to a host that is not loopback unless this is `true`.
    * S3-compatible object storage reads it for the connection itself: the secret access key signs and is never
    * sent, but listings and previews are, so a connection with no TLS to a host that is not loopback and outside
-   * a tunnel is refused unless this is `true`, signed or unsigned. Read by no other engine: each of those either
-   * encrypts the password itself or follows its own driver's default.
+   * a tunnel is refused unless this is `true`, signed or unsigned. RabbitMQ reads it for both endpoints, the
+   * management API and the AMQP port: a password without TLS to a host that is not this machine is refused on both
+   * unless this is `true`. Read by no other engine: each of those either encrypts the password itself or follows its
+   * own driver's default.
    */
   allowInsecureAuth?: boolean;
   /**
@@ -383,10 +405,11 @@ export interface DatabaseConnection {
    */
   dataServers?: string;
   /**
-   * Databend only: the warehouse every statement of this connection runs on, sent as the `X-DATABEND-WAREHOUSE`
-   * header. Databend Cloud requires one and resumes a suspended warehouse on the first statement, billing while it
-   * runs; self-hosted Databend leaves it empty. It picks compute, not the catalog, and it is not a secret. Absent and
-   * empty are one value. Read by no other engine.
+   * Databend and Snowflake: the warehouse the statements of this connection run on. Databend sends it as the
+   * `X-DATABEND-WAREHOUSE` header; Databend Cloud requires one and resumes a suspended warehouse on the first
+   * statement, billing while it runs, and self-hosted Databend leaves it empty. Snowflake sends it as the `warehouse`
+   * field of every request body; it is optional there, and empty means the user's default warehouse. It picks
+   * compute, not the catalog, and it is not a secret. Absent and empty are one value. Read by no other engine.
    */
   warehouse?: string;
   /**
@@ -399,12 +422,15 @@ export interface DatabaseConnection {
    */
   region?: string;
   /**
-   * Kubernetes only: a server path prefix every API request is sent under, such as `/k8s/clusters/c-1` behind a
-   * Rancher proxy. It starts with `/` and names segments of letters, digits, dots, hyphens, underscores, tildes, colons
-   * or `@`, with no `api`, `apis`, `proxy`, `namespaces`, `nodes`, `services`, `pods`, `openapi` or `version` segment,
-   * no `//`, `.` or `..` segment, `%`, query or fragment; the provider refuses anything else before any request. One
-   * trailing `/` is removed, so `/` alone is no prefix. It picks which cluster answers behind one host and port, so it
-   * is part of the connection's identity. Absent and empty are one value. Read by no other engine.
+   * Kubernetes and RabbitMQ: a server path prefix every API request is sent under, each with its own rule, which the
+   * provider applies before any request. Kubernetes: such as `/k8s/clusters/c-1` behind a Rancher proxy; it starts
+   * with `/` and names segments of letters, digits, dots, hyphens, underscores, tildes, colons or `@`, with no `api`,
+   * `apis`, `proxy`, `namespaces`, `nodes`, `services`, `pods`, `openapi` or `version` segment, no `//`, `.` or `..`
+   * segment, `%`, query or fragment. RabbitMQ, labelled Path prefix: the management API's path, for
+   * `management.path_prefix` or a reverse proxy location such as `/rabbitmq`; it starts with `/` and takes a plain
+   * path with no `%`, `?` or `#`, no empty, `.` or `..` segment, and no segment `api`. For both, one trailing `/` is
+   * removed, so `/` alone is no prefix. It picks which cluster or broker answers behind one host and port, so it is part
+   * of the connection's identity. Absent and empty are one value. Read by no other engine.
    */
   apiPath?: string;
   /**
@@ -421,10 +447,68 @@ export interface DatabaseConnection {
    */
   tlsServerName?: string;
   /**
+   * OPC UA only: the security mode the connection asks the server for, None, Sign or SignAndEncrypt.
+   *
+   * Studio's own `SSLMode` does not map onto these. `require` and `verify-full` have no meaning to a
+   * server that offers three modes with a policy each, so the field is OPC UA's own name rather than
+   * a translation, and a mode the server does not offer is refused rather than quietly weakened.
+   * Read by no other engine.
+   */
+  securityMode?: string;
+  /**
+   * OPC UA only: the SHA-256 thumbprint the server's certificate must present, 64 hexadecimal
+   * characters.
+   *
+   * Pinned per connection because the library's default trusts a server on first sight: measured, a
+   * SignAndEncrypt connect to an unknown server succeeded and wrote its certificate into the trust
+   * store, and after the server was recreated with a new certificate the next connect trusted that
+   * one too. Part 4 6.1.3 says the opposite: "Applications shall never communicate with another
+   * application that they do not trust." Read by no other engine.
+   */
+  serverCertificateThumbprint?: string;
+  /**
+   * OPC UA only, and a SEED FILE'S field rather than a dialog's: the security policy to insist on,
+   * and the client certificate and private key to present.
+   *
+   * There is no box for these three in the connection dialog and there is not meant to be. A policy
+   * URI is a string nobody types correctly from memory, and a certificate and key are files on the
+   * host the server runs against: both are deployment facts, which is what `seed-connections.json`
+   * is for (`docs/SEED_CONNECTIONS.md`). The pair is supplied together or not at all - a certificate
+   * with no key cannot open a secured channel - and absent, the library generates a client
+   * certificate under the PKI root, which is stable for as long as that directory is.
+   *
+   * Read by no other engine.
+   */
+  securityPolicyUri?: string;
+  clientCertificatePath?: string;
+  clientPrivateKeyPath?: string;
+  /**
    * BigQuery only: where its jobs run (`EU`, `US`, `europe-west3`, ...). Absent, the provider takes the default
    * dataset's location, else the one most datasets share. Absent and empty are one value. Read by no other engine.
    */
   location?: string;
+  /** RabbitMQ only: the AMQP 0-9-1 port of stream reads; empty means browse only. Read by no other engine. */
+  amqpPort?: string;
+  /**
+   * Snowflake only: how the connection signs in, `keypair` (a key-pair JWT signed with `privateKey`) or `pat` (a
+   * programmatic access token in `password`). Absent reads as `keypair`. Read by no other engine, and not the SSH
+   * tunnel's `sshTunnel.authMethod`, which is a field of another feature.
+   */
+  authMethod?: "keypair" | "pat";
+  /**
+   * Snowflake only: the contents of the PEM private key the key-pair JWT is signed with, PKCS#8 or PKCS#1, encrypted
+   * or not. Never a path: the provider reads no file. A secret. Read by no other engine; `ssl.clientKey` and the SSH
+   * tunnel's `privateKey` are other features' fields.
+   */
+  privateKey?: string;
+  /** Snowflake only: the passphrase of an encrypted `privateKey`. A secret. Absent and empty are one value. */
+  privateKeyPassphrase?: string;
+  /**
+   * Snowflake only: the role every statement of this connection runs as, sent on every request, case preserved; a
+   * double-quoted name is exact, a bare one is folded to upper case by Snowflake. Required by the provider. It decides
+   * what the connection can read and change, so it is part of the connection's identity. Read by no other engine.
+   */
+  role?: string;
   /**
    * Read no catalog when this connection opens.
    *
@@ -833,7 +917,10 @@ export interface QueryTab {
     | "oxia"
     | "s3"
     | "kubectl"
-    | "mqtt";
+    | "mqtt"
+    | "firestore"
+    | "rabbitmq"
+    | "opcua";
   viewMode?: "results" | "explain" | "history" | "saved";
   explainPlan?: unknown;
   // Pagination state

@@ -45,10 +45,10 @@ import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import type { AgentToolContext } from "@/lib/agent/tools";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
-import { createCanonicalOperationRegistry } from "@/lib/db/operations/descriptors";
+import { createCanonicalOperationRegistry, sqlExplainAnalyzeDescriptor } from "@/lib/db/operations/descriptors";
 import { createTargetScope } from "@/lib/db/operations/policy";
 import type { DatabaseProvider, QueryResult } from "@/lib/db/types";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative as relativePath } from "node:path";
 import type { DatabaseConnection, ReadOnlyStatementBudget } from "@/lib/db/types";
@@ -525,6 +525,44 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("couchbase");
   });
 
+  test('creates provider for type "firestore", unconnected, with its own dialect and its read-only enforcement', async () => {
+    // No host, port, user or credential: the constructor reads no credential and opens nothing (Firestore spec 3.3).
+    const conn = makeConnection("firestore", {
+      host: undefined,
+      port: undefined,
+      user: undefined,
+      password: undefined,
+      database: "demo-studio",
+    });
+    const provider = await createDatabaseProvider(conn);
+    expect(provider.type).toBe("firestore");
+    expect(provider.getCapabilities().queryLanguage).toBe("json");
+    expect(provider.getCapabilities().queryDialect).toBe("firestore");
+    expect(provider.getCapabilities().enforcesReadOnly).toBe(true);
+    expect(provider.isConnected()).toBe(false);
+  });
+
+  test("a firestore connection with readOnly: true is built, since its provider keeps the mode", async () => {
+    const conn = {
+      ...makeConnection("firestore", {
+        host: undefined,
+        port: undefined,
+        password: undefined,
+        database: "demo-studio",
+      }),
+      readOnly: true,
+    };
+    expect(() => assertReadOnlyHonoured(conn)).not.toThrow();
+    expect((await createDatabaseProvider(conn)).type).toBe("firestore");
+  });
+
+  test("the factory error lists firestore between couchbase and redis, the order of the cases", async () => {
+    const conn = makeConnection("not-an-engine");
+    await expect(createDatabaseProvider(conn)).rejects.toThrow(
+      /Supported types: .*\bmongodb, couchbase, firestore, redis\b/,
+    );
+  });
+
   test('creates provider for type "elasticsearch"', async () => {
     // Two type-ids resolve to ONE module (`providers/sql/search/index`), which is the
     // first time that happens here - so both cases are asserted, and each is asserted
@@ -592,7 +630,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists databend after trino, in the SQL block", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bdruid, trino, databend, bigquery, cassandra\b/,
+      /Supported types: .*\bdruid, trino, databend, bigquery, snowflake, cassandra\b/,
     );
   });
 
@@ -798,7 +836,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists milvus among the supported types, before qdrant and the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, kubernetes, libredb$/,
+      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, rabbitmq, kubernetes, libredb$/,
     );
   });
 
@@ -842,7 +880,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists s3 between qdrant and kubernetes, kubernetes before the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bqdrant, s3, mqtt, kubernetes, libredb$/,
+      /Supported types: .*\bqdrant, s3, mqtt, opcua, rabbitmq, kubernetes, libredb$/,
     );
   });
 
@@ -957,6 +995,9 @@ describe("createDatabaseProvider", () => {
       "mongodb",
       // No cancel: a read is one subscription with its own budget, and there is no statement to stop.
       "mqtt",
+      // No cancel either: a read is bounded instead, at most 200 nodes or 500 values a request, and
+      // the protocol has no service that stops one in flight (#1677).
+      "opcua",
       "opensearch",
       "redis",
     ]);
@@ -1557,6 +1598,64 @@ describe("evictIdleProviders", () => {
     expect(evicted).toBe(1);
     expect(getProviderCacheStats().size).toBe(0);
   });
+
+  test("an idle entry whose provider reports a run in flight is kept, then evicted once it reports none", async () => {
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const provider = await getOrCreateProvider(makeConnection("sqlite", { id: "busy-a" }));
+      let busy = true;
+      const disconnect = spyOn(provider, "disconnect");
+      Object.assign(provider, { hasRunsInFlight: () => busy });
+
+      expect(await evictIdleProviders(0)).toBe(0);
+      expect(getProviderCacheStats().size).toBe(1);
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(mockCloseSSHTunnel).not.toHaveBeenCalledWith("busy-a");
+      const kept = info.mock.calls
+        .map((call) => call.join(" "))
+        .filter((line) => line.includes("reports a run in flight"));
+      expect(kept).toHaveLength(1);
+      expect(kept[0]).toContain("busy-a");
+
+      busy = false;
+      expect(await evictIdleProviders(0)).toBe(1);
+      expect(getProviderCacheStats().size).toBe(0);
+      expect(mockCloseSSHTunnel).toHaveBeenCalledWith("busy-a");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  test("a fresh entry's hasRunsInFlight is never called", async () => {
+    const provider = await getOrCreateProvider(makeConnection("sqlite", { id: "fresh-busy" }));
+    const asked = mock(() => true);
+    Object.assign(provider, { hasRunsInFlight: asked });
+    expect(await evictIdleProviders(999_999_999)).toBe(0);
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  test("of two idle entries whose first one's hasRunsInFlight throws, both are evicted and one error names the first", async () => {
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = await getOrCreateProvider(makeConnection("sqlite", { id: "throws-a" }));
+      await getOrCreateProvider(makeConnection("sqlite", { id: "plain-b" }));
+      Object.assign(first, {
+        hasRunsInFlight: () => {
+          throw new Error("registry exploded");
+        },
+      });
+      expect(await evictIdleProviders(0)).toBe(2);
+      expect(getProviderCacheStats().size).toBe(0);
+      const lines = error.mock.calls
+        .map((call) => call.join(" "))
+        .filter((line) => line.includes("hasRunsInFlight() threw"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("throws-a");
+      expect(lines[0]).toContain("registry exploded");
+    } finally {
+      error.mockRestore();
+    }
+  });
 });
 
 // ─── idle sweep timer ─────────────────────────────────────────────────────
@@ -1753,6 +1852,25 @@ describe("acquireExecutionProfileProvider", () => {
       "agent-read-only",
     ).catch((e: unknown) => e);
 
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("PROFILE_UNSUPPORTED_BY_PROVIDER");
+    expect(getExecutionProfileCacheStats().size).toBe(0);
+  });
+
+  test("refuses firestore the agent's read-only profile, the gate the explain-analyze descriptor's capability check is not", async () => {
+    // `sql.explain.analyze` requires only `supportsExplain`, which Firestore declares for the editor's Explain button
+    // (Firestore spec 5.7), so the refusal of a plan execution on Firestore is this profile gate: no `queryReadOnly`.
+    expect(sqlExplainAnalyzeDescriptor.requiredCapabilities).toEqual(["supportsExplain"]);
+    const error: unknown = await acquireExecutionProfileProvider(
+      makeConnection("firestore", {
+        id: "firestore-profile",
+        host: undefined,
+        port: undefined,
+        password: undefined,
+        database: "demo-studio",
+      }),
+      "agent-read-only",
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ExecutionProfileError);
     expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("PROFILE_UNSUPPORTED_BY_PROVIDER");
     expect(getExecutionProfileCacheStats().size).toBe(0);
@@ -1998,6 +2116,43 @@ describe("acquireExecutionProfileProvider", () => {
       expect(getExecutionProfileCacheStats().size).toBe(0);
       expect(getProviderCacheStats().size).toBe(1);
       expect(mockCloseSSHTunnel).not.toHaveBeenCalled();
+    } finally {
+      clock.restore();
+    }
+  });
+
+  test("an idle profiled entry reporting a run in flight is kept with its line, and evicted once it reports none", async () => {
+    const clock = installFakeClock();
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const agent = await acquireExecutionProfileProvider(pgConn(), "agent-read-only");
+      let busy = true;
+      Object.assign(agent, { hasRunsInFlight: () => busy });
+      clock.advance(60_000);
+      expect(await evictIdleProviders(30_000)).toBe(0);
+      expect(getExecutionProfileCacheStats().size).toBe(1);
+      expect(info.mock.calls.flat().join(" ")).toContain("Keeping idle profiled provider");
+      busy = false;
+      expect(await evictIdleProviders(30_000)).toBe(1);
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+    } finally {
+      info.mockRestore();
+      clock.restore();
+    }
+  });
+
+  test("a busy shared entry keeps the tunnel open while its idle profiled sibling is evicted", async () => {
+    const clock = installFakeClock();
+    try {
+      const shared = await getOrCreateProvider(pgConn());
+      await acquireExecutionProfileProvider(pgConn(), "agent-read-only");
+      Object.assign(shared, { hasRunsInFlight: () => true });
+      clock.advance(60_000);
+      mockCloseSSHTunnel.mockClear();
+      expect(await evictIdleProviders(30_000)).toBe(1);
+      expect(getProviderCacheStats().size).toBe(1);
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+      expect(mockCloseSSHTunnel).not.toHaveBeenCalledWith("pg-profile");
     } finally {
       clock.restore();
     }
@@ -3234,4 +3389,105 @@ test("a denied SQLite caller cannot borrow a cached administrator handle", async
   } finally {
     clearProviderCache();
   }
+});
+
+// ─── Snowflake: the two-argument build, the role split and removal ─────────
+
+// Imported after the factory, which this file must evaluate first (the docblock above).
+const { SnowflakeProvider } = await import("@/lib/db/providers/sql/snowflake/index");
+
+describe("the Snowflake provider in the factory", () => {
+  /** A Snowflake connection as a census builds one: nothing in it is read before connect(). */
+  const snowflake = (overrides: Partial<DatabaseConnection> = {}): DatabaseConnection =>
+    makeConnection("snowflake", {
+      host: "myorg-myaccount",
+      port: undefined,
+      user: "studio_svc",
+      role: "STUDIO_RO",
+      authMethod: "pat",
+      password: "stand-in-token",
+      warehouse: "STUDIO_WH",
+      ...overrides,
+    });
+
+  /** connect() stubbed to mark the provider connected and send nothing, as the file stubs other providers. */
+  function stubConnect() {
+    return spyOn(SnowflakeProvider.prototype, "connect").mockImplementation(async function (
+      this: InstanceType<typeof SnowflakeProvider>,
+    ) {
+      (this as unknown as { setConnected(connected: boolean): void }).setConnected(true);
+    });
+  }
+
+  test("builds SnowflakeProvider with two arguments only, so no deps reach it from a connection", async () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/lib/db/factory.ts"), "utf8");
+    const start = source.indexOf('case "snowflake": {');
+    expect(start).toBeGreaterThan(-1);
+    // The case block ends at its own closing brace, the first one at the case's indentation.
+    const block = source.slice(start, source.indexOf("\n    }", start));
+    expect(block).toContain("new SnowflakeProvider(connection, options)");
+    expect(block).not.toMatch(/new SnowflakeProvider\([^)]*,[^)]*,/);
+
+    const provider = await createDatabaseProvider(snowflake());
+    expect(provider).toBeInstanceOf(SnowflakeProvider);
+    expect(provider.isConnected()).toBe(false);
+  });
+
+  test("two connections differing only in role are two cache entries, two instances, each with its own role", async () => {
+    const connect = stubConnect();
+    try {
+      const first = await getOrCreateProvider(snowflake({ id: "sf-roles", role: "ROLE_A" }));
+      const second = await getOrCreateProvider(snowflake({ id: "sf-roles", role: "ROLE_B" }));
+      expect(first).not.toBe(second);
+      expect(first.config.role).toBe("ROLE_A");
+      expect(second.config.role).toBe("ROLE_B");
+      expect(getProviderCacheStats()).toEqual({ size: 2, connections: ["sf-roles", "sf-roles"] });
+      expect(connect).toHaveBeenCalledTimes(2);
+      // The same role again is the first entry, not a third.
+      expect(await getOrCreateProvider(snowflake({ id: "sf-roles", role: "ROLE_A" }))).toBe(first);
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
+  test("removeProvider calls disconnect() once per cached entry of the connection, shared and profiled", async () => {
+    const connect = stubConnect();
+    const disconnect = spyOn(SnowflakeProvider.prototype, "disconnect");
+    try {
+      const conn = snowflake({ id: "sf-remove" });
+      await getOrCreateProvider(conn);
+      await acquireExecutionProfileProvider(conn, "agent-operations");
+      expect(getProviderCacheStats().size).toBe(1);
+      expect(getExecutionProfileCacheStats().size).toBe(1);
+
+      await removeProvider(conn.id);
+
+      expect(disconnect).toHaveBeenCalledTimes(2);
+      expect(getProviderCacheStats().size).toBe(0);
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+    } finally {
+      connect.mockRestore();
+      disconnect.mockRestore();
+    }
+  });
+
+  test.each(["agent-read-only", "agent-handover"] as const)(
+    "the %s profile is refused, since Snowflake declares no read-only statement path, and nothing connects",
+    async (profile) => {
+      const connect = stubConnect();
+      try {
+        const error: unknown = await acquireExecutionProfileProvider(snowflake({ id: `sf-${profile}` }), profile).catch(
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(ExecutionProfileError);
+        expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe(
+          "PROFILE_UNSUPPORTED_BY_PROVIDER",
+        );
+        expect(connect).not.toHaveBeenCalled();
+        expect(getExecutionProfileCacheStats().size).toBe(0);
+      } finally {
+        connect.mockRestore();
+      }
+    },
+  );
 });

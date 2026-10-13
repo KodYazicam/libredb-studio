@@ -51,6 +51,9 @@ describe(".gitleaksignore", () => {
     // Silo capture sets re-recorded under the reworded blocked-host sentence;
     // they name a branch commit and move onto the squash commit once it lands.
     //
+    // The Firestore branch's 2, on its commit 6ec99b39, went when its squash 60f691d2 (#1695) landed: the branch
+    // rewrote both lines before the merge, so the squash commit carries neither and needs no fingerprint.
+    //
     // The 8 after THOSE are the same re-recorded cursors as PR #1629's merge
     // commit re-presents them: the merge brought main's side of the capture
     // sets into a branch where the files were new, so the scanner attributes

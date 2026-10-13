@@ -294,9 +294,12 @@ A spelling Studio does not connect with fills no field and says what to paste in
 An `@` past the address part is refused even after the sign-in's own `@`, since a password can hold an unencoded `@` before its `/`; percent-encoded, as in `databend://root:pw@host:443/db?role=analyst%40corp`, the text reads one way.
 `tls_ca_file` is not applied, nor is an `sslmode` other than `disable`, `require` and `enable`: each gets its caution above.
 Such an `sslmode` leaves SSL mode as it was, so a DSN without a port gets the scheme's: 80 for `databend+http://` and 443 for `databend://` and `databend+https://`.
-Any other parameter, `warehouse` and the sign-in ones refused above aside, is not applied either: it is named in a warning, never valued, and the other fields are filled in:
+Any other parameter, `warehouse` and the sign-in ones refused above aside, is not applied either, and the other fields are filled in.
+A parameter BendSQL reads by name, such as `role` or `tenant`, is named in a warning and never valued; any other, a session setting or a text with no `name=`, is only counted, since an unencoded `&` inside a value makes the rest of the value read as a name:
 
 > Not applied: [names]. Studio's Databend connection takes host, port, user, password, database, warehouse and TLS; the other fields were filled in.
+
+> Not applied: role and 1 other parameter. Studio's Databend connection takes host, port, user, password, database, warehouse and TLS; the other fields were filled in.
 
 The SSL / TLS panel and the SSH tunnel are offered.
 `readOnly: true` is refused for this type, because the provider does not enforce a read-only mode: a seed file that sets it is refused when the file loads, and a connection from the API before any provider is built.
@@ -373,6 +376,10 @@ So with Warehouse set the provider declares `resumesBilledCompute`, and Studio s
 Nor does Studio open it by itself: the connection Studio makes active at sign-in or on a reload, from a link, when the server changes the connection list or when the person deletes the open connection reads nothing past its declaration, which opens no connection, until the person picks it, loads its objects, opens the Schema tab of the phone layout or runs a statement; until then the AI assistant has no schema of it, and its object tree says:
 
 > Studio opened this connection without reading it, because any request to it can resume compute that is billed while it runs. The editor is ready to use.
+
+A Source tab restored on that connection reads nothing either until the person presses Read definition or uses the connection, and says:
+
+> Studio restored this tab without reading the definition, because any request to this connection can resume compute that is billed while it runs.
 
 A host under `databend.com`, `databend.cn` or `tidbcloud.com` is Databend Cloud's, and the provider declares `resumesBilledCompute` for it with Warehouse empty too.
 BendSQL and databend-jdbc count the same three domains as Databend Cloud's when they choose their presign mode for uploads, not for billing, and Databend's Cloud guides name the service TiDB Cloud Lake in their data-integration pages; declaring the capability stops the background checks, so a host under `tidbcloud.com` that does not serve Databend loses its pulse and its fleet check, is not read when Studio makes it active by itself, and its monitoring page shows the billed-compute note; nothing else changes.

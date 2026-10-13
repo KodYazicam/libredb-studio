@@ -6,6 +6,7 @@ import { createDatabaseProvider } from "@/lib/db/factory";
 import type { ProviderCapabilities } from "@/lib/db/types";
 import type { DatabaseType } from "@/lib/types";
 import { CENSUS_CONNECTION } from "../../helpers/census-connection";
+import { platformTimeoutMs } from "../../helpers/platform-timeout";
 import { typeIdsOfProviderFile } from "../../helpers/provider-directory-map";
 
 /**
@@ -48,10 +49,17 @@ const EXPECTED_CONTAINER_PATH_SHAPES: Readonly<
   // Two levels, the catalog and the database, each path exactly as deep (design 2.4).
   databend: "exact",
   bigquery: "exact",
+  // Two levels, the database and the schema, each path exactly as deep.
+  snowflake: "exact",
   // No container level at all: buckets are object rows, so no path shape is declared.
   s3: "absent",
   kubernetes: "exact",
   mqtt: "absent",
+  // No container level at all: collections are object rows and deeper paths are Keys panel levels.
+  firestore: "absent",
+  rabbitmq: "exact",
+  // One connection is one server endpoint: there is no container level to shape (#1677).
+  opcua: "absent",
   libredb: "exact",
   duckdb: "prefixes",
   mssql: "prefixes",
@@ -159,7 +167,7 @@ describe("the declaration follows the check (#1147)", () => {
     expect(unknownTypeIds(callerFiles)).toEqual([]);
     const callers = callerFiles.map(providerTypeId).sort();
     const declaring = TYPES.filter((type) => EXPECTED_CONTAINER_PATH_SHAPES[type] !== "absent").sort();
-    expect(callers).toHaveLength(21);
+    expect(callers).toHaveLength(23);
     expect(callers).toEqual(declaring);
   });
 });
@@ -257,12 +265,18 @@ describe("the declaration has one reader (#1147)", () => {
     expect(countReads("non-reads.ts", nonReads)).toBe(0);
   });
 
-  test("object-kinds.ts is the only file under src/ that reads the field, and it reads it once", () => {
-    const readers: Array<[string, number]> = [];
-    for (const file of sourceFiles(SRC)) {
-      const count = countReads(file, fs.readFileSync(file, "utf8"));
-      if (count > 0) readers.push([repoRelative(file), count]);
-    }
-    expect(readers).toEqual([["src/lib/db/object-kinds.ts", 1]]);
-  });
+  // It parses every file under src/ with the TypeScript compiler, so it grows with the tree: 2.3 s for this whole file
+  // on linux-x64, and this one test took 5.1 s on macos-latest (CI job 114799679624), past bun's 5 s default.
+  test(
+    "object-kinds.ts is the only file under src/ that reads the field, and it reads it once",
+    () => {
+      const readers: Array<[string, number]> = [];
+      for (const file of sourceFiles(SRC)) {
+        const count = countReads(file, fs.readFileSync(file, "utf8"));
+        if (count > 0) readers.push([repoRelative(file), count]);
+      }
+      expect(readers).toEqual([["src/lib/db/object-kinds.ts", 1]]);
+    },
+    platformTimeoutMs(40_000),
+  );
 });

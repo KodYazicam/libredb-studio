@@ -8,6 +8,7 @@ import {
   OracleIcon,
   MSSQLIcon,
   LibreDBIcon,
+  OpcuaIcon,
   CouchbaseIcon,
   ClickHouseIcon,
   DruidIcon,
@@ -30,12 +31,20 @@ import {
   BigQueryIcon,
   S3Icon,
   MqttIcon,
+  FirestoreIcon,
+  RabbitMQIcon,
   KubernetesIcon,
+  SnowflakeIcon,
 } from "@/components/icons/db-icons";
 import type { DatabaseConnection, DatabaseType } from "@/lib/types";
 import type { HostUriScheme } from "@/lib/connection-host-uri";
 import type { ConnectionImportDeclaration } from "@/lib/connection-import";
 import { CREDENTIAL_WARNINGS, type CredentialWarning } from "@/lib/db/credential-warnings";
+import {
+  SNOWFLAKE_ACCOUNT_PATTERN,
+  SNOWFLAKE_FIELD_SENTENCES,
+  snowflakeHostHint,
+} from "@/lib/db/providers/sql/snowflake/account-host";
 
 // DB brand icons share the same interface as LucideIcon (className + SVG props)
 export type DBIcon = LucideIcon | React.FC<React.SVGAttributes<SVGSVGElement> & { className?: string }>;
@@ -45,6 +54,12 @@ export interface DatabaseUIConfig {
   color: string;
   label: string;
   defaultPort: string;
+  /**
+   * What the Host box holds when this engine is chosen after another one, where the previous engine's host means
+   * nothing here: a Snowflake account is not a host name, so a carried `localhost` would sign in to an account of
+   * that name. Absent, the box keeps what it held, as it always has.
+   */
+  defaultHost?: string;
   showConnectionStringToggle: boolean;
   connectionFields: (
     | "host"
@@ -70,23 +85,38 @@ export interface DatabaseUIConfig {
     // `fieldOptions` below declares.
     | "saslMechanism"
     // Db2 (#786), both InfluxDB types (InfluxDB spec I7), Oxia for its token, Databend for its password, and
-    // S3-compatible object storage for the connection itself: the consent to connect without TLS, drawn as a checkbox
-    // while SSL Mode is disable, under the sentence the type declares in `fieldHints`. The provider refuses a
-    // connection with no TLS unless it is set.
+    // S3-compatible object storage for the connection itself, and MQTT and RabbitMQ for their passwords: the consent
+    // to connect without TLS, drawn as a checkbox while SSL Mode is disable, under the sentence the type declares in
+    // `fieldHints`. The provider refuses a connection with no TLS unless it is set.
     | "allowInsecureAuth"
     // Oxia only (O6): a cluster's data-server addresses, one text box.
     | "dataServers"
-    // Databend only (design 6.1): the warehouse every statement runs on, one text box.
+    // Databend and Snowflake: the warehouse statements run on, one text box. Databend sends it as the
+    // X-DATABEND-WAREHOUSE header, which Databend Cloud requires; Snowflake as the warehouse field of every request
+    // body, optional, the user's default warehouse when empty.
     | "warehouse"
     // BigQuery only: the job location, one text box; empty means detected.
     | "location"
     // S3-compatible object storage only: the signing region, one text box.
     | "region"
-    // Kubernetes only: the server path prefix (Rancher's /k8s/clusters/<id>), the namespaces the tree lists, and the
-    // TLS server name, three text boxes.
+    // Kubernetes: the server path prefix (Rancher's /k8s/clusters/<id>), which RabbitMQ also takes as its Path prefix,
+    // and, Kubernetes only, the namespaces the tree lists and the TLS server name, three text boxes.
     | "apiPath"
     | "namespaces"
     | "tlsServerName"
+    // An AMQP 0-9-1 port, one text box of digits; no engine declares it yet.
+    | "amqpPort"
+    // Snowflake only: the sign-in method (a select), the pasted private key and its passphrase for a key pair, and
+    // the role every statement runs as.
+    | "authMethod"
+    | "privateKey"
+    | "privateKeyPassphrase"
+    | "role"
+    // OPC UA only: the security mode the server is asked for, and the server certificate pinned per
+    // connection, two text boxes. The mode is OPC UA's own name rather than a translation of
+    // Studio's SSL modes, which have no meaning to a server offering None, Sign and SignAndEncrypt.
+    | "securityMode"
+    | "serverCertificateThumbprint"
   )[];
   /**
    * The connection dialog's label for a field, where this engine names the field differently from
@@ -103,9 +133,17 @@ export interface DatabaseUIConfig {
   fieldHints?: Partial<Record<ConnectionField, string>>;
   /**
    * The connection dialog's placeholder for a field, where this engine's example differs from the dialog's own.
-   * Read through `connectionFieldPlaceholder`; the `database` and `region` boxes read it.
+   * Read through `connectionFieldPlaceholder`; the `host`, `user`, `password`, `database`, `schema`, `region`,
+   * `location`, `privateKey` and `amqpPort` boxes read it. A declared `schema` example also stands in for the dialog's
+   * own sentence under that box, so the engine's hint is the only one drawn there.
    */
   fieldPlaceholders?: Partial<Record<ConnectionField, string>>;
+  /**
+   * The sentence under the Host box derived from what is typed in it, such as the host a Snowflake account
+   * identifier resolves to, or `undefined` while the text derives nothing. Drawn in place of the static `fieldHints`
+   * entry for `host` while it answers; absent, the static hint is drawn as before.
+   */
+  hostHint?: (host: string) => string | undefined;
   /**
    * The sentence under the connection dialog's Read-only toggle, where this engine's mode differs from
    * the dialog's own sentence, which says the mode can be turned off. Neo4j declares one because its
@@ -128,6 +166,13 @@ export interface DatabaseUIConfig {
    * `ConnectionModal.tsx` is what this replaces.
    */
   fieldOptions?: Partial<Record<ConnectionField, readonly { readonly value: string; readonly label: string }[]>>;
+  /**
+   * A field the connection dialog draws only while another field holds one value, such as Snowflake's private key,
+   * drawn only while Sign-in is Key pair. Read through `connectionFieldShown`: the dialog draws such a field only
+   * while the condition holds, `buildConnection` writes it only then, and `connectionFieldRefusal` checks its rules
+   * only then, so a hidden field is neither saved nor required. Absent means every field the engine takes is drawn.
+   */
+  fieldShownWhen?: Partial<Record<ConnectionField, { readonly field: ConnectionField; readonly equals: string }>>;
   /**
    * `false` where this engine's connections may not carry an SSH tunnel (#1088), absent meaning the
    * dialog offers the tunnel. Read through `offersSshTunnel`, never directly.
@@ -205,6 +250,37 @@ export const DATABEND_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, stri
     "Databend Cloud: the warehouse= value of the DSN from Connect. A suspended warehouse resumes on the first statement, opening the connection included, because it reads the object tree, and is billed while it runs; with Warehouse set, Studio sends no background health checks. Self-hosted: leave empty unless your cluster routes requests by warehouse.",
   allowInsecureAuth:
     "Ticked, the password crosses the network in cleartext to this host. Databend Cloud never needs this: it serves HTTPS on port 443.",
+});
+
+/**
+ * The sentences the connection dialog draws under Snowflake's fields, exported so the docs can be held to them.
+ */
+export const SNOWFLAKE_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, string>>> = Object.freeze({
+  user: "The user's login name (LOGIN_NAME).",
+  privateKey: "Paste the private key's contents. Studio reads no key file.",
+  privateKeyPassphrase: "Only for an encrypted key.",
+  password: "A programmatic access token for this user.",
+  warehouse: "Leave empty to use the user's default warehouse. Queries need one; browsing does not.",
+  database: "Opened first in the tree, and the default for unqualified names.",
+  schema: "The default schema for unqualified names.",
+  role: "Every statement runs as this role; Studio checks it when it connects.",
+});
+
+/**
+ * Snowflake's form checks, in the provider's own sentences. The account module is pure, with no import of its own,
+ * so the dialog reads its pattern and sentences directly rather than a copy.
+ */
+export const SNOWFLAKE_FIELD_RULES: Readonly<Partial<Record<ConnectionField, ConnectionFieldRule>>> = Object.freeze({
+  host: {
+    required: SNOWFLAKE_FIELD_SENTENCES.accountEmpty,
+    format: { pattern: SNOWFLAKE_ACCOUNT_PATTERN, sentence: SNOWFLAKE_FIELD_SENTENCES.accountFormat },
+  },
+  user: { required: SNOWFLAKE_FIELD_SENTENCES.userEmpty },
+  // Each credential is required only under its own sign-in method: `fieldShownWhen` hides the other one, and a
+  // hidden field's rules are not checked.
+  privateKey: { required: SNOWFLAKE_FIELD_SENTENCES.keyEmpty },
+  password: { required: SNOWFLAKE_FIELD_SENTENCES.tokenEmpty },
+  role: { required: SNOWFLAKE_FIELD_SENTENCES.roleEmpty },
 });
 
 /**
@@ -295,6 +371,41 @@ export const KUBERNETES_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, st
   apiPath: "Optional: a path every request goes under, such as /k8s/clusters/c-m-abc12 for a cluster behind Rancher.",
   tlsServerName:
     "Optional: the name the API server's certificate is checked against, when it differs from Host (kubeconfig tls-server-name).",
+});
+
+/**
+ * RabbitMQ's form checks, in the provider's own sentences. The provider module is server code the dialog cannot
+ * import, so each pattern is a copy of `readAmqpPort` and `readPathPrefix` in
+ * src/lib/db/providers/stream/rabbitmq/connection-options.ts, and tests/unit/lib/db-ui-config.test.ts holds each copy to
+ * the provider's rule over the same values. The provider names the exact Path prefix shape it refuses; the dialog's
+ * one pattern names all of them at once.
+ */
+export const RABBITMQ_FIELD_RULES: Readonly<Partial<Record<ConnectionField, ConnectionFieldRule>>> = Object.freeze({
+  amqpPort: {
+    format: {
+      pattern: /^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/,
+      sentence: "AMQP port must be a whole number from 1 to 65535, such as 5672. Nothing was sent.",
+    },
+  },
+  apiPath: {
+    format: {
+      pattern: /^(?:\/|(?:\/(?!api(?:\/|$))(?!\.{1,2}(?:\/|$))[A-Za-z0-9._~!$&'()*+,;=:@-]+)+\/?)$/,
+      sentence:
+        "Path prefix starts with / and takes a plain path such as /rabbitmq: no empty, . or .. segment, no %, ? or #, and no segment named api. Nothing was sent.",
+    },
+  },
+});
+
+/** The sentences the connection dialog draws under RabbitMQ's fields, exported so the docs can be held to them. */
+export const RABBITMQ_FIELD_HINTS: Readonly<Partial<Record<ConnectionField, string>>> = Object.freeze({
+  host: "A host name, or a pasted https:// management address. A path such as /rabbitmq goes in Path prefix. An amqp:// or amqps:// URL is not taken here: enter its host, its port as AMQP port, and its user and password in their own fields.",
+  port: "15671 with TLS; 443 when a TLS proxy serves the management API",
+  amqpPort:
+    "5672, or 5671 with TLS. Only for stream reads; leave empty to browse only. Test Connection checks the management API only; the AMQP port is checked on the first read.",
+  apiPath:
+    "The path the management API is served under, for management.path_prefix or a reverse proxy location, such as /rabbitmq. Empty for a direct connection.",
+  allowInsecureAuth:
+    "Sends the username and password in clear text to the management API and the AMQP port, where anyone on the path can read them. Prefer an SSL mode and the TLS ports 15671 and 5671.",
 });
 
 export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
@@ -834,6 +945,73 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
       password: "key JSON, a ya29… token, or empty for server credentials (if enabled)",
     },
   },
+  snowflake: {
+    // A six-armed snowflake drawn for Studio, never the company's logo.
+    icon: SnowflakeIcon,
+    // Every chromatic hue and every `-alt` step was already an engine's, `lime-alt` RabbitMQ's last, so `mist`, the
+    // blue-tinted neutral, joined the identity palette with this entry: mist-700 in light and mist-400 in dark leave
+    // both closest pairs where they were (tests/unit/theme-accent-contrast.test.ts).
+    color: "text-hue-mist",
+    label: "Snowflake",
+    defaultPort: "",
+    // Account opens empty, with only its placeholder, rather than holding the previous engine's host.
+    defaultHost: "",
+    // A pasted Snowflake address is decomposed into fields; no connection string is stored.
+    showConnectionStringToggle: false,
+    connectionFields: [
+      "host",
+      "user",
+      "authMethod",
+      "privateKey",
+      "privateKeyPassphrase",
+      "password",
+      "warehouse",
+      "database",
+      "schema",
+      "role",
+    ],
+    fieldLabels: {
+      host: "Account",
+      user: "User",
+      authMethod: "Sign-in",
+      privateKey: "Private key",
+      privateKeyPassphrase: "Passphrase",
+      password: "Access token",
+      warehouse: "Warehouse",
+      database: "Database",
+      schema: "Schema",
+      role: "Role",
+    },
+    fieldOptions: {
+      authMethod: [
+        { value: "keypair", label: "Key pair" },
+        { value: "pat", label: "Programmatic access token" },
+      ],
+    },
+    fieldPlaceholders: {
+      host: "myorg-myaccount or https://myorg-myaccount.snowflakecomputing.com",
+      privateKey: "-----BEGIN PRIVATE KEY-----",
+      // No example for these three: a name such as user or default reads as a value already typed, and each box's
+      // hint says what it takes.
+      user: "",
+      database: "",
+      schema: "",
+    },
+    fieldHints: SNOWFLAKE_FIELD_HINTS,
+    // Once the Account reads, the hint names the host Studio connects to.
+    hostHint: snowflakeHostHint,
+    fieldRules: SNOWFLAKE_FIELD_RULES,
+    // One credential at a time: the key and its passphrase for a key pair, the token for an access token.
+    fieldShownWhen: {
+      privateKey: { field: "authMethod", equals: "keypair" },
+      privateKeyPassphrase: { field: "authMethod", equals: "keypair" },
+      password: { field: "authMethod", equals: "pat" },
+    },
+    // TLS is fixed (the certificate checked, the account host as its name) and nothing is tunnelled, so neither panel
+    // would be read.
+    showSshTunnel: false,
+    showSslPanel: false,
+  },
   s3: {
     // A generic bucket drawn for Studio, never a vendor's logo.
     icon: S3Icon,
@@ -934,6 +1112,128 @@ export const DB_UI_CONFIG: Record<DatabaseType, DatabaseUIConfig> = {
     readOnlyHint:
       "MQTT connections are read-only whether or not this is ticked, and not by a setting: this provider has no code that can write a PUBLISH, and its CONNECT carries no Will.",
   },
+  firestore: {
+    // A mark drawn for Studio, never the Firebase or Google Cloud logo: a document with a second one behind it.
+    icon: FirestoreIcon,
+    // Every identity hue and every `-alt` step was an engine's already, so `lime` joined the identity palette with this
+    // entry: lime-800 in light and lime-400 in dark leave both closest pairs where they were (0.0205 in light, 0.0160 in
+    // dark), and the light step clears AA at 4.67 on every ground (tests/unit/theme-accent-contrast.test.ts).
+    color: "text-hue-lime",
+    label: "Firestore",
+    // No host or port: every request goes to firestore.googleapis.com, or to the emulator the server names.
+    defaultPort: "",
+    showConnectionStringToggle: false,
+    connectionFields: ["database", "schema", "password"],
+    fieldLabels: {
+      database: "Project ID",
+      schema: "Database ID",
+      password: "Service-account key, ADC JSON or access token",
+    },
+    fieldHints: {
+      database:
+        "The Google Cloud project that holds the database: 6 to 30 lowercase letters, digits and hyphens, starting with a letter. A legacy project id may carry a domain: prefix.",
+      schema:
+        "Empty for the (default) database. A named database's id is 4 to 63 lowercase letters, digits and hyphens, starting with a letter.",
+      password:
+        "Studio reads as this credential's IAM identity, and Firebase Security Rules do not apply to it. Grant a dedicated service account roles/datastore.viewer and paste its key. Every read Studio sends is billed to the project; docs/providers/firestore.md lists what each action reads. A pasted access token lasts about an hour. Leave this empty on an emulator server, or for an operator-seeded connection that uses the server's own identity.",
+    },
+    // The database box is the only one of the three that reads a declared placeholder: the dialog draws `***` in the
+    // password box and `default` in the schema box for every engine, so their guidance lives in the hints above.
+    fieldPlaceholders: { database: "my-project" },
+    // Always HTTPS to googleapis.com with the system trust store, and a tunnel would forward one address of several
+    // (the API, the token endpoint, the metadata server), so neither panel would be read.
+    showSshTunnel: false,
+    showSslPanel: false,
+    readOnlyHint:
+      "Firestore connections are read-only whether or not this is ticked, and not by a setting: this provider builds only the read requests of its closed request table, and none of them writes.",
+  },
+  rabbitmq: {
+    // A mark drawn for Studio, never the project's own logo.
+    icon: RabbitMQIcon,
+    // Every base hue and every other identity `-alt` is an engine's, Firestore's `lime` among them, so `lime-alt`
+    // joined the identity steps with this entry (tests/unit/theme-accent-contrast.test.ts measures it).
+    color: "text-hue-lime-alt",
+    label: "RabbitMQ",
+    // The management API's port; 15671 with TLS.
+    defaultPort: "15672",
+    // Host and Management port hold the management API. An amqp:// URL is not taken: its parts go in their own fields.
+    showConnectionStringToggle: false,
+    // One tunnel carries one port, and the management API and AMQP use two, so the provider refuses a tunnel.
+    showSshTunnel: false,
+    hostAcceptsUri: ["http", "https"],
+    connectionFields: ["host", "port", "user", "password", "amqpPort", "apiPath", "allowInsecureAuth"],
+    fieldLabels: {
+      host: "Host",
+      port: "Management port",
+      amqpPort: "AMQP port",
+      apiPath: "Path prefix",
+      allowInsecureAuth: "Send the password without TLS",
+    },
+    // A greyed port number would read as a default the field does not have.
+    fieldPlaceholders: { amqpPort: "Empty: browse only" },
+    fieldHints: RABBITMQ_FIELD_HINTS,
+    fieldRules: RABBITMQ_FIELD_RULES,
+    // The dialog's own sentence says the mode can be turned off, which is false here.
+    readOnlyHint:
+      "RabbitMQ connections are read-only whether or not this is ticked: Studio sends the broker GET requests and stream reads only, never a publish or a take.",
+  },
+  opcua: {
+    // A mark drawn for Studio, never the OPC Foundation's logo: a root with two branches and a leaf.
+    icon: OpcuaIcon,
+    // A NEW hue, for the second time: every identity hue carried two engines by the time this one
+    // registered, and while it was being built Firestore took `lime` and RabbitMQ its `-alt` step,
+    // so the palette gains `slate` here (#1677). A steel grey is also the one colour a plant's
+    // address space can carry without borrowing the mark of an engine beside it.
+    color: "text-hue-slate",
+    label: "OPC UA",
+    // The IANA-registered port for opc.tcp, and the one every server measured listened on. NOTHING
+    // SHOWS IT TO A READER: `connectionFields` names no port, so the dialog draws no port box, and the
+    // address is the endpoint URL, which carries its own. It is here for a seeded connection to read.
+    defaultPort: "4840",
+    // No URI toggle, because the endpoint URL IS the address: host and port are read from it, so
+    // there is one place a reader can be wrong and one place to correct.
+    showConnectionStringToggle: false,
+    // AND NO SSL/TLS PANEL. OPC UA's transport security is its own: the security mode above and the
+    // certificate pin below, with the client's key pair in the installation's PKI directory. The
+    // shared panel's vocabulary - disable, require, verify-ca, verify-full - names nothing a server
+    // offers, and a reader who chose `require` there was refused with a word this engine does not
+    // know. The second engine to declare this, after BigQuery.
+    showSslPanel: false,
+    connectionFields: ["host", "user", "password", "securityMode", "serverCertificateThumbprint"],
+    fieldLabels: {
+      host: "Endpoint URL",
+      user: "Username",
+      password: "Password",
+      securityMode: "Security mode",
+      serverCertificateThumbprint: "Server certificate",
+    },
+    fieldPlaceholders: { host: "opc.tcp://plc.example.net:4840/", securityMode: "SignAndEncrypt" },
+    fieldHints: {
+      host:
+        "The endpoint exactly as you type it. This is the only address dialled: a server may advertise " +
+        "another, and OPC PLC advertises its own container name, which resolves nowhere.",
+      user: "A server username, if the server checks one; empty for an anonymous session.",
+      password:
+        "The password for that username. On a server whose UserName token declares its own policy the " +
+        "password is encrypted even in None mode; where it declares none, a password to a host that is " +
+        "not this machine is refused unless an SSH tunnel carries it.",
+      securityMode:
+        "None, Sign or SignAndEncrypt. None encrypts nothing and authenticates nobody, so a certificate " +
+        "cannot be pinned there and this connection refuses the pair rather than checking a thumbprint it " +
+        "read over a channel nobody authenticated. There is no fallback: a mode the server does not offer is refused rather " +
+        "than quietly weakened. A secured mode also needs TRUST both ways on the first connect: the " +
+        "server's certificate has to be moved into trusted/certs under the PKI directory, and the server " +
+        "has to accept this client's - until then a secured connect is refused, and the refusal names the " +
+        "directory.",
+      serverCertificateThumbprint:
+        "The SHA-256 thumbprint this server's certificate must present, as 64 hexadecimal characters; " +
+        "colons and spaces are ignored. Without it any certificate the trust list accepts is accepted.",
+    },
+    readOnlyHint:
+      "OPC UA connections are read-only whether or not this is ticked, and not by a setting: this " +
+      "provider's client exposes Browse, BrowseNext, Read, HistoryRead and the session calls, and has no " +
+      "code that can Write, Call a method, or subscribe.",
+  },
   libredb: {
     icon: LibreDBIcon,
     color: "text-hue-violet",
@@ -1031,8 +1331,8 @@ export function offersSslPanel(type: DatabaseType): boolean {
  * The fallback is the caller's because the dialog's own words are not one table: the `database`
  * field alone reads "Database Name", "Database File Path" or "Database Name (optional override)"
  * by the mode the form is in, and the per-type branches still choose several. `port` shares the
- * host row's label and draws none of its own, so a label declared for it has nowhere to appear;
- * a hint declared for it does.
+ * host row's label, so the dialog draws one for it only where one is declared: an engine that
+ * declares none keeps the row it always had.
  */
 export function connectionFieldLabel(config: DatabaseUIConfig, field: ConnectionField, fallback: string): string {
   return config.fieldLabels?.[field] ?? fallback;
@@ -1053,15 +1353,33 @@ export function connectionFieldHint(config: DatabaseUIConfig, field: ConnectionF
 }
 
 /**
+ * Whether the dialog draws a field the engine takes, by the engine's `fieldShownWhen`: true when the field has no
+ * condition, else whether the controlling field holds the declared value. An unset controlling field reads as its
+ * first `fieldOptions` value, the choice its select shows first, so Snowflake's unset Sign-in reads as Key pair.
+ */
+export function connectionFieldShown(
+  config: DatabaseUIConfig,
+  field: ConnectionField,
+  connection: Partial<Record<ConnectionField, unknown>>,
+): boolean {
+  const condition = config.fieldShownWhen?.[field];
+  if (condition === undefined) return true;
+  const value = connection[condition.field] ?? config.fieldOptions?.[condition.field]?.[0]?.value;
+  return value !== undefined && String(value) === condition.equals;
+}
+
+/**
  * The first refusal of the engine's `fieldRules` for a connection as the dialog built it, or `undefined` when every
  * declared check passes. The fields are checked in `connectionFields` order, so the dialog names the first box to fix.
- * A blank field is one the dialog wrote no value for, or an empty one.
+ * A blank field is one the dialog wrote no value for, or an empty one. A field `connectionFieldShown` hides is not
+ * checked, since the dialog neither draws nor writes it.
  */
 export function connectionFieldRefusal(config: DatabaseUIConfig, connection: DatabaseConnection): string | undefined {
   const values = connection as Partial<Record<ConnectionField, unknown>>;
   for (const field of config.connectionFields) {
     const rule = config.fieldRules?.[field];
     if (rule === undefined) continue;
+    if (!connectionFieldShown(config, field, values)) continue;
     const value = values[field];
     if (value === undefined || value === "") {
       if (rule.required !== undefined) return rule.required;

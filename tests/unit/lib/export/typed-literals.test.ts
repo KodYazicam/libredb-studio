@@ -163,6 +163,26 @@ describe("typedLiteral: mssql", () => {
     expect(typedLiteral(false, "bit", "mssql", scalar)).toBe("0");
     expect(typedLiteral(1, "bit", "mssql", scalar)).toBeUndefined();
   });
+
+  // `datetime` and `smalldatetime` read `yyyy-mm-dd hh:mi:ss` through the session's
+  // DATEFORMAT, so the provider's text (#1452) goes out in the ISO 8601 form with a `T`.
+  test("writes a datetime and a smalldatetime's own text as ISO 8601 with a T", () => {
+    expect(typedLiteral("2026-10-04 12:34:56.123", "datetime", "mssql", scalar)).toBe("N'2026-10-04T12:34:56.123'");
+    expect(typedLiteral("2026-10-04 12:35:00", "smalldatetime", "mssql", scalar)).toBe("N'2026-10-04T12:35:00'");
+    expect(typedLiteral("2026-10-04 12:35:00", " SmallDateTime ", "mssql", scalar)).toBe("N'2026-10-04T12:35:00'");
+  });
+
+  test("leaves every other datetime-shaped cell to the generic writer", () => {
+    // `datetime2` and `date` read `yyyy-mm-dd` the same under every DATEFORMAT already.
+    expect(typedLiteral("2026-10-04 12:34:56.123", "datetime2", "mssql", scalar)).toBeUndefined();
+    expect(typedLiteral("2026-10-04 12:34:56.123", undefined, "mssql", scalar)).toBeUndefined();
+    // Text the provider never reads a datetime as stays the text it is.
+    expect(typedLiteral("2026-10-04T12:34:56.123Z", "datetime", "mssql", scalar)).toBeUndefined();
+    expect(typedLiteral("2026-10-04 12:34:56.1234567", "datetime", "mssql", scalar)).toBeUndefined();
+    expect(typedLiteral("2026-10-04 12:34", "smalldatetime", "mssql", scalar)).toBeUndefined();
+    expect(typedLiteral("x 2026-10-04 12:34:56", "datetime", "mssql", scalar)).toBeUndefined();
+    expect(typedLiteral(new Date(0), "datetime", "mssql", scalar)).toBeUndefined();
+  });
 });
 
 describe("typedLiteral: clickhouse", () => {
@@ -304,5 +324,81 @@ describe("typedLiteral: databend", () => {
       );
     }
     expect(typedLiteral("616263", undefined, "databend", scalar)).toBeUndefined();
+  });
+});
+
+describe("typedLiteral: snowflake (provisional until a replay on an account)", () => {
+  test("a semi-structured cell is PARSE_JSON of its text, and a structured or VECTOR type is cast to its declaration", () => {
+    expect(typedLiteral('{"a":1}', "VARIANT", "snowflake", scalar)).toBe(`PARSE_JSON('{"a":1}')`);
+    expect(typedLiteral({ k: [1, null] }, "OBJECT", "snowflake", scalar)).toBe(`PARSE_JSON('{"k":[1,null]}')`);
+    expect(typedLiteral("[1,2]", "array", "snowflake", scalar)).toBe("PARSE_JSON('[1,2]')");
+    expect(typedLiteral('{"a":1}', "MAP", "snowflake", scalar)).toBe(`PARSE_JSON('{"a":1}')`);
+    expect(typedLiteral("[1,2]", "VECTOR(FLOAT, 2)", "snowflake", scalar)).toBe(
+      "PARSE_JSON('[1,2]')::VECTOR(FLOAT, 2)",
+    );
+    expect(typedLiteral("[1,2]", "ARRAY(NUMBER(38,0))", "snowflake", scalar)).toBe(
+      "PARSE_JSON('[1,2]')::ARRAY(NUMBER(38,0))",
+    );
+    expect(typedLiteral('"it\'s\\"', "VARIANT", "snowflake", scalar)).toBe("PARSE_JSON('\"it''s\\\\\"')");
+  });
+
+  test("a VECTOR without its dimension is cast to the element type and length its value spells", () => {
+    // The trial's result metadata carries no dimension, and printed a FLOAT vector with six fraction digits.
+    expect(typedLiteral("[1.500000,2.000000,-3.000000]", "VECTOR", "snowflake", scalar)).toBe(
+      "PARSE_JSON('[1.500000,2.000000,-3.000000]')::VECTOR(FLOAT, 3)",
+    );
+    expect(typedLiteral("[1,-2]", "VECTOR", "snowflake", scalar)).toBe("PARSE_JSON('[1,-2]')::VECTOR(INT, 2)");
+    expect(typedLiteral("[1, 2e3]", "vector", "snowflake", scalar)).toBe("PARSE_JSON('[1, 2e3]')::VECTOR(FLOAT, 2)");
+    expect(typedLiteral("[1,NaN]", "VECTOR", "snowflake", scalar)).toBe("PARSE_JSON('[1,NaN]')::VECTOR(FLOAT, 2)");
+    expect(typedLiteral([4, 5, 6], "VECTOR", "snowflake", scalar)).toBe("PARSE_JSON('[4,5,6]')::VECTOR(INT, 3)");
+  });
+
+  test("a VECTOR value that is not an array of numbers, or a cast that is not a type, skips the row", () => {
+    expect(() => typedLiteral("[]", "VECTOR", "snowflake", scalar)).toThrow(
+      "a VECTOR whose value is not an array of numbers",
+    );
+    expect(() => typedLiteral('["a"]', "VECTOR", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("[1,,2]", "VECTOR", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("1,2", "VECTOR", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("[1]", "ARRAY(INT)'; DROP TABLE t; --", "snowflake", scalar)).toThrow(UnwritableValue);
+  });
+
+  test("dates, times and timestamps go through TO_* with a mask matching the text's fraction digits", () => {
+    expect(typedLiteral("0001-01-01", "DATE", "snowflake", scalar)).toBe("TO_DATE('0001-01-01', 'YYYY-MM-DD')");
+    expect(typedLiteral("13:45:30", "TIME(0)", "snowflake", scalar)).toBe("TO_TIME('13:45:30', 'HH24:MI:SS')");
+    expect(typedLiteral("13:45:30.5", "TIME(1)", "snowflake", scalar)).toBe("TO_TIME('13:45:30.5', 'HH24:MI:SS.FF1')");
+    expect(typedLiteral("2026-10-12 01:02:03", "TIMESTAMP_NTZ(0)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_NTZ('2026-10-12 01:02:03', 'YYYY-MM-DD HH24:MI:SS')",
+    );
+    expect(typedLiteral("2026-10-12 01:02:03.123456+00:00", "TIMESTAMP_LTZ(6)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_LTZ('2026-10-12 01:02:03.123456+00:00', 'YYYY-MM-DD HH24:MI:SS.FF6TZH:TZM')",
+    );
+    expect(typedLiteral("2026-10-12 01:02:03-05:30", "TIMESTAMP_TZ(0)", "snowflake", scalar)).toBe(
+      "TO_TIMESTAMP_TZ('2026-10-12 01:02:03-05:30', 'YYYY-MM-DD HH24:MI:SSTZH:TZM')",
+    );
+  });
+
+  test("a temporal cell not in the decoder's form, or not text, is refused", () => {
+    expect(() => typedLiteral("12/10/2026", "DATE", "snowflake", scalar)).toThrow(
+      "a DATE that is not in the form Studio reads",
+    );
+    expect(() => typedLiteral(new Date(0), "TIMESTAMP_NTZ(3)", "snowflake", scalar)).toThrow(UnwritableValue);
+    expect(() => typedLiteral("2026-10-12 01:02:03", "TIMESTAMP_TZ(0)", "snowflake", scalar)).toThrow(UnwritableValue);
+  });
+
+  test("a NUMBER or DECFLOAT text is written bare; anything else falls to the generic writer", () => {
+    expect(typedLiteral("12.50", "NUMBER(10,2)", "snowflake", scalar)).toBe("12.50");
+    expect(typedLiteral("123456789012345678901234567890", "NUMBER(38,0)", "snowflake", scalar)).toBe(
+      "123456789012345678901234567890",
+    );
+    expect(typedLiteral("-1.5e-300", "DECFLOAT", "snowflake", scalar)).toBe("-1.5e-300");
+    expect(typedLiteral("x", "NUMBER(10,2)", "snowflake", scalar)).toBe("<x>");
+    expect(typedLiteral(7, "NUMBER(38,0)", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral(1.5, "FLOAT", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral("a", "VARCHAR(10)", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral(true, "BOOLEAN", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral(new Uint8Array([1]), "BINARY", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral("POINT(1 2)", "GEOGRAPHY", "snowflake", scalar)).toBeUndefined();
+    expect(typedLiteral("x", undefined, "snowflake", scalar)).toBeUndefined();
   });
 });

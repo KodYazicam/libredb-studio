@@ -131,7 +131,7 @@ jobs:
         # launcher's own Node 24 floor, so the launcher refuses and the test
         # dies on a bare exit 1. Pin the product's baseline instead of
         # inheriting the runner's default (#709 was red on exactly this).
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -179,23 +179,24 @@ jobs:
 
       # Production runs on Node 26.10.0 (the Dockerfile's runner stage), and the byte transport's refusal of a
       # link-local DNS answer with DB_HTTP_BLOCK_PRIVATE_HOSTS off rests on that runtime's Agent using the
-      # transport's own lookup, so the transport's runtime cases run once more on exactly that version. The suite
-      # and its coverage above stay on Node 24.
+      # transport's own lookup, so the transport's runtime cases run once more on exactly that version, and so do
+      # the RabbitMQ AMQP dial's, whose egress rests on the same runtime's lookup handling. The suite and its
+      # coverage above stay on Node 24.
       - name: Setup Node 26.10.0 for the transport runtime cases
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26.10.0"
 
-      - name: Run the transport runtime cases and the S3 client wire cases on Node 26.10.0
+      - name: Run the transport runtime cases, the S3 client wire cases, the RabbitMQ dial cases and the Snowflake key cases on Node 26.10.0
         run: |
           test "$(node --version)" = "v26.10.0"
-          NODE_TRANSPORT_NODES="$(command -v node)" bun tests/run-tests.ts tests/unit/db/http/node-transport-runtimes.test.ts tests/unit/db/s3/client-wire.test.ts
+          NODE_TRANSPORT_NODES="$(command -v node)" bun tests/run-tests.ts tests/unit/db/http/node-transport-runtimes.test.ts tests/unit/db/s3/client-wire.test.ts tests/unit/db/rabbitmq/dial-runtimes.test.ts tests/unit/db/snowflake/key-runtimes.test.ts
 
       - name: Upload coverage artifact
         # always(): keep the lcov available for debugging when coverage:check
         # fails for a non-obvious reason (e.g. malformed report, merge bug).
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
           path: coverage/lcov.info
@@ -247,7 +248,7 @@ jobs:
       - name: Setup Node
         # Both images ship Node 22 by default, below the product's floor, and the
         # tests that spawn bin/studio.js get whatever `node` is on PATH (#709).
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -318,7 +319,7 @@ jobs:
     # is the fail-safe), never a broken job, which is why it went unnoticed;
     # tests/unit/ci-playwright-image.test.ts now fails on it.
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.64.0-noble
 
     steps:
       - name: Checkout code
@@ -371,7 +372,7 @@ jobs:
         run: bun run test:e2e:base-path
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-report
@@ -386,7 +387,7 @@ jobs:
   # branch, which is the whole point of a test that claims to exercise the real
   # path.
   functional-smoke:
-    name: Functional Smoke (PostgreSQL)
+    name: Functional Smoke (PostgreSQL, RabbitMQ)
     needs: [lint-and-build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -409,10 +410,20 @@ jobs:
         # pg cannot show them. Superuser, because one case deletes an account with foreign keys off.
         run: |
           docker run -d --rm --name passkey-contract-pg -e POSTGRES_PASSWORD=contract -p 127.0.0.1:55432:5432 postgres:17
+          # The image's first start runs a temporary server on its Unix socket only, stops it and starts the real
+          # one, so a psql over the socket can answer from the temporary server and the contract's TCP connection
+          # then lands in the restart ("Connection terminated unexpectedly"). Wait on TCP, where only the real
+          # server listens, and stop here if it never does.
+          ready=""
           for i in $(seq 1 60); do
-            docker exec passkey-contract-pg psql -U postgres -tAc "select 1" > /dev/null 2>&1 && break
+            docker exec passkey-contract-pg pg_isready -q -h 127.0.0.1 -p 5432 -U postgres && { ready=yes; break; }
             sleep 1
           done
+          if [ -z "$ready" ]; then
+            echo "PostgreSQL accepted no TCP connection within 60 s"
+            docker logs passkey-contract-pg
+            exit 1
+          fi
           bun tests/live/passkey-store-postgres.ts
           docker rm -f passkey-contract-pg
         env:
@@ -434,8 +445,45 @@ jobs:
           USER_EMAIL: user@libredb.org
           USER_PASSWORD: test-user
 
+      # The RabbitMQ provider's read-only check (#1656): every provider surface against a fresh 4.3.6 broker, the
+      # broker's own take counters compared before and after, and one control take that must move them. It runs after
+      # the functional smoke on purpose: the steps run in order with no `if:`, so a red oracle cannot hide the
+      # PostgreSQL result. The broker serves this run alone, so the broker-wide counters are compared too. The image
+      # reference is database-compose.yml's `rabbitmq` service's, and tests/unit/db/rabbitmq/live-environment.test.ts
+      # holds the two equal. The passwords are made for this run and never leave it. The wait asks the management API
+      # before it runs the CLI: the image's HOME is /var/lib/rabbitmq, so a `docker exec` CLI that ran before the
+      # server would write the Erlang cookie there as root, and the server, running as rabbitmq, could not read it.
+      - name: RabbitMQ read-only check
+        run: |
+          image="rabbitmq:4.3.6-management@sha256:8dd6e3570ddaa2ef82a6c3a8950e79c1f73893adfbdddbc374fc1f1ac8a0f5dd"
+          export RABBITMQ_LIVE_DIGEST="${image#*@}"
+          export RABBITMQ_LIVE_ADMIN_PASSWORD="$(openssl rand -hex 16)"
+          export RABBITMQ_LIVE_FIXTURE_PASSWORD="$(openssl rand -hex 16)"
+          trap 'docker rm -f libredb-ci-rabbitmq > /dev/null' EXIT
+          docker run -d --name libredb-ci-rabbitmq --ulimit nofile=65536:65536 \
+            -e RABBITMQ_DEFAULT_USER=libredb-admin -e RABBITMQ_DEFAULT_PASS="$RABBITMQ_LIVE_ADMIN_PASSWORD" \
+            -v "$PWD/docker/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro" \
+            -p 127.0.0.1:5672:5672 -p 127.0.0.1:15672:15672 -p 127.0.0.1:15692:15692 "$image"
+          ready=""
+          end=$((SECONDS + 60))
+          while [ "$SECONDS" -lt "$end" ]; do
+            if curl -fsS -o /dev/null -u "libredb-admin:$RABBITMQ_LIVE_ADMIN_PASSWORD" http://127.0.0.1:15672/api/overview \
+              && docker exec libredb-ci-rabbitmq rabbitmq-diagnostics -q check_port_connectivity > /dev/null 2>&1; then
+              ready=yes
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "The RabbitMQ broker was not ready within 60 s."
+            docker logs --tail 50 libredb-ci-rabbitmq
+            exit 1
+          fi
+          bun tests/live/rabbitmq-seed.ts
+          bun tests/live/rabbitmq-read-only.ts --dedicated
+
       - name: Upload Playwright report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-report-functional-smoke
@@ -459,7 +507,7 @@ jobs:
         # ABI exactly like release-artifacts.yml does - without this, the
         # runner's default node dictates the ABI and the matrix legs assert
         # against a payload no release would ever ship.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -477,7 +525,7 @@ jobs:
           NEXT_TELEMETRY_DISABLED: 1
 
       - name: Upload payload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-smoke-payload
           path: dist-payload/libredb-studio-standalone-*.tar.gz
@@ -506,12 +554,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
 
       - name: Download payload artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: engine-smoke-payload
           path: dist-payload
@@ -534,7 +582,7 @@ jobs:
     # only need node + bun; the docker/deb/rpm/snap channels elsewhere need a
     # daemon or a package manager and therefore stay on the bare runner.
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.64.0-noble
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -555,7 +603,7 @@ jobs:
         run: bunx playwright install chromium
 
       - name: Download payload artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: engine-smoke-payload
           path: dist-payload
@@ -632,11 +680,11 @@ jobs:
 
       - name: Set up chart-testing
         if: steps.chart-changes.outputs.changed == 'true'
-        uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+        uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
 
       - name: Create Kind cluster
         if: steps.chart-changes.outputs.changed == 'true'
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
 
       - name: Run chart-testing install (default values, zero-config)
         if: steps.chart-changes.outputs.changed == 'true'
@@ -704,7 +752,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download coverage artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: coverage
           path: coverage

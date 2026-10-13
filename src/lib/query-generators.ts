@@ -2,11 +2,13 @@ import { cypherForSegment } from "@/lib/db/graph/cypher/generators";
 import { quoteCypherName } from "@/lib/db/graph/cypher/quote";
 import { declaredLevels } from "@/lib/db/object-kinds";
 import { type QueryDialect, registeredDialect } from "@/lib/db/query-dialects";
+import { countStatement, previewStatement } from "@/lib/db/providers/document/firestore/console/generators";
 import { encodeKey } from "@/lib/db/providers/keyvalue/etcd/keys";
 import { oxiaSelectQuery, oxiaTableQuery } from "@/lib/db/providers/keyvalue/oxia/generators";
 import { kubectlGetQuery, kubectlRowActionQuery } from "@/lib/db/providers/platform/kubernetes/generators";
 import { s3SelectQuery, s3TableQuery } from "@/lib/db/providers/objectstore/s3/console/generators";
 import { quoteGoString, quoteTxnWord, quoteWord } from "@/lib/db/providers/keyvalue/etcd/lexer";
+import { rabbitmqSelectQuery, rabbitmqTableQuery } from "@/lib/db/providers/stream/rabbitmq/generators";
 import { influxqlSelectQuery, influxqlTableQuery } from "@/lib/db/providers/timeseries/influxdb/influxql-generators";
 import { influxqlSource, quoteInfluxqlIdentifier } from "@/lib/db/providers/timeseries/influxdb/influxql-quote";
 import { metricSelector } from "@/lib/db/providers/timeseries/prometheus/promql";
@@ -685,14 +687,20 @@ export interface DialectGenerators {
    * concatenated.
    */
   readonly rowAction?: (path: readonly string[], actionId: string, scope: GeneratorScope) => string;
+  /**
+   * The statement Generate Count Query writes for one object, on a dialect whose `QUERY_DIALECTS` record offers it.
+   * Absent on every dialect whose record does not; `generateCountQuery` refuses a record that offers a count and
+   * writes none, rather than falling through to the JSON arm's MongoDB count document.
+   */
+  readonly count?: (path: readonly string[]) => string;
 }
 
 /**
  * Every query dialect's generators, read by `generateTableQuery` and `generateSelectQuery` BEFORE their JSON arm:
  * each dialect declares `queryLanguage: "json"` too, and without its record a tree click auto-executes a MongoDB
  * `find` its provider refuses (#427, #1088, #1089). A `Record` over `QueryDialect`, so a dialect added to the
- * union does not compile until it has its generators. Module-internal: the two generators and
- * `generateRowActionQuery` are its only readers, and this module's export list is pinned
+ * union does not compile until it has its generators. Module-internal: the two generators, `generateCountQuery`
+ * and `generateRowActionQuery` are its only readers, and this module's export list is pinned
  * (`tests/unit/lib/query-generators.test.ts`).
  */
 const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Object.freeze({
@@ -779,6 +787,22 @@ const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Ob
     select: (path) =>
       `// MQTT has no query console. ${objectSegment(path)} opens in its Source tab from the Keys panel.`,
   },
+  // Firestore reads a collection through one statement of its console's read-only Admin SDK subset, written by the
+  // provider's browser-safe console/generators.ts: a tree click and Generate Query are both the 100-document preview of
+  // the clicked collection, addressed by the object's own segment, the collection id the tree lists. Generate Count
+  // Query writes the count() aggregation of the same collection.
+  firestore: {
+    table: (path) => previewStatement([objectSegment(path)]),
+    select: (path) => previewStatement([objectSegment(path)]),
+    count: (path) => countStatement([objectSegment(path)]),
+  },
+  // RabbitMQ reads a stream through its own JSON read request, written by the provider's browser-safe generators.ts:
+  // the click reads the last chunk ("Read Last Chunk") and Generate Read Request the first message, 50 rows each.
+  // Neither reads the columns or the scope, and neither throws.
+  rabbitmq: {
+    table: (path) => rabbitmqTableQuery(path),
+    select: (path) => rabbitmqSelectQuery(path),
+  },
   s3: {
     table: (path) => s3TableQuery(path),
     select: (path) => s3SelectQuery(path),
@@ -792,7 +816,35 @@ const DIALECT_GENERATORS: Readonly<Record<QueryDialect, DialectGenerators>> = Ob
     select: (path) => kubectlGetQuery(path),
     rowAction: (path, actionId) => kubectlRowActionQuery(path, actionId),
   },
+  /**
+   * OPC UA generates nothing, and the two members below are unreachable rather than useful.
+   *
+   * Its dialect declares `offersCodeGeneration: false`, which is what `row-actions.ts` and
+   * `TableItem.tsx` read: the button is never drawn, so neither function is called. They exist
+   * because the record is exhaustive over dialects and `DialectGenerators` requires both.
+   *
+   * WHY NOTHING CAN BE GENERATED. A generator is handed the object's PATH, and a path's last segment
+   * is a BrowseName. A read request names a NODE ID, which a BrowseName is not: measured on the
+   * pinned fixture, 1,299 of its 6,769 node ids cannot be built from their own browse name, and 41
+   * nodes have more than one path. So a statement built from a path would name a node the reader did not
+   * choose, or none. A click on a key opens the node's own value in a Source tab instead, which is
+   * `readObjectSource`, and that reaches the node id by browsing down the path.
+   */
+  opcua: Object.freeze({
+    table: () => UNREACHABLE_OPCUA_GENERATOR,
+    select: () => UNREACHABLE_OPCUA_GENERATOR,
+  }),
 });
+
+/**
+ * What the OPC UA generators answer if they are ever reached, which would be a defect elsewhere.
+ *
+ * A sentence rather than empty text: empty text in the editor reads as "this engine generated
+ * nothing useful", where this says what happened and where the value actually is.
+ */
+const UNREACHABLE_OPCUA_GENERATOR =
+  "// An OPC UA node's value is read from the node itself, not from a generated statement: click the key " +
+  "to open its value, or name the node id in a read request.";
 
 /**
  * The statement behind "Select Top 50", the one a CLICK on a tree row runs (#789).
@@ -1219,11 +1271,27 @@ export function generateRowActionQuery(
   return rowAction(path, actionId, scope);
 }
 
-/** Prepare an editable count statement, without a row limit or any execution (#702). */
-export function generateCountQuery(path: readonly string[], capabilities: ProviderCapabilities): string | null {
+/**
+ * Prepare an editable count statement, without a row limit or any execution (#702). A dialect's own count statement,
+ * from its `DIALECT_GENERATORS` record, comes before the JSON arm, as the other two generators' do. `registry` is the
+ * record this module holds; a test passes its own to reach the refusal no shipped record triggers.
+ */
+export function generateCountQuery(
+  path: readonly string[],
+  capabilities: ProviderCapabilities,
+  registry: Readonly<Partial<Record<QueryDialect, DialectGenerators>>> = DIALECT_GENERATORS,
+): string | null {
   if (!offersCountQuery(capabilities)) return null;
   // Refuses an empty address before any dialect spells it, the JSON arm's own check included.
   objectSegment(path);
+  const dialect = registeredDialect(capabilities);
+  if (dialect !== undefined) {
+    const count = registry[dialect]?.count;
+    if (count === undefined) {
+      throw new Error(`the ${dialect} dialect offers Generate Count Query and writes no count statement`);
+    }
+    return count(path);
+  }
   if (capabilities.queryLanguage === "json") {
     return JSON.stringify({ ...jsonCommandAddress(path, capabilities), operation: "count", filter: {} }, null, 2);
   }

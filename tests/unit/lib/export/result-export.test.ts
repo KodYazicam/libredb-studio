@@ -1496,6 +1496,19 @@ describe("buildResultExport: a cell whose literal depends on its declared type (
     expect(insert("mssql", { a: true, b: false }, { a: "bit", b: "bit" })).toContain("VALUES (1, 0);");
   });
 
+  // Measured on SQL Server 2022 CU27: under a dmy language (british, Deutsch, Français)
+  // `'2026-10-04 12:34:56.123'` replays into a DATETIME as April 10th, and the `T` form as
+  // October 4th under every language (#1452). DATETIME2 reads either form the same.
+  test("writes a SQL Server DATETIME and SMALLDATETIME in the form every DATEFORMAT reads the same", () => {
+    expect(
+      insert(
+        "mssql",
+        { dt: "2026-10-04 12:34:56.123", sdt: "2026-10-04 12:35:00", dt2: "2026-10-04 12:34:56.123" },
+        { dt: "datetime", sdt: "smalldatetime", dt2: "datetime2" },
+      ),
+    ).toContain("VALUES (N'2026-10-04T12:34:56.123', N'2026-10-04T12:35:00', N'2026-10-04 12:34:56.123');");
+  });
+
   test("still writes true and false where the dialect reads them", () => {
     expect(insert("postgres", { a: true }, { a: "boolean" })).toContain("VALUES (true);");
   });
@@ -1943,5 +1956,121 @@ describe("buildResultExport: Databend's type rulings (X01)", () => {
       source({ rows: [{ b: "<bitmap binary>" }], fields: ["b"], dialect: "databend", columnTypes: { b: "Bitmap" } }),
     );
     expect(file.content).toContain('-- Row 1 skipped: column "b" holds a value of type Bitmap');
+  });
+});
+
+/**
+ * Snowflake's INSERT is `INSERT ... SELECT`, since `INSERT ... VALUES` refuses `PARSE_JSON`, and its temporal cells go
+ * through `TO_DATE`, `TO_TIME` and `TO_TIMESTAMP_*` with an explicit mask, so no account input format moves them.
+ * Every form here is provisional until a replay on an account confirms it.
+ */
+describe("buildResultExport: Snowflake's rows and types", () => {
+  const columnTypes = {
+    v: "VARIANT",
+    o: "OBJECT",
+    a: "ARRAY",
+    vec: "VECTOR(FLOAT, 2)",
+    d: "DATE",
+    tm: "TIME(9)",
+    ntz: "TIMESTAMP_NTZ(3)",
+    tz: "TIMESTAMP_TZ(9)",
+    b: "BINARY",
+    n: "NUMBER(10,2)",
+  };
+  const row = {
+    v: '{"a":1}',
+    o: '{"k":"v"}',
+    a: "[1,2]",
+    vec: "[1.5,2]",
+    d: "2026-10-12",
+    tm: "13:45:30.123456789",
+    ntz: "2026-10-12 13:45:30.123",
+    tz: "2026-10-12 13:45:30.123456789+01:00",
+    b: Buffer.from([0x01, 0xab]),
+    n: "12.50",
+  };
+
+  test("writes INSERT ... SELECT with PARSE_JSON, the VECTOR cast and masked temporal casts, byte for byte", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({ rows: [row], fields: Object.keys(row), tabName: "t", dialect: "snowflake", columnTypes }),
+    );
+    expect(file.content).toBe(
+      'INSERT INTO t ("v", "o", "a", "vec", "d", "tm", "ntz", "tz", "b", "n") SELECT ' +
+        "PARSE_JSON('{\"a\":1}'), PARSE_JSON('{\"k\":\"v\"}'), PARSE_JSON('[1,2]'), " +
+        "PARSE_JSON('[1.5,2]')::VECTOR(FLOAT, 2), TO_DATE('2026-10-12', 'YYYY-MM-DD'), " +
+        "TO_TIME('13:45:30.123456789', 'HH24:MI:SS.FF9'), " +
+        "TO_TIMESTAMP_NTZ('2026-10-12 13:45:30.123', 'YYYY-MM-DD HH24:MI:SS.FF3'), " +
+        "TO_TIMESTAMP_TZ('2026-10-12 13:45:30.123456789+01:00', 'YYYY-MM-DD HH24:MI:SS.FF9TZH:TZM'), " +
+        "X'01ab', 12.50;",
+    );
+  });
+
+  test("a VECTOR column, as the SQL API reports it, is cast to the dimension its value spells", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ vec: "[1.500000,2.000000,-3.000000]" }],
+        fields: ["vec"],
+        tabName: "t",
+        dialect: "snowflake",
+        columnTypes: { vec: "VECTOR" },
+      }),
+    );
+    expect(file.content).toBe(
+      `INSERT INTO t ("vec") SELECT PARSE_JSON('[1.500000,2.000000,-3.000000]')::VECTOR(FLOAT, 3);`,
+    );
+  });
+
+  test("NaN and the infinities in a FLOAT column are Snowflake's own literals, never NULL", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({
+        rows: [{ f: "Infinity" }, { f: "-Infinity" }, { f: "NaN" }, { f: Number.NEGATIVE_INFINITY }],
+        fields: ["f"],
+        tabName: "t",
+        dialect: "snowflake",
+        columnTypes: { f: "FLOAT" },
+      }),
+    );
+    expect(file.content).toBe(
+      [
+        `INSERT INTO t ("f") SELECT 'inf'::FLOAT;`,
+        `INSERT INTO t ("f") SELECT '-inf'::FLOAT;`,
+        `INSERT INTO t ("f") SELECT 'NaN'::FLOAT;`,
+        `INSERT INTO t ("f") SELECT '-inf'::FLOAT;`,
+      ].join("\n"),
+    );
+  });
+
+  test("a row with no typed cell is still INSERT ... SELECT", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({ rows: [{ id: 1, name: "it's" }], fields: ["id", "name"], tabName: "t", dialect: "snowflake" }),
+    );
+    expect(file.content).toBe(`INSERT INTO t ("id", "name") SELECT 1, 'it''s';`);
+  });
+
+  test("a temporal cell not in the decoder's form skips its row with the #1386 comment", () => {
+    const file = buildResultExport(
+      "sql-insert",
+      source({ rows: [{ d: "12/10/2026" }], fields: ["d"], dialect: "snowflake", columnTypes: { d: "DATE" } }),
+    );
+    expect(file.content).toContain('-- Row 1 skipped: column "d" holds a DATE that is not in the form');
+  });
+
+  test("the DDL offers FLOAT for a float column and BINARY, never BLOB, for bytes", () => {
+    const ddl = buildResultExport(
+      "sql-ddl",
+      source({ rows: [{ f: 1.5, b: new Uint8Array([1]) }], fields: ["f", "b"], dialect: "snowflake" }),
+    ).content;
+    expect(ddl).toContain('"f" FLOAT');
+    expect(ddl).toContain('"b" BINARY');
+    expect(ddl).not.toContain("BLOB");
+    const declared = buildResultExport(
+      "sql-ddl",
+      source({ rows: [{ b: null }], fields: ["b"], dialect: "snowflake", columnTypes: { b: "BINARY" } }),
+    ).content;
+    expect(declared).toContain('"b" BINARY');
   });
 });

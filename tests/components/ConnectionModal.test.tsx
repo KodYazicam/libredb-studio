@@ -1,6 +1,7 @@
 import "../setup-dom";
 import "../helpers/mock-sonner";
 import "../helpers/mock-navigation";
+import { pemArmour } from "../helpers/pem-armour";
 
 import { mock } from "bun:test";
 import React from "react";
@@ -142,7 +143,12 @@ const mockSetApiPath = mock(() => {});
 const mockSetNamespaces = mock(() => {});
 const mockSetTlsServerName = mock(() => {});
 const mockSetRegion = mock(() => {});
+const mockSetAmqpPort = mock(() => {});
 const mockSetSaslMechanism = mock(() => {});
+const mockSetAuthMethod = mock(() => {});
+const mockSetPrivateKey = mock(() => {});
+const mockSetPrivateKeyPassphrase = mock(() => {});
+const mockSetRole = mock(() => {});
 
 let mockFormOverrides: Record<string, unknown> = {};
 
@@ -172,6 +178,16 @@ function getDefaultForm() {
     setTlsServerName: mockSetTlsServerName,
     region: "",
     setRegion: mockSetRegion,
+    amqpPort: "",
+    setAmqpPort: mockSetAmqpPort,
+    authMethod: "keypair",
+    setAuthMethod: mockSetAuthMethod,
+    privateKey: "",
+    setPrivateKey: mockSetPrivateKey,
+    privateKeyPassphrase: "",
+    setPrivateKeyPassphrase: mockSetPrivateKeyPassphrase,
+    role: "",
+    setRole: mockSetRole,
     readOnlyOffered: false,
     credentialWarning: undefined as string | undefined,
     host: "localhost",
@@ -275,6 +291,9 @@ mock.module("@/hooks/use-connection-form", () => ({
   useConnectionForm: mock(() => getDefaultForm()),
 }));
 
+// The account module is pure and not mocked: the Snowflake entry's derived-host hint is the real one.
+import { snowflakeHostHint } from "@/lib/db/providers/sql/snowflake/account-host";
+
 // ── Mock @/lib/db-ui-config ─────────────────────────────────────────────────
 // Mirrors the real table for the engines that diverge from the networked default. A mock
 // that gave every type the full field set is what let the modal draw a Username box for
@@ -301,6 +320,19 @@ const MOCK_CONNECTION_FIELDS: Record<string, string[]> = {
   databend: ["host", "port", "user", "password", "database", "warehouse", "allowInsecureAuth"],
   s3: ["host", "port", "user", "password", "database", "region", "allowInsecureAuth"],
   kubernetes: ["host", "port", "password", "database", "namespaces", "apiPath", "tlsServerName"],
+  rabbitmq: ["host", "port", "user", "password", "amqpPort", "apiPath", "allowInsecureAuth"],
+  snowflake: [
+    "host",
+    "user",
+    "authMethod",
+    "privateKey",
+    "privateKeyPassphrase",
+    "password",
+    "warehouse",
+    "database",
+    "schema",
+    "role",
+  ],
 };
 /**
  * A field list one test declares on top of the mirrored table, reset before every test. The dataServers cases
@@ -323,6 +355,8 @@ interface MockFieldCopy {
   readonly showSshTunnel?: false;
   readonly showSslPanel?: false;
   readonly readOnlyHint?: string;
+  readonly fieldShownWhen?: Readonly<Record<string, { readonly field: string; readonly equals: string }>>;
+  readonly hostHint?: (host: string) => string | undefined;
 }
 
 /**
@@ -507,7 +541,72 @@ const MOCK_FIELD_COPY: Record<string, MockFieldCopy> = {
     readOnlyHint:
       "Kubernetes connections are read-only in this version, whether or not this is ticked: Studio sends the cluster no write.",
   },
+  // Mirrored from the real entry; tests/unit/lib/db-ui-config.test.ts pins the real one.
+  rabbitmq: {
+    fieldLabels: {
+      host: "Host",
+      port: "Management port",
+      amqpPort: "AMQP port",
+      apiPath: "Path prefix",
+      allowInsecureAuth: "Send the password without TLS",
+    },
+    fieldPlaceholders: { amqpPort: "Empty: browse only" },
+    fieldHints: {
+      amqpPort:
+        "5672, or 5671 with TLS. Only for stream reads; leave empty to browse only. Test Connection checks the management API only; the AMQP port is checked on the first read.",
+      apiPath:
+        "The path the management API is served under, for management.path_prefix or a reverse proxy location, such as /rabbitmq. Empty for a direct connection.",
+      allowInsecureAuth:
+        "Sends the username and password in clear text to the management API and the AMQP port, where anyone on the path can read them. Prefer an SSL mode and the TLS ports 15671 and 5671.",
+    },
+    showSshTunnel: false,
+  },
 };
+
+// Mirrored from the real entry; tests/unit/lib/db-ui-config.test.ts pins the real one.
+const MOCK_SNOWFLAKE_COPY: MockFieldCopy = {
+  fieldLabels: {
+    host: "Account",
+    user: "User",
+    authMethod: "Sign-in",
+    privateKey: "Private key",
+    privateKeyPassphrase: "Passphrase",
+    password: "Access token",
+    warehouse: "Warehouse",
+    database: "Database",
+    schema: "Schema",
+    role: "Role",
+  },
+  fieldOptions: {
+    authMethod: [
+      { value: "keypair", label: "Key pair" },
+      { value: "pat", label: "Programmatic access token" },
+    ],
+  },
+  fieldPlaceholders: {
+    host: "myorg-myaccount or https://myorg-myaccount.snowflakecomputing.com",
+    privateKey: pemArmour("BEGIN"),
+  },
+  fieldHints: {
+    user: "The user's login name (LOGIN_NAME).",
+    privateKey: "Paste the private key's contents. Studio reads no key file.",
+    privateKeyPassphrase: "Only for an encrypted key.",
+    password: "A programmatic access token for this user.",
+    warehouse: "Leave empty to use the user's default warehouse. Queries need one; browsing does not.",
+    database: "Opened first in the tree, and the default for unqualified names.",
+    schema: "The default schema for unqualified names.",
+    role: "Every statement runs as this role; Studio checks it when it connects.",
+  },
+  fieldShownWhen: {
+    privateKey: { field: "authMethod", equals: "keypair" },
+    privateKeyPassphrase: { field: "authMethod", equals: "keypair" },
+    password: { field: "authMethod", equals: "pat" },
+  },
+  hostHint: snowflakeHostHint,
+  showSshTunnel: false,
+  showSslPanel: false,
+};
+(MOCK_FIELD_COPY as Record<string, MockFieldCopy>).snowflake = MOCK_SNOWFLAKE_COPY;
 
 /** Copy one test declares on top of the mirrored table, reset before every test. */
 let mockDeclaredCopy: MockFieldCopy = {};
@@ -535,6 +634,17 @@ mock.module("@/lib/db-ui-config", () => ({
   connectionFieldHint: (config: MockFieldCopy, field: string) => config.fieldHints?.[field],
   connectionFieldPlaceholder: (config: MockFieldCopy, field: string, fallback: string) =>
     config.fieldPlaceholders?.[field] ?? fallback,
+  // The real reader's rule: an unset controlling field reads as its first option.
+  connectionFieldShown: (
+    config: MockFieldCopy & { readonly fieldOptions?: MockFieldCopy["fieldOptions"] },
+    field: string,
+    connection: Record<string, unknown>,
+  ) => {
+    const condition = config.fieldShownWhen?.[field];
+    if (condition === undefined) return true;
+    const value = connection[condition.field] ?? config.fieldOptions?.[condition.field]?.[0]?.value;
+    return value !== undefined && String(value) === condition.equals;
+  },
   readOnlyHint: (config: MockFieldCopy) =>
     config.readOnlyHint ??
     "Writes, value edits and maintenance are refused on this connection. You can turn this off here, so on your own connection it is a safety rail, not a permission.",
@@ -565,7 +675,7 @@ mock.module("lucide-react", () => {
 
 // ── Imports AFTER mocks ─────────────────────────────────────────────────────
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { render, fireEvent, cleanup } from "@testing-library/react";
+import { render, fireEvent, cleanup, act } from "@testing-library/react";
 import { ConnectionModal } from "@/components/ConnectionModal";
 
 // =============================================================================
@@ -1735,6 +1845,7 @@ describe("ConnectionModal", () => {
       "apiPath",
       "namespaces",
       "tlsServerName",
+      "amqpPort",
     ] as const;
 
     /** Each connection-field label a render draws, keyed by the input it names (`htmlFor`). */
@@ -1909,6 +2020,22 @@ describe("ConnectionModal", () => {
         },
         MOCK_FIELD_COPY.kubernetes.fieldHints ?? {},
       ],
+      // The Host row's two boxes under the words the provider's sentences use, and the AMQP port and Path prefix boxes;
+      // every declared hint, the consent box's among them, because the default form's SSL Mode is disable.
+      [
+        "rabbitmq",
+        "rabbitmq",
+        {},
+        {
+          host: "Host",
+          port: "Management port",
+          user: "Username",
+          password: "Password",
+          amqpPort: "AMQP port",
+          apiPath: "Path prefix",
+        },
+        MOCK_FIELD_COPY.rabbitmq.fieldHints ?? {},
+      ],
       ["sqlite", "sqlite", {}, FILE_PATH, {}],
       ["duckdb", "duckdb", {}, FILE_PATH, {}],
       ["libredb", "libredb", {}, FILE_PATH, {}],
@@ -1943,14 +2070,14 @@ describe("ConnectionModal", () => {
         "postgres",
         "postgres",
         {},
-        labelsFor("host", "user", "password", "database"),
+        labelsFor("host", "port", "user", "password", "database"),
         ["host", "port", "user", "password", "database"],
       ],
       [
         "mongodb",
         "mongodb",
         {},
-        labelsFor("host", "user", "password", "database", "authSource"),
+        labelsFor("host", "port", "user", "password", "database", "authSource"),
         ["host", "port", "user", "password", "database", "authSource"],
       ],
       [
@@ -1967,37 +2094,37 @@ describe("ConnectionModal", () => {
         "trino",
         "trino",
         {},
-        labelsFor("host", "user", "password", "database", "schema"),
+        labelsFor("host", "port", "user", "password", "database", "schema"),
         ["host", "port", "user", "password", "database", "schema"],
       ],
       [
         "cassandra",
         "cassandra",
         {},
-        labelsFor("host", "user", "password", "database", "localDataCenter"),
+        labelsFor("host", "port", "user", "password", "database", "localDataCenter"),
         ["host", "port", "user", "password", "database", "localDataCenter"],
       ],
-      ["libsql", "libsql", {}, labelsFor("host", "user", "password"), ["host", "port", "user", "password"]],
+      ["libsql", "libsql", {}, labelsFor("host", "port", "user", "password"), ["host", "port", "user", "password"]],
       [
         "elasticsearch",
         "elasticsearch",
         {},
-        labelsFor("host", "user", "password", "apiKeyId", "apiKeySecret"),
+        labelsFor("host", "port", "user", "password", "apiKeyId", "apiKeySecret"),
         ["host", "port", "user", "password", "apiKeyId", "apiKeySecret"],
       ],
       [
         "kafka",
         "kafka",
         {},
-        labelsFor("host", "user", "password", "saslMechanism"),
+        labelsFor("host", "port", "user", "password", "saslMechanism"),
         ["host", "port", "user", "password", "saslMechanism"],
       ],
-      ["etcd", "etcd", {}, labelsFor("host", "user", "password"), ["host", "port", "user", "password"]],
+      ["etcd", "etcd", {}, labelsFor("host", "port", "user", "password"), ["host", "port", "user", "password"]],
       [
         "s3",
         "s3",
         {},
-        labelsFor("host", "user", "password", "database", "region"),
+        labelsFor("host", "port", "user", "password", "database", "region"),
         ["host", "port", "user", "password", "database", "region", "allowInsecureAuth"],
       ],
       ["sqlite", "sqlite", {}, labelsFor("database"), ["database"]],
@@ -2099,7 +2226,7 @@ describe("ConnectionModal", () => {
       expect(container.querySelector("#dataServers")).toBeNull();
     });
 
-    test("draws the Warehouse box for databend only, from its field list, labelled and hinted from its declaration", () => {
+    test("draws the Warehouse box for databend and snowflake, from its field list, labelled and hinted from its declaration", () => {
       mockFormOverrides = { type: "databend", warehouse: "small-xy2t" };
       const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
       const box = container.querySelector("#warehouse") as HTMLInputElement;
@@ -2120,10 +2247,19 @@ describe("ConnectionModal", () => {
       expect(container.querySelector('label[for="warehouse"]')?.textContent).toBe("Warehouse");
       expect(container.querySelector("#warehouse")?.getAttribute("aria-describedby")).toBeNull();
 
-      // Every other engine, the one with data servers included, draws no such box.
+      // Snowflake draws it too, under its own hint: optional there, the user's default warehouse when empty.
       mockDeclaredCopy = {};
+      mockFormOverrides = { type: "snowflake", warehouse: "STUDIO_WH" };
+      rerender(React.createElement(ConnectionModal, createDefaultProps()));
+      expect((container.querySelector("#warehouse") as HTMLInputElement).value).toBe("STUDIO_WH");
+      expect(container.querySelector('label[for="warehouse"]')?.textContent).toBe("Warehouse");
+      expect(container.querySelector('[data-testid="warehouse-hint"]')?.textContent).toBe(
+        "Leave empty to use the user's default warehouse. Queries need one; browsing does not.",
+      );
+
+      // Every other engine, the one with data servers included, draws no such box.
       for (const type of Object.keys(MOCK_CONNECTION_FIELDS)
-        .filter((t) => t !== "databend")
+        .filter((t) => t !== "databend" && t !== "snowflake")
         .concat("postgres")) {
         mockFormOverrides = { type };
         rerender(React.createElement(ConnectionModal, createDefaultProps()));
@@ -2202,7 +2338,7 @@ describe("ConnectionModal: Kubernetes' namespace list, API path and TLS server n
       expect(setter).toHaveBeenCalledWith(typed);
 
       for (const type of Object.keys(MOCK_CONNECTION_FIELDS)
-        .filter((t) => t !== "kubernetes")
+        .filter((t) => !MOCK_CONNECTION_FIELDS[t].includes(field))
         .concat("postgres")) {
         mockFormOverrides = { type };
         rerender(React.createElement(ConnectionModal, createDefaultProps()));
@@ -2210,6 +2346,65 @@ describe("ConnectionModal: Kubernetes' namespace list, API path and TLS server n
       }
     },
   );
+});
+
+describe("ConnectionModal: RabbitMQ's AMQP port and Path prefix", () => {
+  afterEach(() => {
+    cleanup();
+    mockFormOverrides = {};
+  });
+
+  test("draws the AMQP port box for rabbitmq only: labelled, hinted, numeric, with the browse-only placeholder", () => {
+    mockFormOverrides = { type: "rabbitmq", amqpPort: "5672" };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const box = container.querySelector("#amqpPort") as HTMLInputElement;
+    expect(box.value).toBe("5672");
+    expect(box.placeholder).toBe("Empty: browse only");
+    expect(box.getAttribute("inputmode")).toBe("numeric");
+    expect(box.getAttribute("autocomplete")).toBe("off");
+    expect(box.getAttribute("aria-describedby")).toBe("amqpPort-hint");
+    expect(container.querySelector('label[for="amqpPort"]')?.textContent).toBe("AMQP port");
+    expect(container.querySelector('[data-testid="amqpPort-hint"]')?.textContent).toBe(
+      MOCK_FIELD_COPY.rabbitmq.fieldHints?.amqpPort,
+    );
+    fireEvent.change(box, { target: { value: "" } });
+    expect(mockSetAmqpPort).toHaveBeenCalledWith("");
+
+    for (const type of Object.keys(MOCK_CONNECTION_FIELDS)
+      .filter((t) => t !== "rabbitmq")
+      .concat("postgres")) {
+      mockFormOverrides = { type };
+      rerender(React.createElement(ConnectionModal, createDefaultProps()));
+      expect(container.querySelector("#amqpPort")).toBeNull();
+    }
+  });
+
+  test("names the Host row's two boxes Host and Management port, the words the provider's sentences use", () => {
+    mockFormOverrides = { type: "rabbitmq" };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector('label[for="host"]')?.textContent).toBe("Host");
+    expect(container.querySelector('label[for="port"]')?.textContent).toBe("Management port");
+
+    // A port label is drawn only where one is declared, and the shipped table declares it for RabbitMQ alone.
+    for (const type of Object.keys(MOCK_CONNECTION_FIELDS)
+      .filter((t) => t !== "rabbitmq")
+      .concat("postgres")) {
+      mockFormOverrides = { type };
+      rerender(React.createElement(ConnectionModal, createDefaultProps()));
+      expect(container.querySelector('label[for="port"]')).toBeNull();
+    }
+  });
+
+  test("labels the shared API path box Path prefix, with RabbitMQ's hint, and draws no SSH tunnel panel", () => {
+    mockFormOverrides = { type: "rabbitmq", apiPath: "/rabbitmq" };
+    const { container, queryByText } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector('label[for="apiPath"]')?.textContent).toBe("Path prefix");
+    expect(container.querySelector('[data-testid="apiPath-hint"]')?.textContent).toBe(
+      MOCK_FIELD_COPY.rabbitmq.fieldHints?.apiPath,
+    );
+    expect((container.querySelector("#apiPath") as HTMLInputElement).value).toBe("/rabbitmq");
+    expect(queryByText("SSH Tunnel")).toBeNull();
+  });
 });
 
 describe("ConnectionModal: the Host box address and the credential warning", () => {
@@ -2318,5 +2513,231 @@ describe("ConnectionModal: the Host box address and the credential warning", () 
   test("draws no credential warning when the form has none", () => {
     const { queryByTestId } = render(React.createElement(ConnectionModal, createDefaultProps()));
     expect(queryByTestId("credential-warning")).toBeNull();
+  });
+});
+
+describe("ConnectionModal: the Snowflake fields, the account-only host row and the fix statement", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    mockFormOverrides = {};
+    mockDeclaredCopy = {};
+    mockDeclaredFields = {};
+    mockSetAuthMethod.mockClear();
+    mockSetPrivateKey.mockClear();
+    mockSetPrivateKeyPassphrase.mockClear();
+    mockSetRole.mockClear();
+  });
+
+  const SNOWFLAKE_IDS = [
+    "host",
+    "user",
+    "authMethod",
+    "privateKey",
+    "privateKeyPassphrase",
+    "password",
+    "warehouse",
+    "database",
+    "schema",
+    "role",
+  ];
+  /** The Snowflake fields' labels in the order the dialog draws them. */
+  const drawnLabels = (container: HTMLElement): string[] =>
+    Array.from(container.querySelectorAll("label[for]"))
+      .filter((label) => SNOWFLAKE_IDS.includes(label.getAttribute("for") ?? ""))
+      .map((label) => label.textContent ?? "");
+
+  test("draws the fields in order, the key and passphrase for a key pair and the token for an access token", () => {
+    mockFormOverrides = { type: "snowflake", authMethod: "keypair" };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(drawnLabels(container)).toEqual([
+      "Account",
+      "User",
+      "Sign-in",
+      "Private key",
+      "Passphrase",
+      "Warehouse",
+      "Database",
+      "Schema",
+      "Role",
+    ]);
+    expect(container.querySelector("#password")).toBeNull();
+    for (const field of ["user", "privateKey", "privateKeyPassphrase", "warehouse", "database", "schema", "role"]) {
+      expect(container.querySelector(`[data-testid="${field}-hint"]`)?.textContent).toBe(
+        MOCK_SNOWFLAKE_COPY.fieldHints?.[field],
+      );
+    }
+
+    mockFormOverrides = { type: "snowflake", authMethod: "pat" };
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(drawnLabels(container)).toEqual([
+      "Account",
+      "User",
+      "Sign-in",
+      "Access token",
+      "Warehouse",
+      "Database",
+      "Schema",
+      "Role",
+    ]);
+    expect(container.querySelector("#privateKey")).toBeNull();
+    expect(container.querySelector("#privateKeyPassphrase")).toBeNull();
+    expect(container.querySelector('[data-testid="password-hint"]')?.textContent).toBe(
+      "A programmatic access token for this user.",
+    );
+    expect((container.querySelector("#password") as HTMLInputElement).type).toBe("password");
+  });
+
+  test("offers the two sign-in methods and no None, and hands a choice to the form", () => {
+    mockFormOverrides = { type: "snowflake", authMethod: "keypair" };
+    const { container } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const select = container.querySelector("#authMethod") as HTMLSelectElement;
+    expect(select.value).toBe("keypair");
+    expect(Array.from(select.options).map((option) => [option.value, option.textContent])).toEqual([
+      ["keypair", "Key pair"],
+      ["pat", "Programmatic access token"],
+    ]);
+    fireEvent.change(select, { target: { value: "pat" } });
+    expect(mockSetAuthMethod).toHaveBeenCalledWith("pat");
+  });
+
+  test("takes the key in a textarea with spell check, autocorrect and autocapitalise off, and hands it on unchanged", () => {
+    mockFormOverrides = { type: "snowflake", authMethod: "keypair", privateKey: "stored" };
+    const { container } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const key = container.querySelector("#privateKey") as HTMLTextAreaElement;
+    expect(key.tagName).toBe("TEXTAREA");
+    expect(key.value).toBe("stored");
+    expect(key.getAttribute("autocomplete")).toBe("off");
+    expect(key.getAttribute("spellcheck")).toBe("false");
+    expect(key.getAttribute("autocorrect")).toBe("off");
+    expect(key.getAttribute("autocapitalize")).toBe("off");
+    expect(key.placeholder).toBe(pemArmour("BEGIN"));
+    expect(key.getAttribute("aria-describedby")).toBe("privateKey-hint");
+    const pem = `${pemArmour("BEGIN")}\r\nAAAA\r\n${pemArmour("END")}\n`;
+    fireEvent.change(key, { target: { value: pem } });
+    expect(mockSetPrivateKey).toHaveBeenCalledWith(pem);
+
+    const passphrase = container.querySelector("#privateKeyPassphrase") as HTMLInputElement;
+    expect(passphrase.type).toBe("password");
+    fireEvent.change(passphrase, { target: { value: "pass" } });
+    expect(mockSetPrivateKeyPassphrase).toHaveBeenCalledWith("pass");
+
+    const role = container.querySelector("#role") as HTMLInputElement;
+    fireEvent.change(role, { target: { value: "STUDIO_RO" } });
+    expect(mockSetRole).toHaveBeenCalledWith("STUDIO_RO");
+  });
+
+  test("draws no Port box, lets the Account span the row, and shows the host Studio connects to", () => {
+    mockFormOverrides = { type: "snowflake", host: "" };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const account = container.querySelector("#host") as HTMLInputElement;
+    expect(container.querySelector("#port")).toBeNull();
+    expect(account.className).toContain("md:col-span-4");
+    expect(account.placeholder).toBe("myorg-myaccount or https://myorg-myaccount.snowflakecomputing.com");
+    // Nothing typed, no derived host.
+    expect(container.querySelector('[data-testid="host-hint"]')).toBeNull();
+
+    mockFormOverrides = { type: "snowflake", host: "myorg-myacct" };
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector('[data-testid="host-hint"]')?.textContent).toBe(
+      "Studio connects to myorg-myacct.snowflakecomputing.com.",
+    );
+    expect(container.querySelector("#host")?.getAttribute("aria-describedby")).toBe("host-hint");
+
+    // A text the account reader refuses derives nothing.
+    mockFormOverrides = { type: "snowflake", host: "jdbc:snowflake://x" };
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector('[data-testid="host-hint"]')).toBeNull();
+  });
+
+  test("an engine with a port keeps host and port side by side, the localhost example and the static hint", () => {
+    mockFormOverrides = { type: "postgres" };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const host = container.querySelector("#host") as HTMLInputElement;
+    expect(host.className).toContain("md:col-span-3");
+    expect(host.placeholder).toBe("localhost");
+    expect(container.querySelector("#port")).not.toBeNull();
+    expect(host.parentElement).toBe(container.querySelector("#port")?.parentElement ?? null);
+
+    // A declared static host hint is drawn where no derived hint is declared.
+    mockFormOverrides = { type: "databend" };
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector('[data-testid="host-hint"]')?.textContent).toBe(
+      MOCK_FIELD_COPY.databend.fieldHints?.host,
+    );
+    expect(container.querySelector("#port")).not.toBeNull();
+  });
+
+  test("draws the Password box only where the engine takes the field, with its declared placeholder", () => {
+    mockFormOverrides = { type: "postgres" };
+    mockDeclaredFields = { postgres: ["host", "port", "user", "database"] };
+    const { container, rerender } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    expect(container.querySelector("#password")).toBeNull();
+    mockDeclaredFields = {};
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect((container.querySelector("#password") as HTMLInputElement).placeholder).toBe("***");
+    mockDeclaredCopy = { fieldPlaceholders: { password: "a token" } };
+    rerender(React.createElement(ConnectionModal, createDefaultProps()));
+    expect((container.querySelector("#password") as HTMLInputElement).placeholder).toBe("a token");
+  });
+
+  test("the paste box keeps no autocomplete and no spell check, and names the Snowflake forms", () => {
+    mockFormOverrides = { showPasteInput: true };
+    const { getByText, container } = render(React.createElement(ConnectionModal, createDefaultProps()));
+    const paste = container.querySelector('input[placeholder^="postgres://"]') as HTMLInputElement;
+    expect(paste.getAttribute("autocomplete")).toBe("off");
+    expect(paste.getAttribute("spellcheck")).toBe("false");
+    expect(
+      getByText(
+        "Supports: postgres://, mysql://, mongodb://, redis://, oracle://, mssql://, db2://, databend://, jdbc:snowflake://, snowflake://, a Snowflake account URL",
+      ),
+    ).toBeDefined();
+  });
+
+  describe("a refusal with a statement that fixes it", () => {
+    const STATEMENT = "ALTER USER STUDIO_SVC SET RSA_PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA'";
+    const nativeClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = mock(async (_text: string) => {});
+    beforeEach(() => {
+      writeText.mockClear();
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    });
+    afterEach(() => {
+      if (nativeClipboard) Object.defineProperty(navigator, "clipboard", nativeClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    });
+
+    test("shows the sentence, then the statement in a monospace block that wraps anywhere, and copies exactly it", async () => {
+      mockFormOverrides = {
+        testResult: {
+          tone: "error",
+          message: "Snowflake refused the key. Run the statement below.",
+          fixStatement: STATEMENT,
+        },
+      };
+      const { getByTestId, getByRole } = render(React.createElement(ConnectionModal, createDefaultProps()));
+      const banner = getByTestId("connection-test-result");
+      expect(banner.textContent).toContain("Snowflake refused the key. Run the statement below.");
+      const block = getByTestId("connection-fix-statement");
+      expect(block.textContent).toBe(STATEMENT);
+      expect(block.className).toContain("font-mono");
+      expect(block.className).toContain("break-all");
+      const copy = getByRole("button", { name: "Copy" });
+      await act(async () => {
+        fireEvent.click(copy);
+      });
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(STATEMENT);
+      expect(getByTestId("connection-fix-statement-copied").textContent).toBe("Copied");
+    });
+
+    test("draws no block for a result without one", () => {
+      mockFormOverrides = { testResult: { tone: "error", message: "Connection failed: timeout" } };
+      const { queryByTestId, queryByRole } = render(React.createElement(ConnectionModal, createDefaultProps()));
+      expect(queryByTestId("connection-fix-statement")).toBeNull();
+      expect(queryByRole("button", { name: "Copy" })).toBeNull();
+    });
   });
 });

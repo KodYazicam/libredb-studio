@@ -270,6 +270,26 @@ const NO_COLUMN_MODIFICATION: Partial<Record<DatabaseType, { label: string; reas
     label: "MQTT",
     reason: "A broker keeps no schema and no catalog, so there is no column definition to change.",
   },
+  // A document store (Firestore spec 3.3): documents carry their own fields, and the columns a read shows are sampled
+  // from them, so there is no column definition to change. The sentence is the one `NO_TABLE_DDL` below prints.
+  firestore: {
+    label: "Firestore",
+    reason: "A document store keeps no schema, so there is no column definition to change.",
+  },
+  // Not a table store (#1656): a stream holds messages, and the columns a read shows are the fixed shape of a message.
+  // The sentence is the one `NO_TABLE_DDL` below prints when it declines the whole diff.
+  rabbitmq: {
+    label: "RabbitMQ",
+    reason: "A stream holds messages, not rows with declared columns, so there is no column definition to change.",
+  },
+  // Not a table store (#1677): a node has ATTRIBUTES defined by its type in the server's own model,
+  // and this provider has no code that can write one. The sentence is the one `NO_TABLE_DDL` below
+  // prints when it declines the whole diff.
+  opcua: {
+    label: "OPC UA",
+    reason:
+      "An OPC UA node has attributes defined by its type in the server's own model, not columns, and this provider has no code that can write to a server, so there is no column definition to change.",
+  },
 };
 
 /**
@@ -361,10 +381,18 @@ const NO_TRANSACTION_WRAPPER: ReadonlySet<DatabaseType> = new Set<DatabaseType>(
   "databend",
   // BigQuery runs a statement as its own job; BEGIN TRANSACTION exists only inside a multi-statement script.
   "bigquery",
+  // On Databend's reason: a DDL statement commits the open transaction, and each SQL API statement runs in its own
+  // session, so a `BEGIN;` brackets nothing it could roll back.
+  "snowflake",
   "s3",
   "kubernetes",
   // No table DDL to wrap either (#1635): a broker keeps no schema.
   "mqtt",
+  // No table DDL to wrap either: a document store keeps no schema.
+  "firestore",
+  // No table DDL to wrap either (#1656): a broker keeps no schema.
+  "rabbitmq",
+  "opcua",
 ]);
 
 // These engines cannot apply a relational table diff through SQL. In particular,
@@ -391,6 +419,11 @@ const NO_TABLE_DDL: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "kubernetes",
   // No schema and no catalog (#1635), so no table DDL to decline.
   "mqtt",
+  // No schema and no catalog, so no table DDL to decline.
+  "firestore",
+  // No schema and no catalog (#1656), so no table DDL to decline.
+  "rabbitmq",
+  "opcua",
 ]);
 
 // IndexDiff carries column names/uniqueness, not ClickHouse's index expression,
@@ -404,6 +437,8 @@ const NO_PORTABLE_INDEX_DDL: Partial<Record<DatabaseType, string>> = {
   databend: DATABEND_INDEX_REFUSAL,
   bigquery:
     "BigQuery: Cannot generate index DDL. BigQuery has search and vector indexes only; write the index change by hand.",
+  snowflake:
+    "Snowflake: Cannot generate index DDL. Snowflake has indexes only on hybrid tables; write the index change by hand.",
 };
 const NO_FOREIGN_KEYS: Partial<Record<DatabaseType, string>> = {
   clickhouse: "ClickHouse",
@@ -791,6 +826,25 @@ function generateAlterTable(table: TableDiff, dialect: DatabaseType): string {
           } else {
             lines.push(
               `-- ClickHouse: Cannot remove the ${kind} property of column "${commentName(col.columnName)}". REMOVE accepts DEFAULT, MATERIALIZED or ALIAS only; recreate the column.`,
+            );
+          }
+        }
+      } else if (dialect === "snowflake") {
+        // Snowflake's ALTER COLUMN spells a type change SET DATA TYPE, and sets a default only to a sequence's
+        // NEXTVAL, so any other default is declined in words; dropping one is plain.
+        const column = escapeIdentifier(col.columnName, dialect);
+        if (col.sourceType !== col.targetType) {
+          lines.push(`ALTER TABLE ${id} ALTER COLUMN ${column} SET DATA TYPE ${col.targetType};`);
+        }
+        if (col.sourceNullable !== col.targetNullable) {
+          lines.push(`ALTER TABLE ${id} ALTER COLUMN ${column} ${col.targetNullable ? "DROP" : "SET"} NOT NULL;`);
+        }
+        if (col.sourceDefault !== col.targetDefault) {
+          if (defaultSql(col) === undefined) {
+            lines.push(`ALTER TABLE ${id} ALTER COLUMN ${column} DROP DEFAULT;`);
+          } else {
+            lines.push(
+              `-- Snowflake: Cannot set the default of column "${commentName(col.columnName)}". ALTER COLUMN sets a default only to a sequence's NEXTVAL; recreate the column with its default.`,
             );
           }
         }

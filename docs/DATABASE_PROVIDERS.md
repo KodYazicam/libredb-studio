@@ -123,19 +123,25 @@ src/lib/db/
 │   │       ├── errors.ts       #   every measured failure -> the repository's error classes
 │   │       └── labels.ts       #   the two label sets
 │   ├── stream/                 # Stream Providers
-│   │   └── kafka/              # Kafka Strategy (JSON read requests over the Kafka protocol, @platformatic/kafka)
-│   │       ├── index.ts        #   KafkaProvider: lifecycle and composition only
-│   │       ├── client.ts       #   KafkaReadClient seam (read methods only) + KafkaError categories
-│   │       ├── platformatic-client.ts # The only file that imports @platformatic/kafka
-│   │       ├── connection-options.ts #  bootstrap address, tls and sasl, validated first
-│   │       ├── request.ts      #   the editor JSON -> a read request
-│   │       ├── read.ts         #   start offsets and the bounded fetch loop
-│   │       ├── decode.ts       #   key, value and header decoding
-│   │       ├── results.ts      #   decoded records -> rows and fields
-│   │       ├── groups.ts       #   consumer groups and lag
-│   │       ├── objects.ts      #   kinds and the object surface: topics, groups, brokers
-│   │       ├── monitoring.ts   #   metadata, configs, log dirs -> monitoring
-│   │       └── errors.ts       #   KafkaError category -> the repository's error classes
+│   │   ├── kafka/              # Kafka Strategy (JSON read requests over the Kafka protocol, @platformatic/kafka)
+│   │   │   ├── index.ts        #   KafkaProvider: lifecycle and composition only
+│   │   │   ├── client.ts       #   KafkaReadClient seam (read methods only) + KafkaError categories
+│   │   │   ├── platformatic-client.ts # The only file that imports @platformatic/kafka
+│   │   │   ├── connection-options.ts #  bootstrap address, tls and sasl, validated first
+│   │   │   ├── request.ts      #   the editor JSON -> a read request
+│   │   │   ├── read.ts         #   start offsets and the bounded fetch loop
+│   │   │   ├── decode.ts       #   key, value and header decoding
+│   │   │   ├── results.ts      #   decoded records -> rows and fields
+│   │   │   ├── groups.ts       #   consumer groups and lag
+│   │   │   ├── objects.ts      #   kinds and the object surface: topics, groups, brokers
+│   │   │   ├── monitoring.ts   #   metadata, configs, log dirs -> monitoring
+│   │   │   └── errors.ts       #   KafkaError category -> the repository's error classes
+│   │   └── rabbitmq/           # RabbitMQ Strategy (JSON stream reads over its own AMQP 0-9-1 client; management HTTP API)
+│   │       ├── index.ts        #   RabbitMQProvider: lifecycle, seams and composition
+│   │       ├── management/     #   the closed GET route table, byte caps, depth check, typed decoders
+│   │       ├── amqp/           #   the read client: codec, field tables, frame reader, connection, read loop, dial
+│   │       ├── request.ts, read.ts, results.ts, render.ts # the read request, the read path, rows and rendering
+│   │       └── errors.ts       #   every sentence and the one error boundary
 │   ├── graph/                  # Graph Providers, on the graph layer above
 │   │   └── neo4j/              # Neo4j Strategy (read-only Cypher over Bolt)
 │   │       ├── index.ts        #   Neo4jProvider: declarations, version read and monitoring delegation
@@ -186,6 +192,7 @@ BaseDatabaseProvider (abstract)
 ├── PrometheusProvider ─────────────────────┤ Time series (PromQL over HTTP)
 ├── InfluxDBProvider ───────────────────────┤ Time series (InfluxQL over HTTP, read-only)
 ├── KafkaProvider ──────────────────────────┤ Stream (JSON read requests over the Kafka protocol)
+├── RabbitMQProvider ───────────────────────┤ Stream (JSON stream read requests over AMQP 0-9-1, read-only)
 ├── EtcdProvider ───────────────────────────┤ Key-Value Store (etcdctl commands over gRPC)
 ├── OxiaProvider ───────────────────────────┤ Key-Value Store (oxia client read commands over gRPC)
 ├── GraphBaseProvider (abstract)
@@ -255,9 +262,12 @@ QueryEditor                      /api/db/query
 
 ## Supported Databases
 
-Thirty-two type-ids are supported by thirty provider modules: two pairs share one, `elasticsearch` and `opensearch` in `providers/sql/search/`, and `influxdb` and `influxdb3` in `providers/timeseries/influxdb/`.
+Thirty-six type-ids are supported by thirty-four provider modules: two pairs share one, `elasticsearch` and `opensearch` in `providers/sql/search/`, and `influxdb` and `influxdb3` in `providers/timeseries/influxdb/`.
 The count is derived from the exhaustive `SHIPPED` record in
-[`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts) rather than written here twice. For
+[`src/lib/db/compatibility.ts`](../src/lib/db/compatibility.ts) rather than written here twice - and
+the TABLE under it has to be checked by hand, which is the lesson a review left here: the numeral was
+swept to thirty-three while the table stayed thirty rows, missing BigQuery, MQTT and OPC UA, so a
+reader following this page was never told two shipped engines existed. For
 the per-provider reference (driver, pooling, query format,
 monitoring, limitations, …) see the prime docs in **[`docs/providers/`](./providers/README.md)**:
 
@@ -274,17 +284,20 @@ monitoring, limitations, …) see the prime docs in **[`docs/providers/`](./prov
 | Redis | `redis` | Key-Value | [providers/redis.md](./providers/redis.md) |
 | MongoDB | `mongodb` | Document | [providers/mongodb.md](./providers/mongodb.md) |
 | Couchbase | `couchbase` | Document (SQL++) | [providers/couchbase.md](./providers/couchbase.md) |
+| Google Cloud Firestore | `firestore` | Document (the Admin SDK query chain, read-only) | [providers/firestore.md](./providers/firestore.md) |
 | ClickHouse | `clickhouse` | SQL | [providers/clickhouse.md](./providers/clickhouse.md) |
 | Apache Druid | `druid` | SQL (read-only) | [providers/druid.md](./providers/druid.md) |
 | Elasticsearch | `elasticsearch` | Search (SQL, read-only) | [providers/elasticsearch.md](./providers/elasticsearch.md) |
 | OpenSearch | `opensearch` | Search (SQL, read-only) | [providers/opensearch.md](./providers/opensearch.md) |
 | Trino | `trino` | SQL (federated query engine) | [providers/trino.md](./providers/trino.md) |
+| Snowflake | `snowflake` | SQL (analytics, the SQL API v2 over HTTP) | [providers/snowflake.md](./providers/snowflake.md) |
 | Apache Cassandra | `cassandra` | SQL-shaped (CQL, wide-column) | [providers/cassandra.md](./providers/cassandra.md) |
 | Databend | `databend` | SQL (analytics, over HTTP) | [providers/databend.md](./providers/databend.md) |
 | Prometheus | `prometheus` | Time series (PromQL over HTTP, read-only) | [providers/prometheus.md](./providers/prometheus.md) |
 | InfluxDB (InfluxQL) | `influxdb` | Time series (InfluxQL over HTTP, read-only) | [providers/influxdb.md](./providers/influxdb.md) |
 | InfluxDB 3 (SQL) | `influxdb3` | Time series (SQL, Apache DataFusion, read-only) | [providers/influxdb3.md](./providers/influxdb3.md) |
 | Apache Kafka | `kafka` | Stream (JSON read requests over the Kafka protocol, read-only) | [providers/kafka.md](./providers/kafka.md) |
+| RabbitMQ | `rabbitmq` | Stream (JSON stream read requests over AMQP 0-9-1, read-only) | [providers/rabbitmq.md](./providers/rabbitmq.md) |
 | etcd | `etcd` | Key-Value (etcdctl commands over gRPC) | [providers/etcd.md](./providers/etcd.md) |
 | Neo4j | `neo4j` | Graph (Cypher over Bolt, read-only) | [providers/neo4j.md](./providers/neo4j.md) |
 | Milvus | `milvus` | Vector (Milvus REST v2 requests over gRPC) | [providers/milvus.md](./providers/milvus.md) |
@@ -292,6 +305,9 @@ monitoring, limitations, …) see the prime docs in **[`docs/providers/`](./prov
 | Oxia | `oxia` | Key-Value (oxia client read commands over gRPC, read-only) | [providers/oxia.md](./providers/oxia.md) |
 | S3-compatible object storage | `s3` | Object storage (AWS CLI read commands over the S3 REST API, read-only) | [providers/s3.md](./providers/s3.md) |
 | Kubernetes | `kubernetes` | Platform (kubectl read commands over the API server's REST API, read-only) | [providers/kubernetes.md](./providers/kubernetes.md) |
+| BigQuery | `bigquery` | SQL (analytics, GoogleSQL over REST) | [providers/bigquery.md](./providers/bigquery.md) |
+| MQTT | `mqtt` | Key-Value (broker topics over MQTT, read-only) | [providers/mqtt.md](./providers/mqtt.md) |
+| OPC UA | `opcua` | Industrial (an address space over `opc.tcp`, read-only) | [providers/opcua.md](./providers/opcua.md) |
 | LibreDB | `libredb` | Embedded (key-value) | [providers/libredb.md](./providers/libredb.md) |
 
 ## Core Interface
@@ -418,6 +434,7 @@ examples live in their prime docs:
 - **Prometheus** (a PromQL expression): [providers/prometheus.md](./providers/prometheus.md).
 - **InfluxDB (InfluxQL)** (one read-only InfluxQL statement): [providers/influxdb.md](./providers/influxdb.md).
 - **Apache Kafka** (a JSON read request): [providers/kafka.md](./providers/kafka.md).
+- **RabbitMQ** (a JSON stream read request): [providers/rabbitmq.md](./providers/rabbitmq.md).
 - **etcd** (one etcdctl command): [providers/etcd.md](./providers/etcd.md).
 - **Neo4j** (one read-only Cypher statement): [providers/neo4j.md](./providers/neo4j.md).
 - **Milvus** (one Milvus REST v2 request): [providers/milvus.md](./providers/milvus.md).
@@ -503,8 +520,8 @@ Provider-specific behaviour — pooling model, SSL/encryption, pagination, monit
 maintenance operations, and known limitations — is documented per provider under
 [`docs/providers/`](./providers/README.md). Start there for anything specific to PostgreSQL, MySQL,
 Oracle, Db2 LUW, SQL Server, SQLite, libSQL, DuckDB, Redis, MongoDB, Couchbase, ClickHouse, Apache Druid,
-Elasticsearch, OpenSearch, Trino, Apache Cassandra, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL),
-Apache Kafka, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, S3-compatible object storage, Kubernetes, or LibreDB.
+Elasticsearch, OpenSearch, Trino, Snowflake, Apache Cassandra, Prometheus, InfluxDB (InfluxQL), InfluxDB 3 (SQL),
+Apache Kafka, RabbitMQ, etcd, Neo4j, Milvus, Qdrant, Oxia, Databend, S3-compatible object storage, Kubernetes, or LibreDB.
 
 Not every provider has every feature, and the docs record the absences rather than glossing over
 them. Druid is the sharpest case: its SQL has no `UPDATE`, no `DELETE` and no `CREATE TABLE`, no
@@ -545,7 +562,7 @@ end to end. See [providers/trino.md](./providers/trino.md).
 ## Performance Notes
 
 - Connection pooling provides 5-10x speedup for repeated queries
-- Idle connections are automatically closed after 30 seconds
+- A cached provider idle for 30 minutes is closed, checked every 5 minutes, except one whose `hasRunsInFlight()` answers true, which the next sweep checks again.
 - Query timeouts prevent runaway queries
 - Schema queries are optimized with LIMIT clauses
 - MongoDB uses estimated document counts for performance

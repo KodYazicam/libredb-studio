@@ -23,6 +23,18 @@
   "selectQuery": "SELECT\n  id,\n  name\nFROM c0.`Order\"Items`\nWHERE 1=1\nLIMIT 100;",
   "countQuery": "SELECT COUNT(*) AS row_count\nFROM c0.`Order\"Items`;"
  },
+ "snowflake": {
+  "queryLanguage": "sql",
+  "queryDialect": null,
+  "tabType": "sql",
+  "monacoLanguage": "sql",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": true,
+  "offersCountQuery": true,
+  "tableQuery": "SELECT * FROM \"c0\".\"Order\"\"Items\";",
+  "selectQuery": "SELECT\n  \"id\",\n  \"name\"\nFROM \"c0\".\"Order\"\"Items\"\nWHERE 1=1\nLIMIT 100;",
+  "countQuery": "SELECT COUNT(*) AS row_count\nFROM \"c0\".\"Order\"\"Items\";"
+ },
  "mysql": {
   "queryLanguage": "sql",
   "queryDialect": null,
@@ -369,6 +381,42 @@
   "offersCountQuery": false,
   "tableQuery": "// MQTT has no query console. Order\"Items opens in its Source tab from the Keys panel.",
   "selectQuery": "// MQTT has no query console. Order\"Items opens in its Source tab from the Keys panel.",
+  "countQuery": null
+ },
+ "firestore": {
+  "queryLanguage": "json",
+  "queryDialect": "firestore",
+  "tabType": "firestore",
+  "monacoLanguage": "firestore",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": false,
+  "offersCountQuery": true,
+  "tableQuery": "db.collection(\"Order\\\"Items\").limit(100)",
+  "selectQuery": "db.collection(\"Order\\\"Items\").limit(100)",
+  "countQuery": "db.collection(\"Order\\\"Items\").count()"
+ },
+ "rabbitmq": {
+  "queryLanguage": "json",
+  "queryDialect": "rabbitmq",
+  "tabType": "rabbitmq",
+  "monacoLanguage": "json",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": false,
+  "offersCountQuery": false,
+  "tableQuery": "{\"vhost\": \"c0\", \"stream\": \"Order\\\"Items\", \"from\": \"last\", \"limit\": 50}",
+  "selectQuery": "{\"vhost\": \"c0\", \"stream\": \"Order\\\"Items\", \"from\": \"first\", \"limit\": 50}",
+  "countQuery": null
+ },
+ "opcua": {
+  "queryLanguage": "json",
+  "queryDialect": "opcua",
+  "tabType": "opcua",
+  "monacoLanguage": "json",
+  "offersColumnProfiling": false,
+  "offersCodeGeneration": false,
+  "offersCountQuery": false,
+  "tableQuery": "// An OPC UA node's value is read from the node itself, not from a generated statement: click the key to open its value, or name the node id in a read request.",
+  "selectQuery": "// An OPC UA node's value is read from the node itself, not from a generated statement: click the key to open its value, or name the node id in a read request.",
   "countQuery": null
  },
  "libredb": {

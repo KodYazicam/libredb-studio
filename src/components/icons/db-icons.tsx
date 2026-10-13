@@ -763,6 +763,28 @@ export const BigQueryIcon: React.FC<IconProps> = ({ className, ...props }) => (
 );
 
 /**
+ * RabbitMQ: a mark drawn for Studio, never the project's own logo: two messages waiting in line and the arrow they
+ * leave by, which is what a queue does in the plainest terms. Stroked on the house 24-unit grid like the others.
+ */
+export const RabbitMQIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <rect x="2.5" y="8" width="4" height="8" rx="1" />
+    <rect x="9" y="8" width="4" height="8" rx="1" />
+    <path d="M15.5 12h6" />
+    <path d="m19 9.5 2.5 2.5-2.5 2.5" />
+  </svg>
+);
+
+/**
  * MQTT: a mark drawn for Studio, never a product's logo: a node with the arcs of a broadcast rising from it,
  * which is what a broker does in the plainest terms. Stroked on the house 24-unit grid like the others.
  */
@@ -781,5 +803,80 @@ export const MqttIcon: React.FC<IconProps> = ({ className, ...props }) => (
     <path d="M6 13.5a4.5 4.5 0 0 1 4.5 4.5" />
     <path d="M6 9a9 9 0 0 1 9 9" />
     <path d="M6 4.5A13.5 13.5 0 0 1 19.5 18" />
+  </svg>
+);
+
+/**
+ * Firestore: a mark drawn for Studio, never the Firebase or Google Cloud logo: a document with a second one behind it,
+ * the collection-of-documents shape in the plainest terms. Stroked on the house 24-unit grid like the others.
+ */
+export const FirestoreIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M8 3h6l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5H8a1.5 1.5 0 0 1-1.5-1.5v-13A1.5 1.5 0 0 1 8 3z" />
+    <path d="M14 3v4h4" />
+    <path d="M9.5 11h5" />
+    <path d="M9.5 14h3" />
+    <path d="M4 7v12.5A1.5 1.5 0 0 0 5.5 21H14" />
+  </svg>
+);
+
+/**
+ * Snowflake: a mark drawn for Studio, never the company's logo: a six-armed snowflake, three strokes through a centre
+ * with a chevron on each arm. Stroked on the house 24-unit grid like the others.
+ */
+export const SnowflakeIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M12 2.5 V21.5" />
+    <path d="M3.77 7.25 L20.23 16.75" />
+    <path d="M3.77 16.75 L20.23 7.25" />
+    <path d="M13.94 3.56 L12 5.5 L10.06 3.56" />
+    <path d="M5.66 6.09 L6.37 8.75 L3.71 9.46" />
+    <path d="M3.71 14.54 L6.37 15.25 L5.66 17.91" />
+    <path d="M10.06 20.44 L12 18.5 L13.94 20.44" />
+    <path d="M18.34 17.91 L17.63 15.25 L20.29 14.54" />
+    <path d="M20.29 9.46 L17.63 8.75 L18.34 6.09" />
+  </svg>
+);
+
+/**
+ * A mark drawn for Studio, never the OPC Foundation's logo or any vendor's asset.
+ *
+ * An address space is a tree of nodes with values hanging off it, so the mark is a root with two
+ * branches and a leaf on each: what the Keys panel shows, rather than a protocol badge.
+ */
+export const OpcuaIcon: React.FC<IconProps> = ({ className, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <circle cx="5" cy="12" r="2" />
+    <circle cx="19" cy="6" r="2" />
+    <circle cx="19" cy="18" r="2" />
+    <path d="M7 12 H11 V6 H17" />
+    <path d="M11 12 V18 H17" />
   </svg>
 );

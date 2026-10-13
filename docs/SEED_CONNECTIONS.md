@@ -78,8 +78,51 @@ An mssql seed that carried only a `connectionString`, for example, loaded and op
 The types whose provider reads it are postgres, mysql, sqlite, libsql, oracle, db2, clickhouse, mongodb and couchbase.
 sqlite reads it as the database file path, with a `file:` prefix removed, although its provider's capability flag says it does not ([docs/providers/sqlite.md](./providers/sqlite.md)).
 mssql does not read it, although its provider's capability flag says it does: the flag covers the connection form, which splits a pasted URI into fields, and the provider builds from those fields only ([docs/providers/mssql.md](./providers/mssql.md#44-connection-string-nuance)).
-The 23 that refuse it are bigquery, duckdb, mssql, druid, trino, cassandra, elasticsearch, opensearch, redis, prometheus, kafka, etcd, neo4j, milvus, qdrant, influxdb, influxdb3, oxia, databend, s3, kubernetes, mqtt and libredb.
+The 27 that refuse it are bigquery, snowflake, duckdb, mssql, druid, trino, cassandra, elasticsearch, opensearch, redis, prometheus, kafka, etcd, neo4j, milvus, qdrant, influxdb, influxdb3, oxia, databend, s3, kubernetes, mqtt, firestore, rabbitmq, opcua and libredb.
 To fix a refused file, move the value into `host`, `port`, `user`, `password` and `database`, and remove `connectionString`.
+
+### A Firestore connection
+
+A Firestore seed names the project in `database` and, optionally, a named database in `schema`; `password` holds a service-account key, an authorized-user file or an access token, or stays empty to use the server's own Google identity ([providers/firestore.md](providers/firestore.md)).
+
+```yaml
+connections:
+  - id: "firestore-production"
+    name: "Firestore production"
+    type: "firestore"
+    database: "acme-prod"            # project id
+    schema: "orders"                 # optional; empty means (default)
+    # No password: the server's own identity. Needs FIRESTORE_SERVER_CREDENTIALS=true on the server.
+    roles: ["admin"]
+    managed: true
+```
+
+A Firestore connection takes no `connectionString` and is refused if it carries one.
+
+### A Snowflake connection
+
+A Snowflake seed names the account in `host` and the role every statement runs as in `role`, and carries one credential: a key pair (`authMethod: "keypair"`, the key's PEM text in `privateKey` and, for an encrypted key, `privateKeyPassphrase`) or a programmatic access token (`authMethod: "pat"`, the token in `password`) ([providers/snowflake.md](providers/snowflake.md)).
+Each of the four fields takes an `${ENV}` reference, so no key or token is written in the file.
+
+```yaml
+connections:
+  - id: "snowflake-analytics"
+    name: "Snowflake analytics"
+    type: "snowflake"
+    host: "myorg-myaccount"          # account identifier, or its https URL
+    user: "STUDIO_SVC"               # the login name
+    authMethod: "keypair"
+    privateKey: "${SNOWFLAKE_PRIVATE_KEY}"
+    privateKeyPassphrase: "${SNOWFLAKE_KEY_PASSPHRASE}"   # only for an encrypted key
+    # For a token instead: authMethod: "pat" and password: "${SNOWFLAKE_PAT}"
+    warehouse: "STUDIO_WH"           # optional; empty means the user's default
+    database: "ANALYTICS"            # optional
+    role: "STUDIO_RO"
+    roles: ["admin", "user"]
+    mcp: true                        # optional: offer it to MCP clients
+```
+
+A Snowflake connection takes no `connectionString` and is refused if it carries one.
 
 ### Diagnostics
 
@@ -282,7 +325,7 @@ connections:
 | `connections` | Yes | — | Array of connection definitions (min 1) |
 | `connections[].id` | Yes | — | Unique slug: `[a-z0-9-]+`, max 64 chars |
 | `connections[].name` | Yes | — | Display name, max 128 chars |
-| `connections[].type` | Yes | - | Database type: `postgres`, `mysql`, `sqlite`, `libsql`, `duckdb`, `mongodb`, `redis`, `oracle`, `db2`, `mssql`, `libredb`, `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`, `cassandra`, `prometheus`, `kafka`, `etcd`, `neo4j`, `milvus`, `qdrant`, `influxdb`, `influxdb3`, `oxia`, `databend`, `s3`, `kubernetes` |
+| `connections[].type` | Yes | - | Database type: `postgres`, `mysql`, `sqlite`, `libsql`, `duckdb`, `mongodb`, `redis`, `oracle`, `db2`, `mssql`, `libredb`, `couchbase`, `clickhouse`, `druid`, `elasticsearch`, `opensearch`, `trino`, `snowflake`, `cassandra`, `prometheus`, `kafka`, `etcd`, `neo4j`, `milvus`, `qdrant`, `influxdb`, `influxdb3`, `oxia`, `databend`, `s3`, `kubernetes` |
 | `connections[].host` | No | — | Hostname or IP |
 | `connections[].port` | No | — | Port number (1-65535) |
 | `connections[].database` | No | — | Database name (Couchbase: the bucket. Druid has one catalog and ignores it. Trino: the **catalog**. S3: the optional pinned bucket) |
@@ -307,16 +350,25 @@ connections:
 | `connections[].instanceName` | No | — | SQL Server instance name |
 | `connections[].localDataCenter` | No¹ | — | Cassandra local data centre (`datacenter1`). ¹Optional in the schema because no other engine has it, and **required by the Cassandra provider**: the driver refuses to connect without one |
 | `connections[].saslMechanism` | No | - | Kafka: `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512`, absent meaning none; `user` and `password` are sent only with a mechanism, and only over TLS. It takes a literal name: it is neither a credential nor an address, so a `${ENV}` or `${vault:...}` reference in it is refused when the file loads, naming the field, because the file is validated before any reference is resolved |
-| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types, Oxia, Databend, S3 and MQTT (#786): `true` accepts that a connection with no TLS sends its password to the server in cleartext, which the Db2 provider otherwise refuses when the connection opens ([providers/db2.md](providers/db2.md)), and that an InfluxDB connection sends its password or token without TLS to a host that is not loopback, which both InfluxDB providers otherwise refuse before any socket ([providers/influxdb.md](providers/influxdb.md), [providers/influxdb3.md](providers/influxdb3.md)), and that an Oxia connection sends its token in cleartext, which the Oxia provider otherwise refuses when the connection opens ([providers/oxia.md](providers/oxia.md), section 4.6, where a token to this machine or through an SSH tunnel needs no tick), and that a Databend connection sends its password without TLS to a host that is not loopback, which the Databend provider otherwise refuses when the connection opens, and that an S3 connection reaches a host that is not loopback over plain HTTP, signed or not, which the S3 provider otherwise refuses when the connection opens ([providers/s3.md](providers/s3.md)), and that an MQTT connection carries its username and password in the CONNECT packet in cleartext, which the MQTT provider sends over whatever transport the SSL mode selects, refusing nothing of its own ([providers/mqtt.md](providers/mqtt.md)); a signed request sent that way is replayable while the server's clock window lasts. Set `ssl` instead wherever the server offers TLS. Every other engine ignores it. A literal boolean: a `${ENV}` reference fails the whole file |
+| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types, Oxia, Databend, S3, MQTT and RabbitMQ (#786): `true` accepts that a connection with no TLS sends its password to the server in cleartext, which the Db2 provider otherwise refuses when the connection opens ([providers/db2.md](providers/db2.md)), and that an InfluxDB connection sends its password or token without TLS to a host that is not loopback, which both InfluxDB providers otherwise refuse before any socket ([providers/influxdb.md](providers/influxdb.md), [providers/influxdb3.md](providers/influxdb3.md)), and that an Oxia connection sends its token in cleartext, which the Oxia provider otherwise refuses when the connection opens ([providers/oxia.md](providers/oxia.md), section 4.6, where a token to this machine or through an SSH tunnel needs no tick), and that a Databend connection sends its password without TLS to a host that is not loopback, which the Databend provider otherwise refuses when the connection opens, and that an S3 connection reaches a host that is not loopback over plain HTTP, signed or not, which the S3 provider otherwise refuses when the connection opens ([providers/s3.md](providers/s3.md)), and that an MQTT connection carries its username and password in the CONNECT packet in cleartext, which the MQTT provider sends over whatever transport the SSL mode selects, refusing nothing of its own ([providers/mqtt.md](providers/mqtt.md)), and that a RabbitMQ connection sends its password without TLS to a host that is not this machine, on the management API and the AMQP port both, which the RabbitMQ provider otherwise refuses when the connection opens; a signed request sent that way is replayable while the server's clock window lasts. Set `ssl` instead wherever the server offers TLS. Every other engine ignores it. A literal boolean: a `${ENV}` reference fails the whole file |
 | `connections[].dataServers` | No | absent | Oxia only: the public addresses of a cluster's data servers, as `host:port` entries separated by commas or whitespace, at most 64. Exact entries only, never a pattern. A `${ENV}` or `${vault:...}` reference is resolved, as in `host`. Not a secret: it is listed with the connection, and the token it receives is not. Refused together with an SSH tunnel |
 | `connections[].location` | No | absent | BigQuery only: where jobs run, e.g. `EU` or `europe-west3`. Absent, the provider takes the default dataset's location, else the one most datasets share ([providers/bigquery.md](providers/bigquery.md)). Not a secret |
-| `connections[].warehouse` | No | absent | Databend only: the warehouse every statement runs on, sent as the `X-DATABEND-WAREHOUSE` header. Databend Cloud requires one (the `warehouse=` value of its DSN) and resumes a suspended warehouse on the first statement, billing while it runs, so with one set Studio sends the connection no background health checks ([providers/databend.md](providers/databend.md)). A `${ENV}` or `${vault:...}` reference is resolved, as in `host`. Not a secret |
+| `connections[].warehouse` | No | absent | Databend and Snowflake: the warehouse statements run on. Databend sends it as the `X-DATABEND-WAREHOUSE` header; Databend Cloud requires one (the `warehouse=` value of its DSN) and resumes a suspended warehouse on the first statement, billing while it runs, so with one set Studio sends the connection no background health checks ([providers/databend.md](providers/databend.md)). Snowflake sends it as the `warehouse` field of every request body; it is optional there, and empty means the user's default warehouse. A `${ENV}` or `${vault:...}` reference is resolved, as in `host`. Not a secret |
+| `connections[].authMethod` | No | `keypair` | Snowflake only: `keypair` signs a JWT with `privateKey`, `pat` sends the programmatic access token in `password`. |
+| `connections[].privateKey` | No¹ | absent | Snowflake only: the PEM private key's contents, PKCS#8 or PKCS#1, encrypted or not; never a path. ¹Required under `keypair`. A secret: write `${ENV}` or a Vault reference. |
+| `connections[].privateKeyPassphrase` | No | absent | Snowflake only: the passphrase of an encrypted `privateKey`. A secret. |
+| `connections[].role` | No¹ | absent | Snowflake only: the role every statement runs as, sent on every request. ¹Required by the Snowflake provider. |
 | `connections[].region` | No | absent | S3-compatible object storage only: the region every request is signed for; absent means `us-east-1`. Garage refuses any region but its s3_region; a MinIO or Silo started with a site region refuses bucket and object reads signed for another ([providers/s3.md](providers/s3.md)). A `${ENV}` or `${vault:...}` reference is resolved, as in `host`. A region name, neither a credential nor an address; not a secret |
 | `connections[].namespaces` | No | absent | Kubernetes only: the namespaces the tree lists, DNS-1123 labels separated by commas or spaces; when set, no namespace list is read, and a `database` (the Default namespace) outside the list is refused at connect. |
-| `connections[].apiPath` | No | absent | Kubernetes only: a path every request goes under, such as Rancher's `/k8s/clusters/<cluster id>`; no segment may be `api`, `apis`, `proxy`, `namespaces`, `nodes`, `services`, `pods`, `openapi` or `version`. |
+| `connections[].apiPath` | No | absent | Kubernetes and RabbitMQ, each with its own rule. Kubernetes: a path every request goes under, such as Rancher's `/k8s/clusters/<cluster id>`; no segment may be `api`, `apis`, `proxy`, `namespaces`, `nodes`, `services`, `pods`, `openapi` or `version`. RabbitMQ (Path prefix): the management API's path, such as `/rabbitmq`; a plain path with no `%`, `?` or `#`, no empty, `.` or `..` segment, and no segment `api`. |
 | `connections[].tlsServerName` | No | absent | Kubernetes only: the name the API server's certificate is checked against and sent as SNI, a kubeconfig's `tls-server-name`. |
+| `connections[].amqpPort` | No | absent | An AMQP 0-9-1 port as a quoted string of digits, such as `"5672"`; an unquoted number is refused, naming the field. RabbitMQ only: the AMQP port of stream reads; absent or empty means browse only. |
+| `connections[].securityMode` | No | absent | OPC UA only: `None`, `Sign` or `SignAndEncrypt`, the server's own words. A literal: it is neither a credential nor an address, so a `${ENV}` or `${vault:...}` reference in it is refused when the file loads, naming the field. A mode the server does not offer is refused at connect rather than quietly weakened |
+| `connections[].serverCertificateThumbprint` | No | absent | OPC UA only: the SHA-256 thumbprint the server's certificate must present, 64 hexadecimal characters (colons and spaces are ignored), which is `openssl x509 -fingerprint -sha256`. Without it, the trust list decides, and the library's default trusts a server on first sight and keeps trusting a replacement certificate after that server is rebuilt. Not a secret: the server publishes it |
+| `connections[].securityPolicyUri` | No | absent | OPC UA only: the policy to insist on, such as `http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256`. An endpoint is a mode **and** a policy, so naming one narrows the choice to that pair and is refused when the server offers no such pair |
+| `connections[].clientCertificatePath` / `connections[].clientPrivateKeyPath` | No | absent | OPC UA only: the client certificate and private key to present, as paths on the host that runs Studio, supplied together or not at all. A server holding a trust list of its own has to be given a STABLE client identity before it will accept a secured channel, which is what a mounted pair is for; absent, the library generates one under the PKI root (`LIBREDB_OPCUA_PKI_ROOT`), which is stable for as long as that directory is. Paths and never keys: the private key stays in the file |
 | `connections[].authSource` | No | — | MongoDB: the database its credentials live in (`admin` in the ordinary deployment). Without it the driver checks the user against the database being opened, which reports a credentials error |
-| `connections[].mcp` | No | absent | `true` makes the connection visible to MCP clients whose token's role the connection's `roles` admit ([docs/MCP.md](MCP.md)). Anything but a boolean fails the whole file. An etcd, Oxia, S3 or Kubernetes connection refuses `mcp: true` when the file loads: MCP is not offered for it |
+| `connections[].mcp` | No | absent | `true` makes the connection visible to MCP clients whose token's role the connection's `roles` admit ([docs/MCP.md](MCP.md)). Anything but a boolean fails the whole file. An etcd, Oxia, S3, Kubernetes, MQTT, Firestore or OPC UA connection refuses `mcp: true` when the file loads: MCP is not offered for it |
 
 ### MCP opt-in
 
@@ -432,7 +484,7 @@ connections:
 4. A literal password is used as written and logs a warning once per connection.
 5. With `SEED_LITERAL_VALUES=true`, steps 2 to 4 do not happen: every value is used as written (see [Literal values written by a platform](#literal-values-written-by-a-platform))
 
-**Resolvable fields:** `password`, `connectionString`, `user`, `host`, `database`, `dataServers`, `warehouse`, `region`, `apiPath`, `tlsServerName`, `apiKeyId`, `apiKeySecret`, and the TLS material under `ssl`: `ssl.caCert`, `ssl.clientCert` and `ssl.clientKey`.
+**Resolvable fields:** `password`, `connectionString`, `user`, `host`, `database`, `dataServers`, `warehouse`, `region`, `apiPath`, `tlsServerName`, `apiKeyId`, `apiKeySecret`, `amqpPort`, and the TLS material under `ssl`: `ssl.caCert`, `ssl.clientCert` and `ssl.clientKey`.
 
 ### Literal values written by a platform
 
@@ -469,7 +521,7 @@ The part before `#` is the KV v2 path (`<mount>/data/<name>`) and the part after
 
 **Quote the value.** YAML reads an unquoted `#` as the start of a comment, so `password: ${vault:secret/data/prod/postgres#password}` sets the password to the literal text `${vault:secret/data/prod/postgres` and drops the key. The quotes above are not optional.
 
-Whole-value match only, exactly like `${ENV_VAR}`: no partial interpolation, no concatenation, and the same resolvable fields (`password`, `connectionString`, `user`, `host`, `database`, `dataServers`, `warehouse`, `region`, `apiPath`, `tlsServerName`, `apiKeyId`, `apiKeySecret`, `ssl.caCert`, `ssl.clientCert`, `ssl.clientKey`).
+Whole-value match only, exactly like `${ENV_VAR}`: no partial interpolation, no concatenation, and the same resolvable fields (`password`, `connectionString`, `user`, `host`, `database`, `dataServers`, `warehouse`, `region`, `apiPath`, `tlsServerName`, `apiKeyId`, `apiKeySecret`, `amqpPort`, `ssl.caCert`, `ssl.clientCert`, `ssl.clientKey`).
 A reference with no `#key` fails when the connection is opened.
 
 A Vault reference is read lazily, one connection at a time:

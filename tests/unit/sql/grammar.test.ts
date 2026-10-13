@@ -445,10 +445,16 @@ const GRAMMAR_COVERAGE: Record<DatabaseType, "established" | "default"> = {
   // see the databend block below and DATABEND_GRAMMAR in `grammar.ts` for the source behind each fact.
   databend: "established",
   bigquery: "established",
+  // The Snowflake grammar row lands with the gate and the explain format, which flip this to established.
+  snowflake: "established",
   s3: "default",
   // One kubectl statement, not SQL: no SQL grammar is established for it, and none is read.
   kubernetes: "default",
   mqtt: "default",
+  firestore: "default",
+  rabbitmq: "default",
+  // One JSON read request naming node ids, not SQL: no SQL grammar is established for it (#1677).
+  opcua: "default",
 };
 
 /**
@@ -615,15 +621,40 @@ describe("backslashAlwaysEscapes", () => {
     expect(DEFAULT_SQL_GRAMMAR.backslashAlwaysEscapes).toBe(false);
   });
 
-  test.each(["databend", "bigquery"] as const)("%s declares true", (type) => {
+  test.each(["databend", "bigquery", "snowflake"] as const)("%s declares true", (type) => {
     expect(resolveSqlGrammar(type).backslashAlwaysEscapes).toBe(true);
   });
 
   test.each(
-    (Object.keys(GRAMMAR_COVERAGE) as DatabaseType[]).filter((type) => type !== "databend" && type !== "bigquery"),
+    (Object.keys(GRAMMAR_COVERAGE) as DatabaseType[]).filter(
+      (type) => type !== "databend" && type !== "bigquery" && type !== "snowflake",
+    ),
   )("%s declares false", (type) => {
     expect(resolveSqlGrammar(type).backslashAlwaysEscapes).toBe(false);
   });
+});
+
+// Two opt-outs from readings every other row shares: whether `$tag$ … $tag$` is a string (`dollarTags`, absent means
+// true) and what a backslash means inside `"…"` (`doubleQuoteBackslashEscapes`, absent means the reading
+// `backslashAlwaysEscapes` gives both quotes).
+describe("dollarTags and doubleQuoteBackslashEscapes", () => {
+  test("the compatibility default declares neither", () => {
+    expect(DEFAULT_SQL_GRAMMAR.dollarTags).toBeUndefined();
+    expect(DEFAULT_SQL_GRAMMAR.doubleQuoteBackslashEscapes).toBeUndefined();
+  });
+
+  test("snowflake declares both false", () => {
+    expect(resolveSqlGrammar("snowflake").dollarTags).toBe(false);
+    expect(resolveSqlGrammar("snowflake").doubleQuoteBackslashEscapes).toBe(false);
+  });
+
+  test.each((Object.keys(GRAMMAR_COVERAGE) as DatabaseType[]).filter((type) => type !== "snowflake"))(
+    "%s declares neither",
+    (type) => {
+      expect(resolveSqlGrammar(type).dollarTags).toBeUndefined();
+      expect(resolveSqlGrammar(type).doubleQuoteBackslashEscapes).toBeUndefined();
+    },
+  );
 });
 
 describe("every database type has a recorded grammar decision", () => {
@@ -699,11 +730,18 @@ const SQL_TEXT_COVERAGE: Record<DatabaseType, boolean> = {
   // SQL, and the statement text IS what the editor sends to `POST /v1/query`; the provider extends SQLBaseProvider.
   databend: true,
   bigquery: true,
+  // SQL, and the statement text IS what the provider submits; it extends SQLBaseProvider.
+  snowflake: true,
   // AWS CLI words split by POSIX shell rules, not SQL text.
   s3: false,
   // A kubectl statement is words split by POSIX shell rules, not SQL text.
   kubernetes: false,
   mqtt: false,
+  // A JavaScript-shaped query chain, not SQL text.
+  firestore: false,
+  rabbitmq: false,
+  // A read request is a JSON document, not SQL text.
+  opcua: false,
 };
 
 describe("readsSqlText", () => {

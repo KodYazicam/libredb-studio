@@ -140,15 +140,33 @@ const CONNECTION_RELEVANCE: Record<keyof DatabaseConnection, FieldRelevance> = {
   // naming another warehouse does not resolve to the seed's connection, the dataServers reasoning.
   warehouse: "resolution",
   location: "resolution",
+  // Snowflake: the sign-in method, the key and its passphrase decide as whom the connection signs in, as user and
+  // password do, and the role decides what every statement may read and change, so a copy differing in any of them
+  // does not resolve to the seed's connection.
+  authMethod: "resolution",
+  privateKey: "resolution",
+  privateKeyPassphrase: "resolution",
+  role: "resolution",
   // The region every S3 request is signed for: a copy naming another region signs for another scope and a server
   // with a region of its own refuses it, so it does not resolve to the seed's connection, the warehouse reasoning.
   region: "resolution",
   // Kubernetes: the API path and the TLS server name pick which cluster answers behind one host and port, so a copy
-  // differing in either reaches another cluster. The namespace list changes only which namespaces the tree draws, so
-  // a run may still be started on the seed's id.
+  // differing in either reaches another cluster; RabbitMQ's Path prefix, the same field, picks the broker the same way.
+  // The namespace list changes only which namespaces the tree draws, so a run may still be started on the seed's id.
   apiPath: "resolution",
   tlsServerName: "resolution",
+  // Both decide HOW the server is reached and verified, so a change to either is a different connection.
+  securityMode: "resolution",
+  serverCertificateThumbprint: "resolution",
+  // Each one changes which channel is opened and which identity it is opened with, so each travels
+  // to the server with the request, as the mode and the pin do.
+  securityPolicyUri: "resolution",
+  clientCertificatePath: "resolution",
+  clientPrivateKeyPath: "resolution",
   namespaces: "cosmetic",
+  // An AMQP port: the listener a read is sent to, which can be another server than host and port reach, so a copy
+  // differing here does not resolve to the seed's connection.
+  amqpPort: "resolution",
   ssl: "nested",
   sshTunnel: "nested",
 };

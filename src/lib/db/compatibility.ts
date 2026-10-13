@@ -31,6 +31,7 @@ import type { DatabaseType } from "@/lib/types";
 const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   postgres: true,
   bigquery: true,
+  snowflake: true,
   mysql: true,
   sqlite: true,
   // libSQL (#424 Phase 5): its own provider, doc and integration test. A separate
@@ -112,6 +113,17 @@ const SHIPPED: Readonly<Record<DatabaseType, true>> = Object.freeze({
   // hiding. No relative is recorded: every broker speaks the same standard, and a standard is not a
   // compatibility claim about a product.
   mqtt: true,
+  // Firestore: its own provider, doc and integration test, read over Firestore REST v1 by a client of this
+  // repository's own. Native mode only; no relative is recorded.
+  firestore: true,
+  // RabbitMQ (#1656): its own provider, doc and integration test, the second member of the `stream/` family. A
+  // service that speaks the same management API is recorded below as a relative only once a gate-4 probe has measured
+  // one, never because the API answers.
+  rabbitmq: true,
+  // OPC UA (#1677): its own provider, doc and integration test, the first member of the `industrial/` family.
+  // A plant's address space rather than a store, read through a client seam that names eight read services, so
+  // the read-only guarantee is a type rather than a setting.
+  opcua: true,
   libredb: true,
 });
 
@@ -142,6 +154,7 @@ export const SHIPPED_DATABASE_TYPES: readonly DatabaseType[] = Object.freeze(Obj
 const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   postgres: true,
   bigquery: true,
+  snowflake: true,
   mysql: true,
   sqlite: true,
   libsql: true,
@@ -186,6 +199,12 @@ const EXTERNAL: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   // A cluster the user already runs, reached over the Kubernetes API server's REST API.
   kubernetes: true,
   mqtt: true,
+  // A Firestore database the user already runs in Google Cloud, or the emulator the server names.
+  firestore: true,
+  // A broker the user already runs, reached over its management API and AMQP 0-9-1.
+  rabbitmq: true,
+  // A server the plant already runs, reached over opc.tcp at one endpoint the reader types.
+  opcua: true,
   // The one false entry. SQLite is a file rather than a server and is still
   // external: it is the user's file, opened from a path they give us. libredb is
   // ours, created by this app, so it is the only id that answers no here.
@@ -227,6 +246,7 @@ export function isExternalDatabaseType(type: DatabaseType): boolean {
 export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
   postgres: false,
   bigquery: false,
+  snowflake: false,
   mysql: false,
   sqlite: false,
   libsql: false,
@@ -280,6 +300,15 @@ export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
   // Structural rather than a mode: the encoder has no function that writes a PUBLISH, so there is no
   // write to enforce against. The valve repeats the check on the bytes.
   mqtt: true,
+  // Read-only whatever the flag says: the client builds only the read requests of its closed table, before any
+  // socket, and the provider offers no object edit and no maintenance operation.
+  firestore: true,
+  // Read-only whatever the flag says: the management client's closed route table holds GET routes only, and the AMQP
+  // client has no encoder for a publish, a get, a reject or any queue or exchange method, so no request path writes.
+  rabbitmq: true,
+  // Structural rather than a mode: the client seam names eight read services and none of them writes, so there
+  // is no write to enforce against (`src/lib/db/providers/industrial/opcua/client.ts`).
+  opcua: true,
   libredb: false,
 });
 
@@ -304,6 +333,7 @@ export const READ_ONLY_ENFORCED: Record<DatabaseType, boolean> = Object.freeze({
 export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   postgres: false,
   bigquery: false,
+  snowflake: false,
   mysql: false,
   sqlite: true,
   libsql: false,
@@ -335,6 +365,9 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
   s3: false,
   kubernetes: false,
   mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  opcua: false,
   libredb: false,
 });
 
@@ -346,12 +379,14 @@ export const READS_FILE_ACCESS_POSTURE: Readonly<Record<DatabaseType, boolean>> 
  *
  * The etcd provider (#1089) is the engine this record exists for: MCP is outside its first version, so
  * its entry answers false, and that entry lands with the provider's registration, which the compiler
- * forces. etcd, Oxia, S3 and Kubernetes answer false; every other engine answers true. An exhaustive Record for the reason
- * `EXTERNAL` gives, so a new type-id cannot join without someone answering, and frozen like the records above it.
+ * forces. Each entry that answers false carries its reason beside it, so the record below is the list; every
+ * other engine answers true. An exhaustive Record for the reason `EXTERNAL` gives, so a new type-id cannot join
+ * without someone answering, and frozen like the records above it.
  */
 export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   postgres: true,
   bigquery: true,
+  snowflake: true,
   mysql: true,
   sqlite: true,
   libsql: true,
@@ -370,8 +405,8 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
   redis: true,
   prometheus: true,
   kafka: true,
-  // One of the engines MCP is not offered for (#1089 E12; Oxia, S3 and Kubernetes are the others): the provider implements no
-  // read-only query path, and a seed that sets `mcp: true` on an etcd connection is refused when the seed file loads.
+  // The first engine MCP is not offered for (#1089 E12): the provider implements no read-only query path, and a seed
+  // that sets `mcp: true` on an etcd connection is refused when the seed file loads.
   etcd: false,
   // Offered for the two metadata tools, `list_connections` and `inspect_schema` (Neo4j spec 6.4).
   // `run_read_query` does not serve it, because the provider implements no `queryReadOnly`.
@@ -399,6 +434,18 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
   // Outside this version, as for etcd, Oxia and S3: a read whose completeness cannot be proved is not a
   // read an agent should be handed without a reader looking at it.
   mqtt: false,
+  // Outside this version, as for etcd, Oxia, S3, Kubernetes and MQTT: the provider implements no read-only query
+  // path an MCP client could drive, and every read is billed to the user's project.
+  firestore: false,
+  // Offered for the two metadata tools, carrying stream names and the fixed read columns only; `run_read_query` does
+  // not serve it, because the provider implements no `queryReadOnly`.
+  rabbitmq: true,
+  // Outside this version, as for etcd, Oxia, S3 and MQTT. NOT because there is no read to hand over:
+  // the console reads one JSON request and is read-only by construction. Because a node's value
+  // without its plant is a number with no unit, no range and no neighbour - the engineering units
+  // and the EU range live on nodes of their own, and this version reads neither - so an agent
+  // grounded on an address space would be reasoning about figures it cannot qualify.
+  opcua: false,
   libredb: true,
 });
 
@@ -416,6 +463,7 @@ export const MCP_EXPOSABLE: Readonly<Record<DatabaseType, boolean>> = Object.fre
 export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   postgres: false,
   bigquery: false,
+  snowflake: false,
   mysql: false,
   sqlite: false,
   libsql: true,
@@ -445,6 +493,9 @@ export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> =
   s3: false,
   kubernetes: false,
   mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  opcua: false,
   libredb: false,
 });
 
@@ -464,6 +515,7 @@ export const CONNECTION_FORM_URI_MODE: Readonly<Record<DatabaseType, boolean>> =
 export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>> = Object.freeze({
   postgres: true,
   bigquery: false,
+  snowflake: false,
   mysql: true,
   // The provider's supportsConnectionString flag is false, yet it opens this field as the database file path:
   // sqlite.ts getDatabasePath, docs/providers/sqlite.md.
@@ -497,6 +549,10 @@ export const CONNECTION_STRING_ACCEPTED: Readonly<Record<DatabaseType, boolean>>
   s3: false,
   kubernetes: false,
   mqtt: false,
+  firestore: false,
+  rabbitmq: false,
+  // The endpoint URL is the whole address: host and port are read from it, so there is no second string to parse.
+  opcua: false,
   libredb: false,
 });
 

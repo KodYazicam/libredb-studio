@@ -154,11 +154,36 @@ const postgresLiteral: TypedWriter = (value, declared) => {
 // ---------------------------------------------------------------------------------------
 
 /**
+ * The text the provider reads a `datetime` and a `smalldatetime` as (#1452): the engine's own.
+ * The inline grid edit (`use-inline-editing.ts`) binds it with a `T` for the same reason the
+ * export below writes it with one.
+ */
+export const MSSQL_DATETIME_TEXT = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,3})?$/;
+
+/**
  * T-SQL has no boolean literal: `true` parses as a column name (`Msg 207: Invalid column
  * name 'true'`, measured on SQL Server 2025 17.0.5005.3) and fails the whole batch. A BIT
  * takes `1` and `0`, and `mssql` hands a BIT back as a JS boolean.
+ *
+ * A `datetime` or `smalldatetime` cell is the engine's own `yyyy-mm-dd hh:mi:ss[.mmm]` text
+ * (#1452), and unlike `datetime2` and `date`, those two types read that form through the
+ * session's DATEFORMAT. Measured on SQL Server 2022 CU27 (16.0.4295.3): under `british`,
+ * `Deutsch` and `Français` (dmy) `'2026-10-04 12:34:56.123'` is stored as April 10th and
+ * `'2026-10-25 …'` is refused, while `'2026-10-04T12:34:56.123'` is October 4th under those
+ * and under `us_english` and `Japanese`. So the text goes out with its space as a `T`.
  */
-const mssqlLiteral: TypedWriter = (value) => (typeof value === "boolean" ? (value ? "1" : "0") : undefined);
+const mssqlLiteral: TypedWriter = (value, declared) => {
+  if (typeof value === "boolean") return value ? "1" : "0";
+  const type = normalized(declared);
+  if (
+    (type === "datetime" || type === "smalldatetime") &&
+    typeof value === "string" &&
+    MSSQL_DATETIME_TEXT.test(value)
+  ) {
+    return quoteLiteral(value.replace(" ", "T"), "mssql");
+  }
+  return undefined;
+};
 
 // ---------------------------------------------------------------------------------------
 // ClickHouse
@@ -639,6 +664,99 @@ function databendValue(value: unknown, declared: string, scalar: ScalarLiteral):
 const databendLiteral: TypedWriter = (value, declared, scalar) =>
   declared === undefined || asBytes(value) !== undefined ? undefined : databendValue(value, declared, scalar);
 
+// ---------------------------------------------------------------------------------------
+// Snowflake
+// ---------------------------------------------------------------------------------------
+
+/** The semi-structured types, each written through `PARSE_JSON`; a structured spelling of one is also cast. */
+const SNOWFLAKE_SEMI_STRUCTURED = /^(VARIANT|OBJECT|ARRAY|MAP)$/;
+/**
+ * A declared type a cast may name: a type name and an argument list of names, digits, commas, spaces and parentheses.
+ * The declaration is data, so nothing that could close a literal, start a comment or end the statement passes.
+ */
+const SNOWFLAKE_CAST_TYPE = /^[A-Z_]+\([A-Z0-9_, ()]*\)$/i;
+/** One element of a VECTOR's text: a number, or a non-finite word, which only a FLOAT vector holds. */
+const SNOWFLAKE_VECTOR_ELEMENT = /^-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|inf|infinity|nan)$/i;
+/** A NUMBER or DECFLOAT text written bare, as the decoder hands over its exact text. */
+const SNOWFLAKE_NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
+
+/** The decoder's text for each temporal type, its conversion function, and its mask without the fraction. */
+const SNOWFLAKE_TEMPORAL: Readonly<Record<string, { shape: RegExp; convert: string; mask: string; zoned: boolean }>> = {
+  DATE: { shape: /^\d{4}-\d{2}-\d{2}$/, convert: "TO_DATE", mask: "YYYY-MM-DD", zoned: false },
+  TIME: { shape: /^\d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?$/, convert: "TO_TIME", mask: "HH24:MI:SS", zoned: false },
+  TIMESTAMP_NTZ: {
+    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?$/,
+    convert: "TO_TIMESTAMP_NTZ",
+    mask: "YYYY-MM-DD HH24:MI:SS",
+    zoned: false,
+  },
+  TIMESTAMP_LTZ: {
+    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
+    convert: "TO_TIMESTAMP_LTZ",
+    mask: "YYYY-MM-DD HH24:MI:SS",
+    zoned: true,
+  },
+  TIMESTAMP_TZ: {
+    shape: /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?[+-]\d{2}:\d{2}$/,
+    convert: "TO_TIMESTAMP_TZ",
+    mask: "YYYY-MM-DD HH24:MI:SS",
+    zoned: true,
+  },
+};
+
+/**
+ * The VECTOR type a cell's own text spells, for a column whose result metadata carries no dimension, as the trial's
+ * did: as many elements as the value holds, FLOAT when any is not an integer, else INT.
+ */
+function snowflakeVectorType(text: string): string {
+  const inner = /^\s*\[([\s\S]*)\]\s*$/.exec(text)?.[1];
+  const elements = inner === undefined ? [] : inner.split(",").map((element) => element.trim());
+  if (elements.length === 0 || !elements.every((element) => SNOWFLAKE_VECTOR_ELEMENT.test(element))) {
+    throw new UnwritableValue("a VECTOR whose value is not an array of numbers");
+  }
+  const float = elements.some((element) => !/^-?\d+$/.test(element));
+  return `VECTOR(${float ? "FLOAT" : "INT"}, ${elements.length})`;
+}
+
+/**
+ * A Snowflake cell by its declared type, in the catalog spelling the provider's decoder reports.
+ *
+ * Provisional until a replay on an account confirms each form. A semi-structured, structured or VECTOR cell is
+ * `PARSE_JSON` of its JSON text, which `INSERT ... VALUES` refuses, so the export writes Snowflake's rows as
+ * `INSERT ... SELECT`; a VECTOR or a structured type is cast to its declaration, and a VECTOR without its dimension
+ * to the type its value spells. A date, a time or a timestamp goes through its `TO_*` function with a mask matching the
+ * decoder's text, the fraction digits as the text carries them, so no account input format moves the value; a cell
+ * not in that text is refused rather than left to an input format.
+ */
+function snowflakeValue(value: unknown, declared: string, scalar: ScalarLiteral): string | undefined {
+  const spelled = declared.trim().replace(/\s+/g, " ");
+  const name = spelled.split("(")[0].trim().toUpperCase();
+  const structured = spelled.includes("(");
+  if (SNOWFLAKE_SEMI_STRUCTURED.test(name) || name === "VECTOR") {
+    const text = typeof value === "string" ? value : jsonText(value);
+    const parsed = `PARSE_JSON(${quoteLiteral(text, "snowflake")})`;
+    if (!structured) return name === "VECTOR" ? `${parsed}::${snowflakeVectorType(text)}` : parsed;
+    if (!SNOWFLAKE_CAST_TYPE.test(spelled)) throw new UnwritableValue(`a ${name} whose declared type is not a type`);
+    return `${parsed}::${spelled}`;
+  }
+  const temporal = Object.hasOwn(SNOWFLAKE_TEMPORAL, name) ? SNOWFLAKE_TEMPORAL[name] : undefined;
+  if (temporal !== undefined) {
+    const match = typeof value === "string" ? temporal.shape.exec(value) : null;
+    if (match === null) throw new UnwritableValue(`a ${name} that is not in the form Studio reads`);
+    const fraction = match[1] === undefined ? "" : `.FF${match[1].length}`;
+    const mask = `${temporal.mask}${fraction}${temporal.zoned ? "TZH:TZM" : ""}`;
+    return `${temporal.convert}(${quoteLiteral(value as string, "snowflake")}, '${mask}')`;
+  }
+  if ((name === "NUMBER" || name === "DECFLOAT") && typeof value === "string") {
+    return SNOWFLAKE_NUMERIC_TEXT.test(value) ? value : scalar(value);
+  }
+  return undefined;
+}
+
+/** Every declared cell but bytes, which the generic writer spells with `BINARY_LITERAL.snowflake`. */
+const snowflakeLiteral: TypedWriter = (value, declared, scalar) =>
+  declared === undefined || asBytes(value) !== undefined ? undefined : snowflakeValue(value, declared, scalar);
+
 /** The dialects whose INSERT needs a declared type to write some cell; the rest have no row. */
 const TYPED_WRITERS: Partial<Record<DatabaseType, TypedWriter>> = {
   postgres: postgresLiteral,
@@ -648,6 +766,7 @@ const TYPED_WRITERS: Partial<Record<DatabaseType, TypedWriter>> = {
   duckdb: duckdbLiteral,
   cassandra: cassandraLiteral,
   databend: databendLiteral,
+  snowflake: snowflakeLiteral,
 };
 
 /**

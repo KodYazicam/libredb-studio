@@ -295,7 +295,7 @@ const TABLE_STATS_SQL = `
         SELECT
           s.name AS schema_name,
           t.name AS table_name,
-          SUM(p.rows) AS row_count,
+          ISNULL(p.row_count, 0) AS row_count,
           SUM(a.total_pages) * 8 * 1024 AS total_size_bytes,
           SUM(a.used_pages) * 8 * 1024 AS used_size_bytes,
           SUM(CASE WHEN i.type IN (0, 1) THEN a.total_pages ELSE 0 END) * 8 * 1024 AS table_size_bytes,
@@ -303,11 +303,17 @@ const TABLE_STATS_SQL = `
           STATS_DATE(t.object_id, 1) AS last_stats_update
         FROM sys.tables t
         JOIN sys.schemas s ON t.schema_id = s.schema_id
+        LEFT JOIN (
+          SELECT object_id, SUM(rows) AS row_count
+          FROM sys.partitions
+          WHERE index_id IN (0, 1)
+          GROUP BY object_id
+        ) p ON t.object_id = p.object_id
         JOIN sys.indexes i ON t.object_id = i.object_id
-        JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-        JOIN sys.allocation_units a ON p.partition_id = a.container_id
+        JOIN sys.partitions p_all ON i.object_id = p_all.object_id AND i.index_id = p_all.index_id
+        JOIN sys.allocation_units a ON p_all.partition_id = a.container_id
         WHERE t.type = 'U'
-        GROUP BY s.name, t.name, t.object_id
+        GROUP BY s.name, t.name, t.object_id, p.row_count
         ORDER BY SUM(a.total_pages) DESC
       `;
 
@@ -1467,14 +1473,28 @@ function byObjectId<T extends BulkRow>(rows: readonly T[]): Map<number, T[]> {
 }
 
 /**
- * The declarations whose `Date` is NOT the honest shape of the value (#1132).
+ * The declarations whose `Date` is NOT the honest shape of the value (#1132, #1452).
  *
- * `time` is a time-of-day on an invented 1970-01-01, `date` a calendar day at UTC midnight
- * and `datetime2` a wall-clock reading with no zone, so an ISO instant reports a moment
- * none of them holds - and the format cuts a `time(7)` from seven digits to three.
- * `datetimeoffset` is deliberately absent: it IS an instant, so its ISO shape is right.
+ * `time` is a time-of-day on an invented 1970-01-01, `date` a calendar day at UTC midnight,
+ * and `datetime2`, `datetime` and `smalldatetime` wall-clock readings with no zone, so an
+ * ISO instant reports a moment none of them holds - and the format cuts a `time(7)` from
+ * seven digits to three. `datetimeoffset` is deliberately absent: it IS an instant, so its
+ * ISO shape is right.
  */
-const ZONELESS_VALUE_DECLARATIONS = new Set(["time", "date", "datetime2"]);
+const ZONELESS_VALUE_DECLARATIONS = new Set(["time", "date", "datetime2", "datetime", "smalldatetime"]);
+
+/**
+ * The fraction digits a type fixes, for the two whose column declares none (#1452).
+ *
+ * The driver sends a `scale` only for `time`, `datetime2` and `datetimeoffset` (tedious
+ * `metadata-parser.js`), so these come from the type: `datetime` always prints three
+ * digits, its 1/300 s ticks rounded to .000/.003/.007 - which is also the millisecond tedious
+ * puts in the `Date` - and `smalldatetime` is stored to the minute and prints `:00` seconds.
+ */
+const FIXED_FRACTION_DIGITS: ReadonlyMap<string, number> = new Map([
+  ["datetime", 3],
+  ["smalldatetime", 0],
+]);
 
 /** Two digits, the width every part of a date or time text carries except the year. */
 function pad2(value: number): string {
@@ -1519,6 +1539,7 @@ function convertZonelessValues(rows: Record<string, unknown>[], columns: Record<
   for (const [name, column] of Object.entries(columns)) {
     const declaration = (column.type as { declaration?: unknown } | undefined)?.declaration;
     if (typeof declaration !== "string" || !ZONELESS_VALUE_DECLARATIONS.has(declaration)) continue;
+    const scale = FIXED_FRACTION_DIGITS.get(declaration) ?? column.scale;
     for (const row of rows) {
       const value = row[name];
       if (!(value instanceof Date)) continue;
@@ -1526,8 +1547,8 @@ function convertZonelessValues(rows: Record<string, unknown>[], columns: Record<
         declaration === "date"
           ? dateText(value)
           : declaration === "time"
-            ? timeText(value, column.scale)
-            : `${dateText(value)} ${timeText(value, column.scale)}`;
+            ? timeText(value, scale)
+            : `${dateText(value)} ${timeText(value, scale)}`;
     }
   }
 }

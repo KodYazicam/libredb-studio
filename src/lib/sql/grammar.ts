@@ -203,6 +203,26 @@ export interface SqlGrammar {
    */
   readonly backtickBackslashEscapes?: boolean;
   /**
+   * Whether a tagged run (`$tag$ … $tag$`, the tag non-empty) is a string literal; absent means true, the reading
+   * every row had before the fact existed, which deliberately inverts its neighbours' absent-means-false because the
+   * fact is an opt-out. False: the `$` that would open a tagged run is code, and the untagged `$$ … $$` is still a
+   * dollar string.
+   *
+   * It is a fact the text cannot settle: `$t$x; DELETE FROM t; $t$` is one string where the tagged form exists and
+   * code holding a `DELETE` where it does not, so under the wrong reading the `DELETE` would hide inside a literal
+   * or a string would be cut into statements.
+   */
+  readonly dollarTags?: boolean;
+  /**
+   * Whether a backslash escapes the next character inside `"…"`; absent means the reading `backslashAlwaysEscapes`
+   * gives both quotes. False: a backslash there is an ordinary character, so `"a\"` is a terminated name. True: it
+   * escapes there.
+   *
+   * It is a fact the text cannot settle: `"a\"; DELETE FROM t --"` is a name and a DELETE where the backslash is part
+   * of the name, and one quoted run to the trailing quote where it escapes.
+   */
+  readonly doubleQuoteBackslashEscapes?: boolean;
+  /**
    * How a script is cut into the units the engine receives (E2E pass of 2026-10-03/04,
    * #1312). Before this fact existed every code `;` was a boundary in every dialect, so a
    * PL/SQL procedure, a SQLite trigger and a T-SQL batch were each cut at their inner `;`
@@ -235,7 +255,23 @@ export interface SqlGrammar {
    * engine refuses the statement, which it refused before the bound was there too.
    */
   readonly trailingLimitClauses: readonly RegExp[];
+  /**
+   * Keyword sequences that ask for a confirmation when they OPERATE a statement, read where the shared
+   * dangerous-keyword set is read: at the operative keyword, after leading comments, labels and a `WITH` clause, and
+   * anywhere in the code of a control-flow block. Words are compared case-insensitively and may be separated by
+   * comments. For a dialect whose own destructive or billed forms are not in the shared set; absent means none.
+   */
+  readonly confirmForms?: readonly (readonly string[])[];
+  /**
+   * Forms that ask for a confirmation wherever they appear in a statement's code, strings and comments skipped: a
+   * word sequence, or the start of an identifier (`{ prefix: "SYSTEM$" }` matches `SYSTEM$CLUSTERING_INFORMATION`).
+   * Absent means none.
+   */
+  readonly confirmCodeForms?: readonly ConfirmCodeForm[];
 }
+
+/** A form `SqlGrammar.confirmCodeForms` looks for: a word sequence, or an identifier prefix. */
+export type ConfirmCodeForm = readonly string[] | { readonly prefix: string };
 
 /**
  * What a call that names no dialect gets.
@@ -746,6 +782,83 @@ const BIGQUERY_GRAMMAR: SqlGrammar = {
 };
 
 /**
+ * Snowflake. The lexical facts were measured on the trial capture of 2026-10-12 (Snowflake 10.37.100), each named on
+ * its field by its item in `tests/fixtures/snowflake/trial-2026-10-12-v10.37.100/`; the rest are read off Snowflake's
+ * SQL reference (string and binary literals, dollar-quoted constants, `SELECT ... FOR UPDATE`).
+ *
+ * The one measured reading the shared reader does not follow is the string continuation: M63 ran `'a\<line feed>b'`
+ * as a three-character string, and the reader leaves a literal unterminated at a backslash before a line feed, the
+ * fail-safe direction, so the statement loses its bound and the confirmation gate asks.
+ */
+const SNOWFLAKE_GRAMMAR: SqlGrammar = {
+  // CODE: M62 refused `SELECT 3 # 2` at the `#` ("unexpected '# '"), so `#` hides nothing, and ran `X''` as a binary
+  // value, which the reader reads as a name and an ordinary string.
+  hash: "code",
+  // A SUBSCRIPT: `v[0]` and `v['key']` read a semi-structured value, and names are quoted with `"` only.
+  bracket: "subscript",
+  // FLAT: M60 ran `SELECT /* a /* b */ 1` and refused the same text with a second `*/` ("unexpected '/'").
+  blockComment: "flat",
+  alternateQuoting: false,
+  // A LINE comment: M63 ran `SELECT 1 AS c // a comment`.
+  doubleSlashComment: true,
+  // A backslash escapes inside `'…'` (`'it\'s'`), as the reference gives it.
+  backslashAlwaysEscapes: true,
+  // False: M61 named a column `a\b` from `"a\b"`, so a backslash inside `"…"` is part of the name.
+  doubleQuoteBackslashEscapes: false,
+  // False: M64 ran `SELECT 1 AS a$b$c` as the name `A$B$C`, and the reference gives `$$` as the only dollar-quoted
+  // form, so a `$` that would open a tagged run is code.
+  dollarTags: false,
+  // A Scripting block runs through `EXECUTE IMMEDIATE $$ … $$`, which the span reader holds whole.
+  script: DEFAULT_SQL_GRAMMAR.script,
+  // `SELECT ... FOR UPDATE [NOWAIT | WAIT <n>]` ends the statement, after any LIMIT. The wait is a number, so a `)`
+  // after it ends the match.
+  trailingLimitClauses: [/\s+FOR\s+UPDATE(?:\s+NOWAIT|\s+WAIT\s+\d+)?\s*$/i],
+  // The forms that replace, overwrite, unload, delete stage files, run text the gate cannot read, spend credits or
+  // open a path out of the account, none of which the shared set names: every COPY asks, whichever way it moves data,
+  // and so does every CALL and every pipe. `CREATE OR ALTER` drops whatever columns its new definition leaves out. A
+  // dynamic table, a dynamic Iceberg table, a Cortex Search service and a replication or failover group each refresh
+  // or replicate on their own and bill for it.
+  confirmForms: [
+    ["CREATE", "OR", "REPLACE"],
+    ["CREATE", "OR", "ALTER"],
+    ["INSERT", "OVERWRITE"],
+    ["MERGE"],
+    ["COPY"],
+    ["REMOVE"],
+    ["RM"],
+    ["EXECUTE", "IMMEDIATE"],
+    ["EXECUTE", "TASK"],
+    ["EXECUTE", "ALERT"],
+    ["EXECUTE", "NOTEBOOK"],
+    ["EXECUTE", "JOB", "SERVICE"],
+    ["EXECUTE", "DBT", "PROJECT"],
+    ["CALL"],
+    ["CREATE", "WAREHOUSE"],
+    ["CREATE", "TASK"],
+    ["CREATE", "USER"],
+    ["CREATE", "ROLE"],
+    ["CREATE", "NETWORK", "POLICY"],
+    ["CREATE", "COMPUTE", "POOL"],
+    ["CREATE", "SERVICE"],
+    ["CREATE", "DYNAMIC", "TABLE"],
+    ["CREATE", "TRANSIENT", "DYNAMIC", "TABLE"],
+    ["CREATE", "ALERT"],
+    ["CREATE", "MATERIALIZED", "VIEW"],
+    ["CREATE", "SECURE", "MATERIALIZED", "VIEW"],
+    ["CREATE", "PIPE"],
+    ["CREATE", "EXTERNAL", "ACCESS", "INTEGRATION"],
+    ["CREATE", "API", "INTEGRATION"],
+    ["CREATE", "NETWORK", "RULE"],
+    ["CREATE", "REPLICATION", "GROUP"],
+    ["CREATE", "FAILOVER", "GROUP"],
+    ["CREATE", "CORTEX", "SEARCH", "SERVICE"],
+    ["CREATE", "DYNAMIC", "ICEBERG", "TABLE"],
+  ],
+  // An anonymous procedure (`WITH p AS PROCEDURE … CALL p()`) and any `SYSTEM$` function, wherever they are written.
+  confirmCodeForms: [["AS", "PROCEDURE"], { prefix: "SYSTEM$" }],
+};
+
+/**
  * The established readings, one row per fact per dialect.
  *
  * A dialect absent from this table is at the compatibility default because its
@@ -905,6 +1018,7 @@ const SQL_GRAMMARS: Partial<Record<DatabaseType, SqlGrammar>> = {
   influxdb3: DATAFUSION_GRAMMAR,
   databend: DATABEND_GRAMMAR,
   bigquery: BIGQUERY_GRAMMAR,
+  snowflake: SNOWFLAKE_GRAMMAR,
 };
 
 /**
@@ -1008,6 +1122,10 @@ const NON_SQL_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>([
   "s3",
   "kubernetes",
   "mqtt",
+  "firestore",
+  "rabbitmq",
+  // One JSON read request naming node ids, so no span of it is SQL (#1677).
+  "opcua",
 ]);
 
 /**

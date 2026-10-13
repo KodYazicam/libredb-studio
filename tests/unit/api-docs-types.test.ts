@@ -184,34 +184,34 @@ describe("the unions docs/API_DOCS.md inlines in VectorColumn match the publishe
 });
 
 describe("the allowInsecureAuth field names every engine that reads it", () => {
-  test("docs/API_DOCS.md and docs/SEED_CONNECTIONS.md name Db2, both InfluxDB types, Oxia, Databend, S3 and MQTT, the types whose form offers the field", () => {
+  test("docs/API_DOCS.md and docs/SEED_CONNECTIONS.md name Db2, both InfluxDB types, Oxia, Databend, S3, MQTT and RabbitMQ, the types whose form offers the field", () => {
     const readers = Object.entries(DB_UI_CONFIG)
       .filter(([, config]) => (config.connectionFields as readonly string[] | undefined)?.includes("allowInsecureAuth"))
       .map(([type]) => type);
     // The control: an eighth type taking the field fails here until both docs name it.
-    expect(readers).toEqual(["db2", "influxdb", "influxdb3", "oxia", "databend", "s3", "mqtt"]);
-    expect(API_DOCS).toContain("`allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend, S3, MQTT)");
+    expect(readers).toEqual(["db2", "influxdb", "influxdb3", "oxia", "databend", "s3", "mqtt", "rabbitmq"]);
+    expect(API_DOCS).toContain("`allowInsecureAuth` (Db2, InfluxDB, InfluxDB 3, Oxia, Databend, S3, MQTT, RabbitMQ)");
     expect(DATA_TYPES).toContain(
-      "allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia, Databend, S3 and MQTT (#786):",
+      "allowInsecureAuth?: boolean; // Db2, both InfluxDB types, Oxia, Databend, S3, MQTT and RabbitMQ (#786):",
     );
     expect(read("docs/SEED_CONNECTIONS.md")).toContain(
-      "| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types, Oxia, Databend, S3 and MQTT (#786):",
+      "| `connections[].allowInsecureAuth` | No | absent | Db2, both InfluxDB types, Oxia, Databend, S3, MQTT and RabbitMQ (#786):",
     );
   });
 });
 
 describe("the warehouse field", () => {
-  test("docs/API_DOCS.md names it among the fields the server reads, as Databend's, in the source's field order", () => {
-    expect(API_DOCS).toContain("`dataServers` (Oxia), `warehouse` (Databend)");
+  test("docs/API_DOCS.md names it among the fields the server reads, as Databend's and Snowflake's, in the source's field order", () => {
+    expect(API_DOCS).toContain("`dataServers` (Oxia), `warehouse` (Databend, Snowflake)");
     const fields = topLevelFields(DATA_TYPES, "DatabaseConnection");
     expect(fields.indexOf("warehouse")).toBe(fields.indexOf("dataServers") + 1);
-    expect(DATA_TYPES).toMatch(/warehouse\?: string; +\/\/ Databend only:/);
+    expect(DATA_TYPES).toMatch(/warehouse\?: string; +\/\/ Databend and Snowflake:/);
   });
 });
 
 describe("the region field", () => {
   test("docs/API_DOCS.md names it among the fields the server reads, as S3's, right after the warehouse", () => {
-    expect(API_DOCS).toContain("`warehouse` (Databend), `region` (S3)");
+    expect(API_DOCS).toContain("`warehouse` (Databend, Snowflake), `region` (S3)");
     const fields = topLevelFields(DATA_TYPES, "DatabaseConnection");
     expect(fields.indexOf("region")).toBe(fields.indexOf("warehouse") + 1);
     expect(DATA_TYPES).toMatch(/region\?: string; +\/\/ S3-compatible object storage only:/);
