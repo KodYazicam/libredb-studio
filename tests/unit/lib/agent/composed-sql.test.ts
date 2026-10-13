@@ -1543,7 +1543,21 @@ describe("composeCatalogRead — the MySQL arm (#1612)", () => {
     );
     expect(sql).toContain("c.table_schema = 'app'");
     expect(sql).toContain("c.table_name = 'orders'");
-    expect(sql).toContain("table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')");
+    // Qualified: `tables t` carries a `table_schema` too, and an unqualified one is
+    // refused with 1052 on both engines (measured on 26.7.0 and 12.3.2).
+    expect(sql).toContain("c.table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')");
+    expect(sql).not.toMatch(/(?<!\.)\btable_schema NOT IN/);
+  });
+
+  test("every kind names its columns in lower case, because MySQL answers information_schema in upper case", () => {
+    // Measured: MySQL 26.7.0 returns `TABLE_SCHEMA` for an unaliased
+    // information_schema column, MariaDB returns `table_schema`. The alias is what
+    // makes the two engines hand back the same keys.
+    for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
+      const sql = composeCatalogRead("mysql", { kind });
+      expect(sql, kind).toMatch(/table_schema AS table_schema/);
+      expect(sql, kind).toMatch(/table_name AS table_name/);
+    }
   });
 
   test("the foreign keys read pairs position with position, on key_column_usage", () => {

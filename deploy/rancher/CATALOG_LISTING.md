@@ -64,10 +64,12 @@ What gets mailed is `pcsc-listing.html` beside this file, not the sections below
 > ([`docs/AGENT.md`](https://github.com/libredb/libredb-studio/blob/main/docs/AGENT.md)),
 > which executes statements on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL only (`queryReadOnly`
 > exists on those five providers alone), with the database and not the IDE refusing the write. Do
-> NOT write "in a read-only session": that is true of four of the five and false of SQL Server,
-> which has no read-only transaction and no session-level read-only switch, and bounds the run by
-> a principal verified at open to be unable to write plus an optimizer admission per statement
-> (`docs/providers/mssql.md`). "Never writes" is engine-independent and is the sentence to use.
+> NOT write "in a read-only session": that is true of PostgreSQL, SQLite and DuckDB only. SQL
+> Server has no read-only transaction and no session-level read-only switch, and bounds the run by
+> a principal verified to be unable to write plus an optimizer admission per statement
+> (`docs/providers/mssql.md`); MySQL has a read-only transaction that DDL ends by committing, so
+> there too the boundary is a principal verified to be unable to write (`docs/providers/mysql.md`).
+> "Never writes" is engine-independent and is the sentence to use.
 > "Executes nothing it
 > recommends" is an overclaim this product already rejected: the consented editor hand-over
 > runs exactly the recommended statement

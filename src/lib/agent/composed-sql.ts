@@ -957,8 +957,18 @@ function composeMssqlStatistics(selector: AgentCatalogSelector): string {
  * harmlessly absent on MariaDB. Every other schema a server of this family owns is
  * one an operator chose the name of (`probe` in the fixtures, `reporting` in them
  * too), and a name list would have had to be right about all of them.
+ *
+ * A function of the column it filters, because the column inventory joins two views
+ * that both carry `table_schema`, and an unqualified name there is refused with 1052
+ * on both engines.
+ *
+ * Every arm below also ALIASES the columns it reads to lower case: MySQL answers an
+ * unaliased `information_schema` column in upper case (`TABLE_SCHEMA`), MariaDB in
+ * lower case, and the alias is what makes the two hand back the same keys.
  */
-const MYSQL_SCHEMA_EXCLUSION = "table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')";
+function mysqlSchemaExclusion(column: string): string {
+  return `${column} NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')`;
+}
 
 /**
  * The column inventory, ONE ROW PER OBJECT, symmetric with the PostgreSQL and SQL
@@ -977,25 +987,28 @@ const MYSQL_SCHEMA_EXCLUSION = "table_schema NOT IN ('information_schema', 'perf
  * MySQL and 1048576 on MariaDB, measured, and a ceiling hit is a SILENT truncation.
  * The read-only path raises it to 4 MB for the session (`MySQLProvider`
  * `queryReadOnly`), which a column list of realistic size does not approach, and the
- * reset puts back what the server shipped.
+ * connection is closed when the call ends, so the raised ceiling never outlives it.
  *
  * `relkind` is `information_schema.tables.table_type` - `BASE TABLE` and `VIEW`,
  * this family's own words for what an entry is, the role `pg_class.relkind` plays
  * on PostgreSQL and `o.type` on SQL Server. It is joined rather than read from the
  * columns view alone because that view does not carry it.
  *
- * Measured on MySQL 26.7.0 and MariaDB 13.0.2 as the least-privilege account
- * `agent_ro`: every table of the `app` fixture, one row per object, columns in
- * ordinal position order.
+ * Measured on MySQL 26.7.0 and MariaDB 12.3.2 (2026-10-13) as the least-privilege
+ * account `libredb_agent` through `queryReadOnly`: every table of the `app` fixture,
+ * one row per object, columns in ordinal position order. The first spelling of this
+ * statement left the schema filter unqualified and both engines refused it with 1052,
+ * which no text-pinned unit test could see; `tests/live/mysql-agent-profile.ts` runs
+ * every kind against both engines.
  */
 function composeMysqlCatalog(selector: AgentCatalogSelector): string {
   return (
-    "SELECT c.table_schema, c.table_name, t.table_type AS relkind, " +
+    "SELECT c.table_schema AS table_schema, c.table_name AS table_name, t.table_type AS relkind, " +
     "CONCAT('[', GROUP_CONCAT(JSON_OBJECT('name', c.column_name, 'type', c.data_type, " +
     "'nullable', c.is_nullable) ORDER BY c.ordinal_position SEPARATOR ','), ']') AS columns " +
     "FROM information_schema.columns c " +
     "JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name " +
-    `WHERE ${MYSQL_SCHEMA_EXCLUSION}` +
+    `WHERE ${mysqlSchemaExclusion("c.table_schema")}` +
     equalsClause("c.table_schema", selector.schema, "schema", "mysql") +
     equalsClause("c.table_name", selector.table, "table", "mysql") +
     " GROUP BY c.table_schema, c.table_name, t.table_type ORDER BY c.table_schema, c.table_name"
@@ -1009,15 +1022,16 @@ function composeMysqlCatalog(selector: AgentCatalogSelector): string {
  * constraint with its own ordinal and the referenced pair on the same row, so a
  * composite key pairs position with position by construction - the same reason the
  * PostgreSQL arm reads `pg_constraint` rather than the constraint views. Measured on
- * both engines as `agent_ro`: the `app` fixture's two foreign keys, two rows.
+ * both engines as `libredb_agent`: the `app` fixture's two foreign keys, two rows.
  */
 function composeMysqlRelations(selector: AgentCatalogSelector): string {
   return (
-    "SELECT kcu.table_schema, kcu.table_name, kcu.column_name, " +
-    "kcu.referenced_table_schema, kcu.referenced_table_name, kcu.referenced_column_name " +
+    "SELECT kcu.table_schema AS table_schema, kcu.table_name AS table_name, kcu.column_name AS column_name, " +
+    "kcu.referenced_table_schema AS referenced_table_schema, kcu.referenced_table_name AS referenced_table_name, " +
+    "kcu.referenced_column_name AS referenced_column_name " +
     "FROM information_schema.key_column_usage kcu " +
     "WHERE kcu.referenced_table_name IS NOT NULL " +
-    `AND ${MYSQL_SCHEMA_EXCLUSION.replace(/\btable_schema\b/g, "kcu.table_schema")}` +
+    `AND ${mysqlSchemaExclusion("kcu.table_schema")}` +
     equalsClause("kcu.table_schema", selector.schema, "schema", "mysql") +
     equalsClause("kcu.table_name", selector.table, "table", "mysql") +
     " ORDER BY kcu.table_schema, kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
@@ -1034,15 +1048,15 @@ function composeMysqlRelations(selector: AgentCatalogSelector): string {
  * `sub_part` rows (an index on a prefix of a long column) still name the column, and
  * prefix length is not something this inventory has ever carried.
  *
- * Measured on both engines as `agent_ro`: `PRIMARY` unique and primary, the
+ * Measured on both engines as `libredb_agent`: `PRIMARY` unique and primary, the
  * constraint-backed `orders_customer_fk` neither, in position order.
  */
 function composeMysqlIndexes(selector: AgentCatalogSelector): string {
   return (
-    "SELECT table_schema, table_name, index_name, NOT non_unique AS is_unique, " +
-    "index_name = 'PRIMARY' AS is_primary, column_name " +
+    "SELECT table_schema AS table_schema, table_name AS table_name, index_name AS index_name, " +
+    "NOT non_unique AS is_unique, index_name = 'PRIMARY' AS is_primary, column_name AS column_name " +
     "FROM information_schema.statistics " +
-    `WHERE ${MYSQL_SCHEMA_EXCLUSION}` +
+    `WHERE ${mysqlSchemaExclusion("table_schema")}` +
     equalsClause("table_schema", selector.schema, "schema", "mysql") +
     equalsClause("table_name", selector.table, "table", "mysql") +
     " ORDER BY table_schema, table_name, index_name, seq_in_index"
@@ -1062,13 +1076,13 @@ function composeMysqlIndexes(selector: AgentCatalogSelector): string {
  *
  * Nothing here scans: it is a catalog read like every other statistics composition,
  * which is what lets a plan run be pointed at production. Measured on both engines
- * as `agent_ro`.
+ * as `libredb_agent`.
  */
 function composeMysqlStatistics(selector: AgentCatalogSelector): string {
   return (
-    "SELECT table_schema, table_name, table_rows AS estimated_rows " +
+    "SELECT table_schema AS table_schema, table_name AS table_name, table_rows AS estimated_rows " +
     "FROM information_schema.tables " +
-    `WHERE table_type = 'BASE TABLE' AND ${MYSQL_SCHEMA_EXCLUSION}` +
+    `WHERE table_type = 'BASE TABLE' AND ${mysqlSchemaExclusion("table_schema")}` +
     equalsClause("table_schema", selector.schema, "schema", "mysql") +
     equalsClause("table_name", selector.table, "table", "mysql") +
     " ORDER BY table_schema, table_name"

@@ -43,4 +43,10 @@ CREATE USER 'libredb_agent'@'%' IDENTIFIED BY 'libredb_agent';
 
 GRANT SELECT ON app.* TO 'libredb_agent'@'%';
 
+-- SHOW VIEW, because the agent's estimating plan reads through views: without it
+-- `EXPLAIN FORMAT=JSON SELECT * FROM app.order_summary` is refused with 1345, measured on
+-- MySQL 26.7.0 and MariaDB 12.3.2. It writes nothing (CREATE VIEW and ALTER VIEW still
+-- answer 1142), and the profile admits it beside SELECT.
+GRANT SHOW VIEW ON app.* TO 'libredb_agent'@'%';
+
 SHOW GRANTS FOR 'libredb_agent'@'%';

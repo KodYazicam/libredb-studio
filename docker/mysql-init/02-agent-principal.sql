@@ -19,7 +19,7 @@
 -- with 1792, but `CREATE TABLE`, `DROP`, `TRUNCATE`, `GRANT` and `SET GLOBAL` all go
 -- THROUGH, because each causes an implicit commit that ends the read-only transaction
 -- first. So the first layer of the agent profile on this engine is the PRINCIPAL:
--- `MySQLProvider.assertAgentPrincipalIsUnprivileged` reads `SHOW GRANTS` at open and
+-- `MySQLProvider.assertAgentPrincipalIsUnprivileged` reads `SHOW GRANTS` before the first read and
 -- admits `USAGE` and `SELECT` alone, and a principal holding anything else is refused
 -- with `PROFILE_PRIVILEGES_TOO_BROAD` rather than a bounded run.
 --
@@ -50,7 +50,7 @@
 -- The wire-compatible relatives of this protocol (TiDB, StarRocks, Doris, Vitess,
 -- OceanBase, SingleStore, Percona) are NOT admitted by the profile even where they
 -- accept these grants: the enforcement was measured on MySQL and MariaDB only, and the
--- ones that self-identify are refused at open. `docs/providers/mysql.md` records which
+-- ones that self-identify are refused before the first read. `docs/providers/mysql.md` records which
 -- of them cannot be told apart from MySQL by their version string at all.
 
 -- ============================================================================
@@ -65,6 +65,12 @@ DROP USER IF EXISTS 'libredb_agent'@'%';
 CREATE USER 'libredb_agent'@'%' IDENTIFIED BY 'libredb_agent';
 
 GRANT SELECT ON app.* TO 'libredb_agent'@'%';
+
+-- SHOW VIEW, because the agent's estimating plan reads through views: without it
+-- `EXPLAIN FORMAT=JSON SELECT * FROM app.order_summary` is refused with 1345, measured on
+-- MySQL 26.7.0 and MariaDB 12.3.2. It writes nothing (CREATE VIEW and ALTER VIEW still
+-- answer 1142), and the profile admits it beside SELECT.
+GRANT SHOW VIEW ON app.* TO 'libredb_agent'@'%';
 
 -- What the principal ended up with, printed by the file that made it. A grant that
 -- silently did not land reads exactly like one that did, and the profile's refusal at
