@@ -2478,6 +2478,39 @@ describe("a resources recommendation folds", () => {
     expect(view.items[1]?.applySql).toBeUndefined();
   });
 
+  test("a mongo index recommendation is data the user applies in their own tool, never an editor statement", () => {
+    // The mongo card (issue #1614): no statement to hand the editor, because the editor's command
+    // envelope creates no index - the collection, the keys and the options ARE the recommendation,
+    // quoted in the engine's own spelling of a createIndexes call, and offered to nothing.
+    const view = foldLedgerEntries([
+      OPENED,
+      event({
+        kind: "event",
+        event: {
+          kind: "recommendation",
+          atMs: 6,
+          change: "index",
+          collection: "orders",
+          keys: { customer: 1, status: -1 },
+          rationale: "The plan reads a COLLSCAN on a filtered customer.",
+          evidence: [{ source: "artifact", correlationId: "p1" }],
+        },
+      } as AgentLedgerEntry & { kind: "event" }),
+    ]);
+
+    expect(view.items).toHaveLength(2);
+    expect(view.items[1]).toMatchObject({
+      tone: "progress",
+      headline: "Index recommended",
+      detail: "The plan reads a COLLSCAN on a filtered customer. Not applied: nothing here runs this statement.",
+    });
+    const quoted = String(view.items[1]?.quoted);
+    expect(quoted).toContain('"createIndexes":"orders"');
+    expect(quoted).toContain('"customer":1');
+    expect(quoted).toContain('"status":-1');
+    expect(view.items[1]?.applySql).toBeUndefined();
+  });
+
   test("a side with nothing set reads as unset, and a half-set side names the missing half", () => {
     const view = foldLedgerEntries([
       OPENED,
