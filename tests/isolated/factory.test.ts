@@ -851,7 +851,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists milvus among the supported types, before qdrant and the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, rabbitmq, kubernetes, libredb$/,
+      /Supported types: .*\bneo4j, milvus, qdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, sparkplug, libredb$/,
     );
   });
 
@@ -917,7 +917,7 @@ describe("createDatabaseProvider", () => {
   test("the factory error lists s3 between qdrant and kubernetes, kubernetes before the embedded store", async () => {
     const conn = makeConnection("not-an-engine");
     await expect(createDatabaseProvider(conn)).rejects.toThrow(
-      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, rabbitmq, kubernetes, libredb$/,
+      /Supported types: .*\bqdrant, s3, mqtt, opcua, mtconnect, modbus, snmp, rabbitmq, kubernetes, netconf, sparkplug, libredb$/,
     );
   });
 
@@ -1029,6 +1029,10 @@ describe("createDatabaseProvider", () => {
       "kafka",
       "libredb",
       "libsql",
+      // No cancel either, and for a reason of its own: a read is one exchange at a time on a
+      // connection this provider does not hold open, and Modbus has no request that stops one in
+      // flight - the five requests MB-S1 allows are four reads and the identification read (#1723).
+      "modbus",
       "mongodb",
       // No cancel: a read is one subscription with its own budget, and there is no statement to stop.
       "mqtt",
@@ -1036,11 +1040,22 @@ describe("createDatabaseProvider", () => {
       // instead, at most 16 MiB a request and one request at a time per agent, and MTConnect's
       // interface has no request that stops one in flight (#1722).
       "mtconnect",
+      // No cancel either, and the reason is the protocol's: RFC 6241 has no operation that stops a
+      // read in flight, and this provider holds one request per session, so there is nothing to
+      // cancel and nothing to cancel it with. A read is bounded instead, by the session's deadline
+      // and the framing's byte cap (#1724).
+      "netconf",
       // No cancel either: a read is bounded instead, at most 200 nodes or 500 values a request, and
       // the protocol has no service that stops one in flight (#1677).
+      // No cancel: the eight read services the seam names have no Cancel among them.
       "opcua",
       "opensearch",
       "redis",
+      // No cancel either, and the reason is UDP's: a Get is one datagram out and one back, with
+      // nothing in RFC 3416 that stops one in flight. A read is bounded instead, by the walk's
+      // budget and by what one datagram can carry (#1721).
+      "snmp",
+      "sparkplug",
     ]);
   });
 });
