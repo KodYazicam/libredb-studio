@@ -135,7 +135,7 @@ export function assertAgentEngineIsAdmissible(buildInfo: Document, hosts: readon
 }
 
 /**
- * The privileges of the user the session authenticated, held to reads of `boundDatabase` (decision D1 on #1614):
+ * The privileges of the user the session authenticated, held to reads of `boundDatabase`, the scope #1614 settled on:
  * every resource is one collection of that database, as `{db, collection}`, a `system.*` collection only when it is
  * `system.js`; every action is one of `MONGO_AGENT_READ_ACTIONS`. A cluster, `anyResource` or `system_buckets`
  * resource, a `db: ""` wildcard and every other database are refused, naming the action and the resource, in the

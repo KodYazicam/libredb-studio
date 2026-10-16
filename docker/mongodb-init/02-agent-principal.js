@@ -5,11 +5,12 @@
 // before an edit here takes effect - the same rule 01-object-fixture.js states.
 //
 // The user holds exactly the `read` role, on exactly the `app` database, and nothing else.
-// That is the shape the profile's negative write probe proves at open: a write it attempts
-// into this server must come back refused with an authorization error (code 13), because
-// the ROLE, not this file, is what the boundary rests on. A server started without `--auth`
-// enforces nothing (measured 2026-09-27: a user holding only `read` wrote with `insertOne`
-// and with `$out`), which is exactly what the probe exists to catch rather than trust.
+// That is the shape the profile admits at open: it reads this user's privileges, which must
+// all be reads of the database the connection is bound to, and asks the server to refuse a
+// delete that matches nothing, which changes nothing on any outcome. The server's refusal
+// (code 13) is the proof that it enforces the role; a server started without `--auth`
+// enforces nothing (measured on 9.0.4: a user holding only `read` wrote with `insertOne`),
+// and accepts the delete, so the profile refuses it.
 //
 // The `app` database's own documents come from 01-object-fixture.js; the principal adds no
 // data, because a write through this account is the one thing the profile must not do.

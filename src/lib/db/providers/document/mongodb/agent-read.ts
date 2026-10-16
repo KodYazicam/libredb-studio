@@ -9,16 +9,17 @@
  * - **A server-side row bound.** A `find`'s limit is one past the row budget, or the command's own when it is smaller;
  *   an `aggregate` carries a trailing `$limit` of one past it. The extra row is the refusal's signal.
  * - **A streamed read, counted in BSON bytes.** A cursor is read one raw document at a time: the crossing row is the
- *   row budget's refusal, and each document's own BSON size is added to the byte budget before it is decoded, so the
- *   document that crosses it is never decoded (decision D7 on #1614). An admitted document is decoded as the driver
- *   decodes one and kept only as its served row, so memory holds the budget's rows and one batch, not the result.
+ *   row budget's refusal, and each document's own BSON size is added to the byte budget before it is decoded (the
+ *   measure issue #1614 settled on), so the document that crosses it is never decoded. An admitted document is
+ *   decoded as the driver decodes one and kept only as its served row, so memory holds the budget's rows and one
+ *   batch, not the result.
  *   A `distinct` answers one reply, which the server holds to 16 MiB; the driver decodes it, and it is refused past
  *   the row budget before any row is built and past the byte budget on the crossing row.
  * - **An owned deadline.** Every call carries `maxTimeMS`, the server's own deadline, and runs in a session this
  *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor,
  *   and a lost server is a connection failure rather than a fault in the statement.
  * - **The bound database.** A run reads the database its connection is bound to; a command naming another is refused
- *   before anything is sent (decision D9 on #1614).
+ *   before anything is sent, as issue #1614 settled.
  *
  * What matches the editor's `query()` for the same text, and what differs on purpose: the envelope and its parse are
  * the editor's, and so is the serialization of every value; the bounds are the run's own. The editor answers a `find`

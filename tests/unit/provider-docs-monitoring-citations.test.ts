@@ -244,6 +244,8 @@ const NAMED_CITATIONS = [
       "buildConnectionString",
       "getDatabaseName",
       "query",
+      "queryReadOnly",
+      "readCatalogReadOnly",
       "parseQuery",
       "serializeDocument",
       "getHealth",
