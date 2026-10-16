@@ -2721,6 +2721,37 @@ describe("MongoDBProvider", () => {
       await profiled.disconnect();
     });
 
+    test("a malformed limit, a mixed wrapper and an unreadable wrapper are refused before any cursor opens", async () => {
+      const profiled = profiledProvider();
+      await profiled.connect();
+      mongoFoundCollections = [];
+      await expect(profiled.queryReadOnly(envelope("find", { options: { limit: 0.5 } }), budget)).rejects.toThrow(
+        /"limit" must be a whole number of at least 1/,
+      );
+      await expect(
+        profiled.queryReadOnly(
+          envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0", other: 1 } } }),
+          budget,
+        ),
+      ).rejects.toThrow(/\$oid must be the only key of its object, and this one also has other/);
+      // The reader admits the wrapper's shape; its value is the reviver's to read, before anything is sent.
+      await expect(
+        profiled.queryReadOnly(envelope("find", { filter: { _id: { $oid: "zz" } } }), budget),
+      ).rejects.toThrow(/Invalid Extended JSON in the query at "filter._id"/);
+      expect(mongoFoundCollections).toEqual([]);
+      await profiled.disconnect();
+    });
+
+    test("an Extended JSON value reaches the driver as the BSON value it names", async () => {
+      const profiled = profiledProvider();
+      await profiled.connect();
+      await profiled.queryReadOnly(envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0" } } }), budget);
+      const filter = mongoDriverArgs.find?.[0] as { _id: { _bsontype?: string; toHexString(): string } };
+      expect(filter._id._bsontype).toBe("ObjectId");
+      expect(filter._id.toHexString()).toBe("65f0a1b2c3d4e5f6a7b8c9d0");
+      await profiled.disconnect();
+    });
+
     test("the provider re-admits and refuses the JavaScript operators the fence refuses", async () => {
       const profiled = profiledProvider();
       await profiled.connect();

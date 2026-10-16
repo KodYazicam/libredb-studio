@@ -1,23 +1,113 @@
 /**
  * The agent's admission of one MongoDB statement (issue #1614).
  *
- * The fence is the model-facing half of the boundary: what it admits is the envelope the editor runs, and what it
- * refuses is refused WITH the sentence a model can act on. These tests hold each refusal code to its sentence and
- * each admitted shape to the editor's own grammar, so a drift in either direction is a red test rather than a
- * run-time surprise.
- *
- * The provider's own re-admission of the same text is held in `mongodb-provider.test.ts`'s profile block: the two
- * must refuse the same text, and the provider test says so.
+ * The admission is the command reader (`readMongoCommand` in `envelope.ts`) plus one refusal of the agent's own, the
+ * 4,096-character contract. These tests hold the admission to the reader, so the tool path and the provider, which
+ * reads the same text with the same reader, cannot refuse two different sets of commands; and each refusal code to the
+ * sentence a model can act on. The reader's own grammar is held in `tests/unit/db/mongodb/envelope.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import {
   admitMongoStatement,
   MONGO_AGENT_MAX_STATEMENT_CHARS,
+  type MongoAdmissionCode,
   mongoAgentReadInput,
 } from "@/lib/db/operations/mongo-admission";
+import { readMongoCommand } from "@/lib/db/providers/document/mongodb/envelope";
 
 const envelope = (operation: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ collection: "orders", operation, ...extra });
+
+describe("admitMongoStatement is the command reader", () => {
+  /** One command of each shape the reader admits, and one of each code it refuses with. */
+  const COMMANDS = [
+    envelope("find", { filter: { status: "shipped" }, options: { projection: { total: 1 }, sort: { total: -1 } } }),
+    envelope("findOne", { filter: { status: "shipped" } }),
+    envelope("aggregate", { pipeline: [{ $match: { status: "shipped" } }, { $group: { _id: "$customer" } }] }),
+    envelope("count", { filter: { status: "shipped" } }),
+    envelope("distinct", { field: "customer" }),
+    "db.orders.find({})",
+    "[]",
+    envelope("find", { flter: {} }),
+    '{"operation": "find"}',
+    '{"collection": "orders"}',
+    envelope("insertOne", { documents: [{ a: 1 }] }),
+    envelope("find", { documents: [{ a: 1 }] }),
+    envelope("aggregate", { pipeline: "not-an-array" }),
+    envelope("aggregate", { pipeline: [{ $out: "elsewhere" }] }),
+    envelope("aggregate", { pipeline: [{ $collStats: {} }] }),
+    envelope("find", { filter: { $where: "this.total > 5" } }),
+    envelope("find", { options: { projection: { x: { $_internalJsEmit: {} } } } }),
+    envelope("find", { filter: ["not", "an", "object"] }),
+    envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0", other: 1 } } }),
+    envelope("distinct"),
+    envelope("find", { options: { limit: "fifty" } }),
+    envelope("find", { database: "" }),
+  ];
+
+  test("admits exactly what the reader admits, and refuses the rest with the reader's code and sentence", () => {
+    const codes = new Set<string>();
+    for (const text of COMMANDS) {
+      const reading = readMongoCommand(text);
+      if (reading.ok) {
+        expect(admitMongoStatement(text)).toBeNull();
+      } else {
+        codes.add(reading.code);
+        expect(admitMongoStatement(text)).toEqual({ code: reading.code, message: reading.message });
+      }
+    }
+    // Every refusal code the reader has is driven above, so a code the admission rewrote would show here.
+    expect([...codes].sort()).toEqual([
+      "bad-database",
+      "bad-extended-json",
+      "bad-filter",
+      "bad-options",
+      "bad-pipeline",
+      "internal-operator",
+      "missing-collection",
+      "missing-field",
+      "missing-operation",
+      "non-read-operation",
+      "not-json",
+      "not-one-command",
+      "pipeline-stage",
+      "pipeline-writes",
+      "server-side-javascript",
+      "unknown-key",
+      "write-payload",
+    ]);
+  });
+
+  test("refuses the limits a cursor would misread and the keys the read would drop", () => {
+    const refusals: [string, MongoAdmissionCode][] = [
+      [envelope("find", { options: { limit: 0 } }), "bad-options"],
+      ['{"collection": "orders", "operation": "find", "options": {"limit": -0}}', "bad-options"],
+      [envelope("find", { options: { limit: 0.5 } }), "bad-options"],
+      [envelope("find", { options: { limit: -1 } }), "bad-options"],
+      [envelope("find", { options: { limit: { $numberLong: "5" } } }), "bad-options"],
+      [envelope("findOne", { options: { sort: { total: -1 } } }), "unknown-key"],
+      [envelope("aggregate", { filter: { status: "shipped" }, pipeline: [] }), "unknown-key"],
+      [envelope("find", { pipeline: [] }), "unknown-key"],
+      [envelope("find", { field: "customer" }), "unknown-key"],
+      [envelope("find", { options: { noCursorTimeout: true } }), "unknown-key"],
+    ];
+    for (const [text, code] of refusals) expect(admitMongoStatement(text)?.code).toBe(code);
+  });
+
+  test("the length contract is the agent's own: a command the reader admits is refused past it", () => {
+    const long = envelope("find", { filter: { pad: "x".repeat(MONGO_AGENT_MAX_STATEMENT_CHARS) } });
+    expect(readMongoCommand(long).ok).toBe(true);
+    expect(admitMongoStatement(long)).toEqual({
+      code: "agent-too-large",
+      message: `The statement is longer than ${MONGO_AGENT_MAX_STATEMENT_CHARS} characters, the most an agent read takes: narrow the filter or the pipeline. Nothing was sent.`,
+    });
+    // Exactly at the contract is admitted.
+    const filler = "x".repeat(MONGO_AGENT_MAX_STATEMENT_CHARS - envelope("find", { filter: { pad: "" } }).length);
+    const atLimit = envelope("find", { filter: { pad: filler } });
+    expect(atLimit.length).toBe(MONGO_AGENT_MAX_STATEMENT_CHARS);
+    expect(admitMongoStatement(atLimit)).toBeNull();
+  });
+});
 
 describe("admitMongoStatement", () => {
   test("admits each of the five read operations, with and without a filter", () => {

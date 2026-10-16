@@ -21,7 +21,7 @@
 | **Transactions** | ❌ no explicit begin/commit/rollback API |
 | **Query cancellation** | ❌ no `cancelQuery` (operations can be killed via maintenance `killOp`) |
 | **SSL** | Yes — `connection.ssl` → `tls` + Node's `ca`/`cert`/`key` ([§4.1](#41-ssl--tls)) |
-| **Source** | [`src/lib/db/providers/document/mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts) |
+| **Source** | [`src/lib/db/providers/document/mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts) |
 | **Tests** | [`tests/integration/db/mongodb-provider.test.ts`](../../tests/integration/db/mongodb-provider.test.ts) |
 
 ---
@@ -66,7 +66,7 @@ Loaded on demand by `createDatabaseProvider()` ([`factory.ts`](../../src/lib/db/
 ```ts
 case 'mongodb': {
   const { MongoDBProvider } = await import('./providers/document/mongodb');
-  return new MongoDBProvider(connection, options);
+  return new MongoDBProvider(connection, options, execution);
 }
 ```
 
@@ -76,8 +76,8 @@ case 'mongodb': {
 
 ### 3.1 JSON / MQL query format
 
-`query()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) accepts a JSON object,
-parsed by `parseQuery()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)), which
+`query()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)) accepts a JSON object,
+parsed by `parseQuery()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)), which
 requires `collection` and `operation`:
 
 ```json
@@ -148,7 +148,7 @@ cannot read as a document with a string `operation` (mongosh syntax such as
 
 ### 3.2 BSON serialization for the grid
 
-`serializeDocument()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) recursively
+`serializeDocument()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)) recursively
 normalises BSON types so documents render in the JSON grid: `ObjectId` → string, `Decimal128` →
 string, `Date` → ISO-8601, `Binary` → `<Binary: N bytes>` (placeholder, not the raw bytes), and
 nested objects/arrays are walked recursively, an array's entries by the same rules as a field. The
@@ -166,9 +166,9 @@ bigint past 2^53 as its digits) ([§3.1](#extended-json-in-the-query)).
 
 ### 3.3 Sampling-based schema inference, nested to three levels
 
-MongoDB has no fixed schema, so the object surface ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+MongoDB has no fixed schema, so the object surface ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts))
 **infers** one: it lists collections (skipping `system.*`, capped at 200), and for each samples the
-first **100 documents** to derive field types ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)).
+first **100 documents** to derive field types ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)).
 Caveats baked into this approach:
 - Fields absent from the sample (or appearing only in unsampled documents) won't show.
 - **Subdocuments are expanded into dotted paths**, to `MAX_NESTED_FIELD_DEPTH = 3` counting the top
@@ -238,7 +238,7 @@ Caveats baked into this approach:
 ### 3.4 `find` is capped at 100; `aggregate` is not
 
 A `find` with no explicit `options.limit` is capped at **100** documents
-([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)). **`aggregate` passes none of
+([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)). **`aggregate` passes none of
 `options` to the cursor** (no `limit`/`skip`) and has no default cap, so a pipeline without a
 `$limit` stage can return an unbounded result set.
 
@@ -252,7 +252,7 @@ The `unlimited` option is **not** honoured; see [Known limitations](#13-known-li
 ## 4. Connection
 
 `connectionString` is used **directly** (this is a genuine connection-string provider, unlike
-SQL Server). `buildConnectionString()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+SQL Server). `buildConnectionString()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts))
 returns `config.connectionString` if present, else assembles
 `mongodb://<user>:<password>@<host>:<port>/<database>[?authSource=<authSource>]` (credentials and
 the auth database are URL-encoded; the `<user>:<password>@` segment is omitted when no credentials
@@ -283,7 +283,7 @@ const c = { id: 'mg-1', name: 'App', type: 'mongodb',
   user: 'app', password: 'secret', authSource: 'admin', createdAt: new Date() };
 ```
 
-`validate()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) requires either a
+`validate()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)) requires either a
 `connectionString` or a `host`.
 `database` is optional in both modes (#843): it is only the default for a statement that names no database, and every statement the product writes names its own.
 `connect()` builds a `MongoClient` whose built-in
@@ -295,7 +295,7 @@ pool is configured from `ProviderOptions.pool`:
 | `minPoolSize` | `pool.min` |
 | `maxIdleTimeMS` | `pool.idleTimeout` |
 | `connectTimeoutMS` | `pool.acquireTimeout` |
-| `serverSelectionTimeoutMS` | 30 s, a constant in `mongodb.ts` (`MONGODB_SERVER_SELECTION_TIMEOUT_MS`), not configurable |
+| `serverSelectionTimeoutMS` | 30 s, a constant in `mongodb/index.ts` (`MONGODB_SERVER_SELECTION_TIMEOUT_MS`), not configurable |
 
 The database name comes from `config.database`, else from the connection string's path (after the authority, so `mongodb://host:27017` names none), else
 defaults to `test`, the driver's own default; it is the database a statement with no `database` key reads.
@@ -319,7 +319,7 @@ an unplanned primary loss waits the election out instead of failing at the deadl
 ceiling under abnormal discovery, not a latency budget: a healthy deployment selects a server well
 before it, and a closed port used to be reported only after the full 30 s, half the old
 minute. The value is a constant in
-[`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts) rather than a second pool field,
+[`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts) rather than a second pool field,
 because it governs the whole client and not only the connect; `connectTimeoutMS` keeps following
 `pool.acquireTimeout` for the pool's own dial.
 
@@ -348,7 +348,7 @@ run to measure it here.
 
 ### 4.1 SSL / TLS
 
-`buildTLSOptions()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)) maps
+`buildTLSOptions()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)) maps
 `connection.ssl` onto the driver's TLS options. `tls`, `ca`, `cert`, `key` and `rejectUnauthorized`
 are all on the driver's own allow-list (`LEGAL_TLS_SOCKET_OPTIONS` in `mongodb/lib/cmap/connect.js`)
 and reach `tls.connect` under Node's names, so the material maps exactly as it does for PostgreSQL,
@@ -409,7 +409,7 @@ before the mode reached the driver `require` failed the same way `disable` does.
 ## 5. Query interface
 
 `query(jsonString)` parses the MQL object and dispatches on `operation`
-([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)). Reads (`find`/`findOne`/
+([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)). Reads (`find`/`findOne`/
 `aggregate`/`count`/`distinct`) return documents; writes return an acknowledgement summary
 (`insertedId`/`modifiedCount`/`deletedCount`, …). `rowCount = rows.length || affectedCount`, and
 every returned document passes through `serializeDocument()`. There is no `prepareQuery` limit
@@ -1088,7 +1088,7 @@ something was measured:
 
 ## 8. Maintenance
 
-`runMaintenance(type, target?, container?)` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+`runMaintenance(type, target?, container?)` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts))
 maps the generic operations onto MongoDB admin commands:
 
 A `container` is a DATABASE name (#772). The provider is bound to one database and no admin command
@@ -1173,7 +1173,7 @@ request here.
 
 ## 9. Capabilities & labels
 
-### `getCapabilities()` ([`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+### `getCapabilities()` ([`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts))
 
 | Capability | Value |
 |------------|-------|
@@ -1198,7 +1198,7 @@ request here.
 `schemaRefreshPattern` matches write operations in the JSON query so the UI refreshes collections
 after inserts/updates/deletes.
 
-### Labels — overridden (`getLabels()`, [`mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts))
+### Labels — overridden (`getLabels()`, [`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts))
 
 Document vocabulary: entity → *Collection*, row → *document*, select → *Find Documents*, analyze →
 *Validate Collection*, vacuum → *Compact Collection*, search → *Search collections or fields…*.
@@ -1329,7 +1329,7 @@ Over the API: `POST /api/db/query` (JSON MQL in the `sql` field) and `POST /api/
 ### The agent read-only execution profile (issue #1614)
 
 Agent mode executes on MongoDB through `queryReadOnly`, under a boundary the SERVER holds, in
-five stated layers ([`mongodb-agent.ts`](../../src/lib/db/providers/document/mongodb-agent.ts),
+five stated layers ([`agent-boundary.ts`](../../src/lib/db/providers/document/mongodb/agent-boundary.ts), [`agent-read.ts`](../../src/lib/db/providers/document/mongodb/agent-read.ts),
 [`mongo-admission.ts`](../../src/lib/db/operations/mongo-admission.ts)):
 
 1. **The principal is proven by a NEGATIVE WRITE PROBE, at the profiled connection's open.**
@@ -1453,7 +1453,7 @@ the profile's one-statement-per-table contract silently is worse than saying so.
 
 - Driver: [`mongodb` (node-mongodb-native)](https://github.com/mongodb/node-mongodb-native)
 - MongoDB manual: [`serverStatus`](https://www.mongodb.com/docs/manual/reference/command/serverStatus/) · [`dbStats`](https://www.mongodb.com/docs/manual/reference/command/dbStats/) — the two commands §7.1–§7.3 read, and the pages the claims about which output fields are guaranteed come from
-- Source: [`src/lib/db/providers/document/mongodb.ts`](../../src/lib/db/providers/document/mongodb.ts)
+- Source: [`src/lib/db/providers/document/mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts)
 - Base class: [`src/lib/db/base-provider.ts`](../../src/lib/db/base-provider.ts)
 - Interface & DTOs: [`src/lib/db/types.ts`](../../src/lib/db/types.ts)
 - Errors: [`src/lib/db/errors.ts`](../../src/lib/db/errors.ts)
