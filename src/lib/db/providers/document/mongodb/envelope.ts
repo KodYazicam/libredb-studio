@@ -12,8 +12,11 @@
  *
  * This is the agent's grammar, not the boundary. The boundary is the connection's user and the server that enforces
  * its privileges: a command this reader admits can still be refused there, and that refusal, not this one, is what
- * keeps a write from happening. What this adds is the sentence a model can act on, before anything is sent. The
- * statements Studio composes for a run are read here too, so they meet the grammar a model's do.
+ * keeps a write from happening. What this adds is the sentence a model can act on, before anything is sent, and the
+ * only refusal of what that server runs for a user holding just read: the JavaScript and internal operators, and the
+ * diagnostic stages the read role grants (measured on 9.0.4 as such a user: `$where`, `$function`, `$accumulator`,
+ * `$_internalJsEmit` and `$_internalJsReduce` ran, and `$collStats` and `$planCacheStats` answered). The statements
+ * Studio composes for a run are read here too, so they meet the grammar a model's do.
  *
  * Driver-free and pure: nothing here imports the driver, so a registry that admits a command loads none of it. Values
  * stay the plain JSON they were written as. An Extended JSON wrapper such as `{"$oid": "..."}` is held here to its one
@@ -157,11 +160,12 @@ const PIPELINE_WRITE_STAGES: ReadonlySet<string> = new Set(["$out", "$merge"]);
  * The operators that run JavaScript on the server: `$where` in a filter, `$function` and `$accumulator` in an
  * expression. The key is the refusal, not its value: a body arrives as code the model wrote. A key that starts with
  * `$` in a filter, a projection or a pipeline is an operator by the engine's own grammar, except where the engine
- * reads the object holding it as data: a `$literal`'s value, and the operand of `$eq`, `$ne`, `$gt`, `$gte`, `$lt`,
- * `$lte` or `$all` in a filter (measured on 9.0.4). The walk refuses these keys, and every `$_` key, there too, on
- * purpose: telling data from operator would make it a second parser of the engine's grammar, so a read is refused even
- * where the engine would have taken the name as data. The operators that only match and compute (`$regex`,
- * `$regexMatch`, `$expr`, `$cond`) are not here.
+ * reads the object holding it as data, as it does (measured on 9.0.4) in a `$literal`'s value and, in a filter, in the
+ * operand of `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` or `$all`, in an embedded document compared for equality and
+ * in a `$jsonSchema` `enum`. The walk refuses these keys, and every `$_` key, there too, on purpose: telling data from
+ * operator would make it a second parser of the engine's grammar, so a read is refused even where the engine would
+ * have taken the name as data. The operators that only match and compute (`$regex`, `$regexMatch`, `$expr`, `$cond`)
+ * are not here.
  */
 const SERVER_SIDE_JAVASCRIPT_OPERATORS: ReadonlySet<string> = new Set(["$where", "$function", "$accumulator"]);
 
@@ -655,7 +659,7 @@ interface JsonNode {
  * Every value of a parsed command with the key it sits under, a key before the values beneath it, siblings in written
  * order. A work list rather than recursion: `JSON.parse` reads a nesting far deeper than a recursive walk's stack
  * (measured on bun 1.4.2: it read 1,000,000 levels, where a recursive walk overflowed at about 16,000 as a generator
- * and at 21,000 to 26,000 as a plain function), and the reader is total over any text it is given.
+ * and at 21,000 to 29,000 as a plain function), and the reader is total over any text it is given.
  */
 function* nodesInWrittenOrder(root: MongoJsonValue): Generator<JsonNode> {
   const pending: JsonNode[] = [{ value: root, path: "" }];

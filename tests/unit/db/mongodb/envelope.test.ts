@@ -2,10 +2,10 @@
  * The reader of one MongoDB read command (issue #1614): the text a model writes, or a statement Studio composes, to a
  * typed read envelope, or to a refusal whose sentence names what to change.
  *
- * Every refusal is held to its code and to a sentence that ends "Nothing was sent.", and every admitted text to the
- * exact envelope the provider reads. A key the reader would let through and the provider would drop, a stage it
- * would let through, or a number the cursor would misread is a red test here, not a confident wrong answer at run
- * time.
+ * Every refusal is held to its code and to a sentence that ends "Nothing was sent.", and an admitted text to the exact
+ * envelope the provider reads wherever its shape is under test, and to admission elsewhere. A key the reader would let
+ * through and the provider would drop, a stage it would let through, or a number the cursor would misread is a red
+ * test here, not a confident wrong answer at run time.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -208,7 +208,11 @@ describe("an admitted command reads as its typed envelope", () => {
 
   test("every read stage is admitted, and the admitted set is exactly those", () => {
     for (const stage of ADMITTED_STAGES) {
-      expect(readMongoCommand(aggregate([{ [stage]: {} }])).ok).toBe(true);
+      expect(admitted(aggregate([{ [stage]: {} }]))).toStrictEqual({
+        operation: "aggregate",
+        collection: "orders",
+        pipeline: [{ [stage]: {} }],
+      });
     }
     expect(new Set(READ_PIPELINE_STAGES)).toEqual(new Set(ADMITTED_STAGES));
   });
@@ -250,7 +254,8 @@ describe("an admitted command reads as its typed envelope", () => {
       filter: { _id: { $oid: "zz" } },
     });
     for (const wrapper of WRAPPERS) {
-      expect(readMongoCommand(command("find", { filter: { at: { $gte: { [wrapper]: "x" } } } })).ok).toBe(true);
+      const filter = { at: { $gte: { [wrapper]: "x" } } };
+      expect(admitted(command("find", { filter }))).toStrictEqual({ operation: "find", collection: "orders", filter });
     }
   });
 });
@@ -343,7 +348,11 @@ describe("numbers a cursor would misread are refused", () => {
         options: { limit: 1, skip: 0 },
       },
     );
-    expect(readMongoCommand(command("find", { options: { limit: Number.MAX_SAFE_INTEGER } })).ok).toBe(true);
+    expect(admitted(command("find", { options: { limit: Number.MAX_SAFE_INTEGER } }))).toStrictEqual({
+      operation: "find",
+      collection: "orders",
+      options: { limit: Number.MAX_SAFE_INTEGER },
+    });
   });
 });
 
@@ -573,8 +582,9 @@ describe("operators that run code, or that the engine keeps to itself, are refus
   });
 
   test("a key the engine would read as data is refused there too, on purpose", () => {
-    // Measured on 9.0.4: the engine takes these keys as data inside a $literal and in the value an $eq compares
-    // against. The reader does not tell data from operator; SERVER_SIDE_JAVASCRIPT_OPERATORS says why.
+    // Measured on 9.0.4: the engine takes these keys as data inside a $literal, in the value an $eq compares against,
+    // in an embedded document a filter compares for equality, and in a $jsonSchema enum. The reader does not tell
+    // data from operator; SERVER_SIDE_JAVASCRIPT_OPERATORS says why.
     const placed: [string, string, string][] = [
       [aggregate([{ $project: { x: { $literal: { $where: "data" } } } }]), "server-side-javascript", "$where"],
       [
@@ -588,19 +598,41 @@ describe("operators that run code, or that the engine keeps to itself, are refus
         "internal-operator",
         "$_internalJsEmit",
       ],
+      [command("find", { filter: { a: { b: { $function: 1 } } } }), "server-side-javascript", "$function"],
+      [aggregate([{ $match: { a: { b: { $where: "data" } } } }]), "server-side-javascript", "$where"],
+      [command("find", { filter: { a: { b: { $_internalJsEmit: 1 } } } }), "internal-operator", "$_internalJsEmit"],
+      [
+        command("count", { filter: { $jsonSchema: { properties: { a: { enum: [{ $where: "data" }] } } } } }),
+        "server-side-javascript",
+        "$where",
+      ],
     ];
     for (const [text, code, key] of placed) expect(refused(text, code)).toStartWith(`"${key}"`);
   });
 
   test("the operators that merely match and compute are admitted", () => {
-    const reads = [
-      command("find", { filter: { status: { $regex: "^sh", $options: "i" } } }),
-      command("find", { filter: { $expr: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } } }),
-      command("find", { filter: { tags: { $in: ["a", "b"] } }, options: { sort: { score: { $meta: "textScore" } } } }),
-      aggregate([{ $project: { ok: { $regexMatch: { input: "$status", regex: "^sh" } } } }]),
-      aggregate([{ $group: { _id: "$customer", n: { $sum: 1 } } }]),
+    // Each read is written as the envelope it must come back as.
+    const reads: MongoReadEnvelope[] = [
+      { operation: "find", collection: "orders", filter: { status: { $regex: "^sh", $options: "i" } } },
+      {
+        operation: "find",
+        collection: "orders",
+        filter: { $expr: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } },
+      },
+      {
+        operation: "find",
+        collection: "orders",
+        filter: { tags: { $in: ["a", "b"] } },
+        options: { sort: { score: { $meta: "textScore" } } },
+      },
+      {
+        operation: "aggregate",
+        collection: "orders",
+        pipeline: [{ $project: { ok: { $regexMatch: { input: "$status", regex: "^sh" } } } }],
+      },
+      { operation: "aggregate", collection: "orders", pipeline: [{ $group: { _id: "$customer", n: { $sum: 1 } } }] },
     ];
-    for (const text of reads) expect(readMongoCommand(text).ok).toBe(true);
+    for (const read of reads) expect(admitted(JSON.stringify(read))).toStrictEqual(read);
   });
 });
 
@@ -688,7 +720,7 @@ describe("the order of the checks decides which sentence a command meets", () =>
 
 describe("the reader is total", () => {
   test("a tree deeper than the call stack is read without throwing, and what it refuses is still found", () => {
-    // 40,000 levels: past the 16,000 to 26,000 at which a recursive walk overflowed bun's stack (measured), and well
+    // 40,000 levels: past the 16,000 to 29,000 at which a recursive walk overflowed bun's stack (measured), and well
     // inside what JSON.parse reads.
     const depth = 40_000;
     const deep = (leaf: string) =>
@@ -696,7 +728,8 @@ describe("the reader is total", () => {
     expect(readMongoCommand(deep("1")).ok).toBe(true);
     refused(deep('{"$where": "true"}'), "server-side-javascript");
     refused(deep('{"$date": "2025-01-01T00:00:00Z", "$lt": 1}'), "bad-extended-json");
-    const nesting = 6_000;
+    // 40,000 nested pipelines: past the 14,000 to 20,000 at which a recursive stage walk overflowed (measured).
+    const nesting = 40_000;
     const stages = `${'[{"$lookup": {"from": "orders", "as": "a", "pipeline": '.repeat(nesting)}[{"$out": "x"}]${"}}]".repeat(nesting)}`;
     refused(`{"collection": "orders", "operation": "aggregate", "pipeline": ${stages}}`, "pipeline-writes");
   });
