@@ -2244,6 +2244,11 @@ describe("MongoDBProvider", () => {
         expect(find.fields).toEqual(["customer", "status", "total"]);
         const findOne = await profiled.queryReadOnly(envelope("findOne"), budget);
         expect(findOne.rows).toEqual([mongoDriver.collectionData[0]]);
+        // A findOne's projection reaches the find it is, beside its limit of 1.
+        await profiled.queryReadOnly(envelope("findOne", { options: { projection: { total: 1 } } }), budget);
+        expect(mongoDriver.cursors.at(-1)?.options).toMatchObject({ projection: { total: 1 }, limit: 1 });
+        await profiled.queryReadOnly(envelope("findOne", { options: {} }), budget);
+        expect(mongoDriver.cursors.at(-1)?.options.projection).toBeUndefined();
         const aggregate = await profiled.queryReadOnly(
           envelope("aggregate", { pipeline: [{ $match: { status: "open" } }] }),
           budget,

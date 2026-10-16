@@ -434,6 +434,13 @@ describe("verifyAgentProfile", () => {
     }
   });
 
+  test("a status that does not say which user the session authenticated as leaves the boundary unproven", async () => {
+    const { client, names } = scriptedClient({ buildInfo: BUILD_INFO["9.0.4"], connectionStatus: { ok: 1 } });
+    const error = await verifyRefusal(client, "PROFILE_PRIVILEGES_TOO_BROAD");
+    expect(error.message).toContain("could not read which user this session authenticated as");
+    expect(names()).toEqual(["buildInfo", "connectionStatus"]);
+  });
+
   test("a buildInfo that fails, other than an unauthenticated connection's refusal, fails the open as it is", async () => {
     const network = Object.assign(new Error("connection destroyed"), { name: "MongoNetworkError" });
     const broken = scriptedClient({ buildInfo: network });
