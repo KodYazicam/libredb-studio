@@ -28,7 +28,8 @@ import type { DatabaseType } from "@/lib/types";
  *  - **the SQLite sentence is read off the engine the start was decided on**, keeps its
  *    exact words, and does not wait for the tick: it is true of the run either way;
  *  - **the terms and the chips are the statement language's own**, as the rail resolved
- *    it: no language is assumed, so a card can never state SQL's session on another engine;
+ *    it: no language is assumed, so a card can never bound SQL's editor run on an engine
+ *    whose answer never reaches the editor;
  *  - **focus moves into the region when it is raised**, which is the announcement a
  *    keyboard user gets that two buttons appeared under a Start that just went
  *    disabled.
@@ -228,15 +229,14 @@ describe("ConsentCard", () => {
       expect(other.getByTestId("agent-consent-bounds").textContent).not.toContain("SQLite");
     });
 
-    // Only SQL replays in the database-enforced read-only session the run's own read used, so only SQL names one.
+    // A kubectl or MongoDB answer is never run in the editor, as its terms say, so no chip may bound an editor run
+    // beside those terms: not SQL's session, not the editor's row limit, not its time limit.
     test.each(["kubectl", "mongo"] as const)(
-      "no session chip is shown for %s, which has no such session",
+      "no editor-run chip is shown for %s, whose answer is never run in the editor",
       (language) => {
         const { getByTestId } = renderCard({ autoExecute: true, engine: null, language });
 
-        const chips = getByTestId("agent-consent-bounds").textContent ?? "";
-        expect(chips).not.toContain("read-only session");
-        expect(chips).toContain(`${AGENT_HANDOVER_BUDGET.maxResultRows} rows`);
+        expect(getByTestId("agent-consent-bounds").textContent).toBe("");
       },
     );
   });

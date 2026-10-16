@@ -59,7 +59,7 @@ export interface ConsentCardProps {
   /**
    * The statement language the rail offered this hand-over in, resolved when the step was
    * raised. The terms and the chips are that language's own: a card that assumed one would
-   * state SQL's read-only session on an engine that has none.
+   * bound SQL's editor run on an engine whose answer never reaches the editor.
    */
   readonly language: AgentStatementLanguageId;
   /** The hand-over decision. OFF is the default, and the caller owns the state. */
@@ -88,20 +88,14 @@ interface HandoverChip {
 }
 
 /**
- * The chip naming the session the editor's run shares with the run's own read, per language,
- * keyed rather than compared like the terms it labels. Only SQL replays in the same
- * database-enforced read-only session; the other languages have no such session to name.
- */
-const SESSION_CHIP: Readonly<Record<AgentStatementLanguageId, readonly HandoverChip[]>> = {
-  sql: [{ text: "same read-only session", tone: "neutral" }],
-  kubectl: [],
-  mongo: [],
-};
-
-/**
- * What the editor hand-over costs, in chips, and every figure read from the budget the
- * server enforces rather than typed here. #425's lesson is that a typed figure outlives the
- * value it described; these are the same numbers `AGENT_HANDOVER_BUDGET` hands the replay.
+ * What the editor hand-over costs, in chips, per language and keyed rather than compared like
+ * the terms they label, with every figure read from the budget the server enforces rather than
+ * typed here. #425's lesson is that a typed figure outlives the value it described; these are
+ * the same numbers `AGENT_HANDOVER_BUDGET` hands the replay.
+ *
+ * Only SQL hands an answer over, and replays it in the same database-enforced read-only
+ * session the run's own read used. A kubectl or MongoDB answer is never run in the editor, as
+ * their terms say, so there is no editor run to bound and no chip to show.
  *
  * "no time limit" is the word for the ceiling, not for an absent field: the plumbing cannot
  * express an absent timeout, so `AGENT_HANDOVER_BUDGET` carries PostgreSQL's own 32-bit
@@ -109,11 +103,15 @@ const SESSION_CHIP: Readonly<Record<AgentStatementLanguageId, readonly HandoverC
  * "no" is the part of the promise that does not hold literally. The terms popover carries
  * that full claim; the chip is its label, and sits beside it.
  */
-const handoverChips = (language: AgentStatementLanguageId): readonly HandoverChip[] => [
-  ...SESSION_CHIP[language],
-  { text: `${AGENT_HANDOVER_BUDGET.maxResultRows} rows`, tone: "neutral" },
-  { text: "no time limit", tone: "warn" },
-];
+const HANDOVER_CHIPS: Readonly<Record<AgentStatementLanguageId, readonly HandoverChip[]>> = {
+  sql: [
+    { text: "same read-only session", tone: "neutral" },
+    { text: `${AGENT_HANDOVER_BUDGET.maxResultRows} rows`, tone: "neutral" },
+    { text: "no time limit", tone: "warn" },
+  ],
+  kubectl: [],
+  mongo: [],
+};
 
 /**
  * The one sentence that is true of SQLite and of nothing else, in the words the budget meter
@@ -242,7 +240,7 @@ export function ConsentCard({
         {autoExecute && (
           <div data-testid="agent-consent-bounds" className="ml-5 flex flex-wrap items-center gap-1">
             {[
-              ...handoverChips(language),
+              ...HANDOVER_CHIPS[language],
               /*
                 The SQLite chip is the label of the sentence below it, not a second opinion:
                 the two are adjacent, so nothing can show the compressed form alone.
