@@ -51,6 +51,7 @@ const FERRETDB_UNKNOWN_FIELD = "authorizedDatabases is an unknown field";
 const { MongoDBProvider } = await import("@/lib/db/providers/document/mongodb");
 const { DatabaseConfigError, ConnectionError, ExecutionProfileError, QueryError } = await import("@/lib/db/errors");
 const { AGENT_VERIFY_MAX_TIME_MS } = await import("@/lib/db/providers/document/mongodb/agent-boundary");
+const { rowBudgetIn } = await import("@/lib/agent/context-snapshot");
 const { assertObjectSurface } = await import("../../helpers/object-surface-conformance");
 const { isSourcePartUnavailable } = await import("@/lib/db/object-kinds");
 
@@ -2226,175 +2227,437 @@ describe("MongoDBProvider", () => {
       });
     });
 
-    test("the five read operations run through the envelope the editor takes", async () => {
-      mongoDriver.collectionData = [
-        { customer: "Ada", status: "shipped", total: 120 },
-        { customer: "Grace", status: "open", total: 80 },
-      ];
-      const profiled = profiledProvider();
-      await profiled.connect();
-      const find = await profiled.queryReadOnly(envelope("find", { filter: { status: "shipped" } }), budget);
-      expect(find.rowCount).toBeGreaterThan(0);
-      const count = await profiled.queryReadOnly(envelope("count"), budget);
-      expect(count.rows).toEqual([{ count: expect.any(Number) }]);
-      const distinct = await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget);
-      expect(distinct.fields).toContain("customer");
-      const aggregate = await profiled.queryReadOnly(
-        envelope("aggregate", { pipeline: [{ $group: { _id: "$customer", n: { $sum: 1 } } }] }),
-        budget,
-      );
-      expect(aggregate.rowCount).toBeGreaterThan(0);
-      await profiled.disconnect();
-    });
+    describe("the read", () => {
+      /** The cursor or command each read opened, with what it was opened with. */
+      const lastCursor = () => mongoDriver.cursors.at(-1) as (typeof mongoDriver.cursors)[number];
 
-    test("a write operation, a write stage and an unknown key are each refused before the engine is reached", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      await expect(profiled.queryReadOnly(envelope("insertOne", { documents: [{ a: 1 }] }), budget)).rejects.toThrow(
-        /not one of the five reads/,
-      );
-      await expect(
-        profiled.queryReadOnly(envelope("aggregate", { pipeline: [{ $out: "elsewhere" }] }), budget),
-      ).rejects.toThrow(/\$out.*writes the pipeline's result/);
-      await expect(profiled.queryReadOnly(envelope("find", { flter: {} }), budget)).rejects.toThrow(
-        /"flter" is not a key the command envelope takes/,
-      );
-      await profiled.disconnect();
-    });
-
-    test("a malformed limit, a mixed wrapper and an unreadable wrapper are refused before any cursor opens", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      mongoDriver.foundCollections = [];
-      await expect(profiled.queryReadOnly(envelope("find", { options: { limit: 0.5 } }), budget)).rejects.toThrow(
-        /"limit" must be a whole number of at least 1/,
-      );
-      await expect(
-        profiled.queryReadOnly(
-          envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0", other: 1 } } }),
+      test("the five read operations answer through the envelope the editor takes", async () => {
+        mongoDriver.collectionData = [
+          { customer: "Ada", status: "shipped", total: 120 },
+          { customer: "Grace", status: "open", total: 80 },
+          { customer: "Ada", status: "open", total: 40 },
+        ];
+        const profiled = profiledProvider();
+        await profiled.connect();
+        const find = await profiled.queryReadOnly(envelope("find", { filter: { status: "shipped" } }), budget);
+        expect(find.rows).toEqual(mongoDriver.collectionData);
+        expect(find.fields).toEqual(["customer", "status", "total"]);
+        const findOne = await profiled.queryReadOnly(envelope("findOne"), budget);
+        expect(findOne.rows).toEqual([mongoDriver.collectionData[0]]);
+        const aggregate = await profiled.queryReadOnly(
+          envelope("aggregate", { pipeline: [{ $match: { status: "open" } }] }),
           budget,
-        ),
-      ).rejects.toThrow(/\$oid must be the only key of its object, and this one also has other/);
-      // The reader admits the wrapper's shape; its value is the reviver's to read, before anything is sent.
-      await expect(
-        profiled.queryReadOnly(envelope("find", { filter: { _id: { $oid: "zz" } } }), budget),
-      ).rejects.toThrow(/Invalid Extended JSON in the query at "filter._id"/);
-      expect(mongoDriver.foundCollections).toEqual([]);
-      await profiled.disconnect();
+        );
+        expect(aggregate.rowCount).toBe(3);
+        const count = await profiled.queryReadOnly(envelope("count"), budget);
+        expect(count.rows).toEqual([{ count: 3 }]);
+        const distinct = await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget);
+        expect(distinct.rows).toEqual([{ customer: "Ada" }, { customer: "Grace" }]);
+        await profiled.disconnect();
+      });
+
+      test("a write operation, a write stage and an unknown key are each refused before the engine is reached", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        await expect(profiled.queryReadOnly(envelope("insertOne", { documents: [{ a: 1 }] }), budget)).rejects.toThrow(
+          /not one of the five reads/,
+        );
+        await expect(
+          profiled.queryReadOnly(envelope("aggregate", { pipeline: [{ $out: "elsewhere" }] }), budget),
+        ).rejects.toThrow(/\$out.*writes the pipeline's result/);
+        await expect(profiled.queryReadOnly(envelope("find", { flter: {} }), budget)).rejects.toThrow(
+          /"flter" is not a key the command envelope takes/,
+        );
+        await profiled.disconnect();
+      });
+
+      test("a malformed limit, a mixed wrapper and an unreadable wrapper are refused before any cursor opens", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        mongoDriver.foundCollections = [];
+        await expect(profiled.queryReadOnly(envelope("find", { options: { limit: 0.5 } }), budget)).rejects.toThrow(
+          /"limit" must be a whole number of at least 1/,
+        );
+        await expect(
+          profiled.queryReadOnly(
+            envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0", other: 1 } } }),
+            budget,
+          ),
+        ).rejects.toThrow(/\$oid must be the only key of its object, and this one also has other/);
+        // The reader admits the wrapper's shape; its value is the reviver's to read, before anything is sent.
+        await expect(
+          profiled.queryReadOnly(envelope("find", { filter: { _id: { $oid: "zz" } } }), budget),
+        ).rejects.toThrow(/Invalid Extended JSON in the query at "filter._id"/);
+        expect(mongoDriver.foundCollections).toEqual([]);
+        await profiled.disconnect();
+      });
+
+      test("an Extended JSON value reaches the driver as the BSON value it names", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        await profiled.queryReadOnly(
+          envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0" } } }),
+          budget,
+        );
+        const filter = mongoDriver.args.find?.[0] as { _id: { _bsontype?: string; toHexString(): string } };
+        expect(filter._id._bsontype).toBe("ObjectId");
+        expect(filter._id.toHexString()).toBe("65f0a1b2c3d4e5f6a7b8c9d0");
+        await profiled.disconnect();
+      });
+
+      test("the provider re-admits and refuses the JavaScript operators the fence refuses", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        // The provider never trusts the caller: a statement that reached queryReadOnly any other way
+        // meets the same admission the model's tool path meets - including the JavaScript operators.
+        await expect(
+          profiled.queryReadOnly(envelope("find", { filter: { $where: "this.total > 5" } }), budget),
+        ).rejects.toThrow(/runs JavaScript this run wrote on the server/);
+        await profiled.disconnect();
+      });
+
+      test("every read carries the server deadline and the agent's comment, in a session it ends", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        const reads = [
+          envelope("find"),
+          envelope("findOne"),
+          envelope("aggregate", { pipeline: [] }),
+          envelope("count"),
+        ];
+        for (const [index, text] of reads.entries()) {
+          for (const mode of ["execute", "estimate-plan"] as const) {
+            await profiled.queryReadOnly(text, budget, mode);
+            const cursor = lastCursor();
+            expect(cursor.options).toMatchObject({ maxTimeMS: 5000, comment: "libredb-studio-agent" });
+            expect((cursor.options.session as { id: unknown }).id).toEqual(mongoDriver.sessions.at(-1)?.id);
+            expect(cursor.options.raw).toBe(mode === "execute");
+            if (mode === "estimate-plan")
+              expect(cursor.explained).toEqual({ verbosity: "queryPlanner", maxTimeMS: 5000 });
+          }
+          expect(mongoDriver.cursors).toHaveLength((index + 1) * 2);
+        }
+        for (const mode of ["execute", "estimate-plan"] as const) {
+          await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget, mode);
+          const { command, options } = mongoDriver.commands.at(-1) as (typeof mongoDriver.commands)[number];
+          expect(command).toMatchObject({ maxTimeMS: 5000, comment: "libredb-studio-agent" });
+          expect(options).toMatchObject({ session: { id: mongoDriver.sessions.at(-1)?.id } });
+        }
+        expect(mongoDriver.sessions.every((session) => session.ended)).toBe(true);
+        await profiled.disconnect();
+      });
+
+      test("a read is bounded one row past the budget server-side, and the crossing row is the refusal", async () => {
+        mongoDriver.collectionData = Array.from({ length: 40 }, (_, i) => ({ id: i }));
+        const profiled = profiledProvider();
+        await profiled.connect();
+        const error = await profiled.queryReadOnly(envelope("find"), budget).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(QueryError);
+        expect((error as Error).message).toBe("Read-only execution exceeded the row budget: 11 rows > 10 allowed");
+        // The sentence is the one the run reads its row-budget advice from.
+        expect(rowBudgetIn((error as Error).message)).toEqual({ projected: 11, allowed: 10 });
+        expect(lastCursor()).toMatchObject({ pulled: 11, closes: 1 });
+        expect(lastCursor().options.limit).toBe(11);
+        // The command's own limit is sent when it is the smaller.
+        await profiled.queryReadOnly(envelope("find", { options: { limit: 3 } }), budget);
+        expect(lastCursor().options.limit).toBe(3);
+        const aggregate = await profiled
+          .queryReadOnly(envelope("aggregate", { pipeline: [{ $match: {} }] }), budget)
+          .catch((caught: unknown) => caught);
+        expect((aggregate as Error).message).toContain("11 rows > 10 allowed");
+        expect(lastCursor().pipeline?.at(-1)).toEqual({ $limit: 11 });
+        // Exactly the budget is admitted.
+        mongoDriver.collectionData = mongoDriver.collectionData.slice(0, 10);
+        expect((await profiled.queryReadOnly(envelope("find"), budget)).rowCount).toBe(10);
+        await profiled.disconnect();
+      });
+
+      test("a result past the byte budget is refused on the document whose bytes cross it", async () => {
+        mongoDriver.collectionData = Array.from({ length: 8 }, () => ({ blob: "x".repeat(400) }));
+        const profiled = profiledProvider();
+        await profiled.connect();
+        const tinyBudget = { statementTimeoutMs: 5000, maxResultRows: 10, maxResultBytes: 512 };
+        await expect(profiled.queryReadOnly(envelope("find"), tinyBudget)).rejects.toThrow(
+          /^Read-only execution exceeded the byte budget: \d+ bytes > 512 allowed$/,
+        );
+        expect(lastCursor()).toMatchObject({ pulled: 2, closes: 1 });
+        await profiled.disconnect();
+      });
+
+      test("a maxTimeMS expiry is the statement deadline, in the sentence the SQL engines established", async () => {
+        mongoDriver.findErrors["testdb.orders"] = mongoServerError(
+          50,
+          "Executor error during find command :: caused by :: operation exceeded time limit",
+        );
+        const profiled = profiledProvider();
+        await profiled.connect();
+        await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow(
+          /deadline of 5000ms and was killed server-side/,
+        );
+        await profiled.disconnect();
+      });
+
+      test("a findOne that matches nothing answers no rows, and a distinct answers its values as rows", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        mongoDriver.collectionData = [];
+        const none = await profiled.queryReadOnly(envelope("findOne", { filter: { customer: "nobody" } }), budget);
+        expect(none.rowCount).toBe(0);
+        // The distinct's reply IS the values, one row per value under the field's name.
+        mongoDriver.collectionData = [{ customer: "Ada" }, { customer: "Grace" }, { customer: "Ada" }];
+        const values = await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget);
+        expect(values.rows).toEqual([{ customer: "Ada" }, { customer: "Grace" }]);
+        expect(values.fields).toEqual(["customer"]);
+        await profiled.disconnect();
+      });
+
+      test("the estimating plan explains the command the read runs, and answers the plan alone", async () => {
+        const profiled = profiledProvider();
+        await profiled.connect();
+        const plan = await profiled.queryReadOnly(
+          envelope("find", { filter: { customer: "Ada" } }),
+          budget,
+          "estimate-plan",
+        );
+        expect(plan.rows).toEqual([
+          {
+            explainVersion: "1",
+            queryPlanner: { namespace: "testdb.orders", winningPlan: { stage: "COLLSCAN" }, rejectedPlans: [] },
+          },
+        ]);
+        expect(lastCursor()).toMatchObject({ kind: "find", filter: { customer: "Ada" }, pulled: 0 });
+        // A count plans the $group it runs, never the count command.
+        await profiled.queryReadOnly(envelope("count", { filter: { customer: "Ada" } }), budget, "estimate-plan");
+        expect(lastCursor().pipeline).toEqual([
+          { $match: { customer: "Ada" } },
+          { $group: { _id: 1, n: { $sum: 1 } } },
+        ]);
+        await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget, "estimate-plan");
+        expect(mongoDriver.commands.at(-1)?.command).toEqual({
+          explain: { distinct: "orders", key: "customer", query: {} },
+          verbosity: "queryPlanner",
+          maxTimeMS: 5000,
+          comment: "libredb-studio-agent",
+        });
+        await profiled.disconnect();
+      });
+
+      test("a run reads the database its connection is bound to, and refuses a command naming another", async () => {
+        // A connection-string connection: the bound database is the URI's path (#1091), not a database field.
+        const bound = new MongoDBProvider(
+          {
+            ...baseConfig,
+            database: undefined,
+            connectionString: "mongodb://reader:secret@db.internal:27017/fromstring",
+          },
+          {},
+          { readOnly: true, sendsStatements: true },
+        );
+        await bound.connect();
+        mongoDriver.openedDatabases = [];
+        mongoDriver.cursors = [];
+        await expect(bound.queryReadOnly(envelope("find", { database: "elsewhere" }), budget)).rejects.toThrow(
+          'This run reads the database "fromstring" its connection is bound to, and "database": "elsewhere" names another, so nothing was sent. Drop the key or name "fromstring".',
+        );
+        expect([mongoDriver.openedDatabases, mongoDriver.cursors]).toEqual([[], []]);
+        await bound.queryReadOnly(envelope("find", { database: "fromstring" }), budget);
+        await bound.queryReadOnly(envelope("find"), budget);
+        expect(mongoDriver.cursors.map(({ namespace }) => namespace)).toEqual([
+          "fromstring.orders",
+          "fromstring.orders",
+        ]);
+        await bound.disconnect();
+      });
+
+      test("a read before the connection is open, or under an invalid budget, is refused with nothing sent", async () => {
+        const profiled = profiledProvider();
+        await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow();
+        await profiled.connect();
+        mongoDriver.sessions = [];
+        for (const invalid of [
+          { ...budget, maxResultRows: 0 },
+          { ...budget, statementTimeoutMs: 1.5 },
+        ]) {
+          await expect(profiled.queryReadOnly(envelope("find"), invalid)).rejects.toThrow(
+            /Read-only execution budget field/,
+          );
+        }
+        expect(mongoDriver.sessions).toEqual([]);
+        await profiled.disconnect();
+      });
     });
 
-    test("an Extended JSON value reaches the driver as the BSON value it names", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      await profiled.queryReadOnly(envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0" } } }), budget);
-      const filter = mongoDriver.args.find?.[0] as { _id: { _bsontype?: string; toHexString(): string } };
-      expect(filter._id._bsontype).toBe("ObjectId");
-      expect(filter._id.toHexString()).toBe("65f0a1b2c3d4e5f6a7b8c9d0");
-      await profiled.disconnect();
-    });
+    describe("the catalog read", () => {
+      /** A connected provider opened to send statements, with the connect's own commands dropped. */
+      const connected = async (overrides: Partial<DatabaseConnection> = {}) => {
+        const profiled = profiledProvider(overrides);
+        await profiled.connect();
+        mongoDriver.commands = [];
+        return profiled;
+      };
 
-    test("the provider re-admits and refuses the JavaScript operators the fence refuses", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      // The provider never trusts the caller: a statement that reached queryReadOnly any other way
-      // meets the same admission the model's tool path meets - including the JavaScript operators.
-      await expect(
-        profiled.queryReadOnly(envelope("find", { filter: { $where: "this.total > 5" } }), budget),
-      ).rejects.toThrow(/runs JavaScript this run wrote on the server/);
-      await profiled.disconnect();
-    });
+      test("lists the bound database's collections and views, never the server's own namespaces", async () => {
+        mongoDriver.collectionsByDb = {
+          testdb: [
+            { name: "users", type: "collection" },
+            { name: "active_users", type: "view" },
+            { name: "system.views", type: "collection" },
+            { name: "Orders", type: "collection" },
+          ],
+        };
+        const profiled = await connected();
+        const listed = await profiled.readCatalogReadOnly!({}, budget);
+        expect(listed).toEqual({
+          kind: "listed",
+          container: "testdb",
+          objects: [
+            { name: "Orders", kind: "collection" },
+            { name: "active_users", kind: "view" },
+            { name: "users", kind: "collection" },
+          ],
+        });
+        const [call] = mongoDriver.listCollectionsCalls;
+        expect(call).toMatchObject({ database: "testdb", filter: {} });
+        expect(call.options).toMatchObject({ nameOnly: true, maxTimeMS: 5000, comment: "libredb-studio-agent" });
+        expect((call.options.session as { id: unknown }).id).toEqual(mongoDriver.sessions.at(-1)?.id);
+        // An empty container is the bound one too.
+        expect(await profiled.readCatalogReadOnly!({ container: "" }, budget)).toEqual(listed);
+        await profiled.disconnect();
+      });
 
-    test("a result past the row budget is the refusal, on the one-past signal", async () => {
-      mongoDriver.collectionData = Array.from({ length: 40 }, (_, i) => ({ id: i }));
-      const profiled = profiledProvider();
-      await profiled.connect();
-      // The mock's cursor answers the whole array whatever limit the provider set - a real
-      // server stops one past the budget - so the refusal fires on what arrived: the
-      // verdict, not the count, is what the provider owns here.
-      await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow(
-        /row budget: \d+ rows > 10 allowed/,
-      );
-      await profiled.disconnect();
-    });
+      test("a container other than the bound database is refused, and nothing is read", async () => {
+        const profiled = await connected();
+        await expect(profiled.readCatalogReadOnly!({ container: "admin" }, budget)).rejects.toThrow(
+          'This run reads the database "testdb" its connection is bound to, and the database "admin" names another, so nothing was sent. Drop the key or name "testdb".',
+        );
+        expect(mongoDriver.listCollectionsCalls).toEqual([]);
+        await profiled.disconnect();
+      });
 
-    test("a maxTimeMS expiry is the statement deadline, in the sentence the SQL engines established", async () => {
-      mongoDriver.findErrors["testdb.orders"] = mongoServerError(
-        50,
-        "Executor error during find command :: caused by :: operation exceeded time limit",
-      );
-      const profiled = profiledProvider();
-      await profiled.connect();
-      await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow(
-        /deadline of 5000ms and was killed server-side/,
-      );
-      await profiled.disconnect();
-    });
+      test("describes one collection: its kind from one listCollections, columns from a sample, indexes, each bounded", async () => {
+        mongoDriver.documentsByNs["testdb.users"] = [
+          { _id: 1, name: "Ada", address: { city: "Istanbul" } },
+          { _id: 2, name: "Grace" },
+        ];
+        const profiled = await connected();
+        const described = await profiled.readCatalogReadOnly!({ object: "users" }, budget);
+        expect(described).toEqual({
+          kind: "described",
+          container: "testdb",
+          object: "users",
+          objectKind: "collection",
+          columns: [
+            { name: "_id", type: "number" },
+            { name: "address", type: "object" },
+            { name: "address.city", type: "string" },
+            { name: "name", type: "string" },
+          ],
+          indexes: [
+            { name: "_id_", columns: ["_id"] },
+            { name: "email_1", columns: ["email"] },
+          ],
+          sampled: 2,
+        });
+        expect(mongoDriver.listCollectionsCalls.map(({ filter }) => filter)).toEqual([{ name: "users" }]);
+        const sample = mongoDriver.cursors.at(-1) as (typeof mongoDriver.cursors)[number];
+        expect(sample).toMatchObject({ kind: "find", namespace: "testdb.users", filter: {}, closes: 1 });
+        expect(sample.options).toMatchObject({
+          limit: 100,
+          raw: true,
+          maxTimeMS: 5000,
+          comment: "libredb-studio-agent",
+        });
+        expect(mongoDriver.listIndexesCalls[0].options).toMatchObject({
+          maxTimeMS: 5000,
+          comment: "libredb-studio-agent",
+        });
+        await profiled.disconnect();
+      });
 
-    test("a findOne that matches nothing answers no rows, and a distinct answers its values as rows", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      // findOne answering null: the arm reads that as no rows, not as an error. The mock's
-      // findOne answers the first document of the collection, so empty is the null case.
-      mongoDriver.collectionData = [];
-      const none = await profiled.queryReadOnly(envelope("findOne", { filter: { customer: "nobody" } }), budget);
-      expect(none.rowCount).toBe(0);
-      mongoDriver.collectionData = [{ customer: "Ada" }, { customer: "Grace" }, { customer: "Ada" }];
-      // The distinct branch: the reply IS the values, one row per value under the field's name.
-      mongoDriver.collectionData = [{ customer: "Ada" }, { customer: "Grace" }, { customer: "Ada" }];
-      const values = await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget);
-      expect(values.rowCount).toBe(2);
-      expect(values.fields).toContain("customer");
-      await profiled.disconnect();
-    });
+      test("a view is described with no indexes, which the server would refuse", async () => {
+        mongoDriver.collectionsByDb = { testdb: [{ name: "active_users", type: "view" }] };
+        mongoDriver.documentsByNs["testdb.active_users"] = [{ name: "Ada" }];
+        const profiled = await connected();
+        const described = await profiled.readCatalogReadOnly!({ object: "active_users" }, budget);
+        expect(described).toMatchObject({ kind: "described", objectKind: "view", indexes: [], sampled: 1 });
+        expect(mongoDriver.listIndexesCalls).toEqual([]);
+        await profiled.disconnect();
+      });
 
-    test("a result past the byte budget is the refusal, on the bytes the rows carry", async () => {
-      mongoDriver.collectionData = Array.from({ length: 8 }, () => ({ blob: "x".repeat(400) }));
-      const profiled = profiledProvider();
-      await profiled.connect();
-      const tinyBudget = { statementTimeoutMs: 5000, maxResultRows: 10, maxResultBytes: 512 };
-      await expect(profiled.queryReadOnly(envelope("find"), tinyBudget)).rejects.toThrow(
-        /byte budget: \d+ bytes > 512 allowed/,
-      );
-      await profiled.disconnect();
-    });
+      test("an object the database does not hold is not found, and a name is taken whole, never split on a dot", async () => {
+        mongoDriver.collectionsByDb = {
+          testdb: [
+            { name: "fs.files", type: "collection" },
+            { name: "system.profile", type: "collection" },
+          ],
+        };
+        const profiled = await connected();
+        expect(await profiled.readCatalogReadOnly!({ object: "orderz" }, budget)).toEqual({
+          kind: "not-found",
+          container: "testdb",
+          object: "orderz",
+        });
+        expect(await profiled.readCatalogReadOnly!({ object: "system.profile" }, budget)).toMatchObject({
+          kind: "not-found",
+        });
+        expect(await profiled.readCatalogReadOnly!({ object: "fs.files" }, budget)).toMatchObject({
+          kind: "described",
+          object: "fs.files",
+        });
+        expect(mongoDriver.cursors.at(-1)?.namespace).toBe("testdb.fs.files");
+        await profiled.disconnect();
+      });
 
-    test("a server that stays silent past the deadline is stopped by the client's own backstop", async () => {
-      // The backstop exists for the silent server: maxTimeMS did not fire, and the client
-      // stops waiting on its own. The mock's find stays in flight long past every deadline,
-      // so only the backstop can end it - the deadline is 20ms, the slack is 2s, the hang 5s.
-      mongoDriver.readDelayMs = 5_000;
-      const profiled = profiledProvider();
-      await profiled.connect();
-      const tinyBudget = { statementTimeoutMs: 20, maxResultRows: 10, maxResultBytes: 512 * 1024 };
-      await expect(profiled.queryReadOnly(envelope("find"), tinyBudget)).rejects.toThrow(
-        /deadline of 20ms and the server did not end it/,
-      );
-      await profiled.disconnect();
-    });
+      test("an object whose sample holds nothing is described with no columns and a sample of 0", async () => {
+        mongoDriver.documentsByNs["testdb.users"] = [];
+        const profiled = await connected();
+        expect(await profiled.readCatalogReadOnly!({ object: "users" }, budget)).toMatchObject({
+          kind: "described",
+          columns: [],
+          sampled: 0,
+        });
+        await profiled.disconnect();
+      });
 
-    test("the estimating plan wraps every operation form the envelope can carry", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      await profiled.queryReadOnly(envelope("aggregate", { pipeline: [] }), budget, "estimate-plan");
-      await profiled.queryReadOnly(envelope("count"), budget, "estimate-plan");
-      await profiled.queryReadOnly(envelope("distinct", { field: "customer" }), budget, "estimate-plan");
-      await profiled.queryReadOnly(envelope("findOne", { filter: {} }), budget, "estimate-plan");
-      // Each form planned: the explain handler answered one row per call, never touching a collection.
-      expect(mongoDriver.cursors).toEqual([]);
-      await profiled.disconnect();
-    });
+      test("the sample stops before the document whose bytes would cross the budget, and the listing is held to the row budget", async () => {
+        mongoDriver.documentsByNs["testdb.users"] = Array.from({ length: 5 }, (_, i) => ({ i, pad: "x".repeat(300) }));
+        const profiled = await connected();
+        const tight = { ...budget, maxResultBytes: 700 };
+        expect(await profiled.readCatalogReadOnly!({ object: "users" }, tight)).toMatchObject({ sampled: 2 });
+        expect(mongoDriver.cursors.at(-1)).toMatchObject({ pulled: 3, closes: 1 });
+        // A first document that alone crosses it is refused: there is nothing honest to infer from.
+        await expect(
+          profiled.readCatalogReadOnly!({ object: "users" }, { ...budget, maxResultBytes: 100 }),
+        ).rejects.toThrow(/exceeded the byte budget/);
+        mongoDriver.collectionsByDb = {
+          testdb: Array.from({ length: 11 }, (_, i) => ({ name: `c${i}`, type: "collection" })),
+        };
+        await expect(profiled.readCatalogReadOnly!({}, budget)).rejects.toThrow("11 rows > 10 allowed");
+        await profiled.disconnect();
+      });
 
-    test("the estimating plan wraps the command in explain and plans without executing", async () => {
-      const profiled = profiledProvider();
-      await profiled.connect();
-      const plan = await profiled.queryReadOnly(
-        envelope("find", { filter: { customer: "Ada" } }),
-        budget,
-        "estimate-plan",
-      );
-      expect(plan.rowCount).toBe(1);
-      expect(plan.rows[0]).toMatchObject({ queryPlanner: { winningPlan: { stage: "COLLSCAN" } } });
-      await profiled.disconnect();
+      test("only a provider opened to send statements answers it", async () => {
+        await provider.connect();
+        await expect(provider.readCatalogReadOnly!({}, budget)).rejects.toThrow(
+          /requires a provider opened under the agent read-only profile/,
+        );
+        const operations = new MongoDBProvider({ ...baseConfig }, {}, { readOnly: true, sendsStatements: false });
+        await operations.connect();
+        await expect(operations.readCatalogReadOnly!({}, budget)).rejects.toThrow(
+          /requires a provider opened under the agent read-only profile/,
+        );
+        await operations.disconnect();
+      });
+
+      test("a catalog the server refuses is the server's own error", async () => {
+        mongoDriver.listCollectionsErrors.testdb = mongoServerError(
+          13,
+          "not authorized on testdb to execute command { listCollections: 1 }",
+        );
+        const profiled = await connected();
+        await expect(profiled.readCatalogReadOnly!({}, budget)).rejects.toThrow("not authorized on testdb");
+        await profiled.disconnect();
+      });
     });
   });
 });

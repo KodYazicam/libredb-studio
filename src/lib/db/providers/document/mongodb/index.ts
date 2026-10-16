@@ -68,12 +68,26 @@ import {
 import { formatBytes } from "../../../utils/pool-manager";
 import { unionFields, uniquelyKeyedRows } from "../../../utils/result-fields";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
-import { AGENT_COMMAND_COMMENT, readMongoForAgent } from "./agent-read";
+import {
+  AGENT_COMMAND_COMMENT,
+  anotherDatabaseRefusal,
+  readMongoForAgent,
+  rowBudgetRefusal,
+  runUnderAgentDeadline,
+  sampleWithinBudget,
+} from "./agent-read";
+import { assertReadOnlyBudget } from "../../sql/read-only-budget";
 import { AGENT_VERIFY_MAX_TIME_MS, agentHostsOf, verifyAgentProfile } from "./agent-boundary";
 import { parseExtendedJson, reviveEnvelope } from "./extended-json";
 import { readMongoCommand } from "./envelope";
 import { bsonTypeOf, serializeMongoDocument, uuidText } from "./values";
-import type { ProviderExecutionContext, ReadOnlyStatementBudget, ReadOnlyStatementMode } from "../../../types";
+import type {
+  ProviderExecutionContext,
+  ReadOnlyCatalogReading,
+  ReadOnlyCatalogSelector,
+  ReadOnlyStatementBudget,
+  ReadOnlyStatementMode,
+} from "../../../types";
 
 /**
  * MongoDB's identity for the shared container-path renderer.
@@ -1258,21 +1272,16 @@ export class MongoDBProvider extends BaseDatabaseProvider {
   /**
    * The agent read-only execution profile's statement path (issue #1614).
    *
-   * The statement is the EDITOR's own command envelope, parsed by the same Extended-JSON
-   * reader `query()` parses it with and admitted by the same fence the run's tool path
-   * admits it through (`mongo-admission.ts`) - the provider re-admits rather than trusts
-   * the caller, so a statement that reached this method any other way meets the same
-   * refusal the model would. The read itself is bounded five ways in `mongodb-agent.ts`:
-   * the five read operations only, `maxTimeMS` as the server's own deadline, `find` and
-   * `aggregate` capped one row past the budget server-side, a client-owned backstop, and
-   * the row and byte verdicts on the assembled result.
+   * The statement is read once, by the command reader the run's tool path admits it with (`readMongoCommand` in
+   * `envelope.ts`): the provider reads the text again rather than trusting the caller, so a statement that reached
+   * this method any other way meets the same refusal the model would. Its Extended JSON values are then revived by the
+   * editor's own rules (`reviveEnvelope`), and the read runs under the profile's bounds (`readMongoForAgent` in
+   * `agent-read.ts`): in the database the connection is bound to, `maxTimeMS` and a deadline this provider owns, a
+   * server-side row bound, and the row and byte budgets on the documents as they arrive.
    *
-   * The connection this runs on was verified at open - the engine identified on the wire
-   * and the principal's inability to write proven by the server's refusal of a probe
-   * write - so what reaches the engine here is bounded by roles the server itself holds.
-   * Refused outside the profile: a provider nobody verified has no boundary to run
-   * agent semantics on, and `query()`'s own envelope accepts writes this path must never
-   * send.
+   * The connection was verified at open (`verifyAgentProfile`): the server is MongoDB, its user holds only reads of
+   * this database, and the server enforces that. Refused outside that profile: a provider nobody verified has no
+   * boundary to run agent semantics on, and `query()`'s own envelope accepts writes this path must never send.
    */
   public async queryReadOnly(
     statement: string,
@@ -1280,13 +1289,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
     mode: ReadOnlyStatementMode = "execute",
   ): Promise<QueryResult> {
     this.ensureConnected();
-    if (!this.readOnlyProfile) {
-      throw new QueryError(
-        "Read-only execution requires a provider opened under the agent read-only profile",
-        "mongodb",
-        statement,
-      );
-    }
+    this.assertOpenedToSendStatements(statement);
     const reading = readMongoCommand(statement);
     if (!reading.ok) {
       throw new QueryError(reading.message, "mongodb", statement);
@@ -1299,6 +1302,79 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       rowCount: read.rowCount,
       executionTime: read.executionTime,
     };
+  }
+
+  /**
+   * The agent's catalog read (`inspect_schema`): the bound database's collections and views, or one of them described,
+   * under the profile's bounds as `queryReadOnly` reads a statement (issue #1614).
+   *
+   * An absent or empty container is the database the connection is bound to (`getDatabaseName()`, so a URI's path
+   * counts), and any other is refused before anything is read. One `listCollections` decides what a named object is,
+   * by the same classifier the editor's object surface uses (`mongoObjectKind`), so a view is never described as a
+   * collection and a namespace the server keeps for itself is not found; the name is taken whole, never split on a
+   * dot. A described object's fields are inferred from a sample of up to `OBJECT_SAMPLE_SIZE` documents by the
+   * editor's own inference, the sample stopping short of the byte budget (`sampleWithinBudget`), and a collection's
+   * indexes are read beside them; a view has none of its own, and `listIndexes` on one is refused. Every command runs
+   * in a session under the deadline `readMongoForAgent` runs under, with `maxTimeMS` and the agent's comment. The
+   * editor's `listObjects` and `describeObject` are unchanged.
+   */
+  public async readCatalogReadOnly(
+    selector: ReadOnlyCatalogSelector,
+    budget: ReadOnlyStatementBudget,
+  ): Promise<ReadOnlyCatalogReading> {
+    const label = JSON.stringify(selector);
+    this.ensureConnected();
+    this.assertOpenedToSendStatements(label);
+    assertReadOnlyBudget(budget, "mongodb");
+    const bound = this.getDatabaseName();
+    const container = selector.container === undefined || selector.container === "" ? bound : selector.container;
+    if (container !== bound) throw anotherDatabaseRefusal(bound, `the database "${container}"`, label);
+    const db = this.client!.db(bound);
+    return runUnderAgentDeadline(this.client!, budget, label, async (session, maxTimeMS, track) => {
+      const options = { session, maxTimeMS, comment: AGENT_COMMAND_COMMENT };
+      const object = selector.object;
+      if (object === undefined) {
+        const infos = await track(db.listCollections({}, { ...options, nameOnly: true })).toArray();
+        const objects = infos
+          .flatMap((info) => {
+            const kind = mongoObjectKind(info);
+            return kind === undefined ? [] : [{ name: readText(info.name), kind }];
+          })
+          .sort((left, right) => comparePaths([left.name], [right.name]));
+        if (objects.length > budget.maxResultRows) throw rowBudgetRefusal(objects.length, budget, label);
+        return { kind: "listed", container: bound, objects };
+      }
+      const [info] = await track(db.listCollections({ name: object }, { ...options, nameOnly: true })).toArray();
+      const objectKind = info === undefined ? undefined : mongoObjectKind(info);
+      if (objectKind === undefined) return { kind: "not-found", container: bound, object };
+      const collection = db.collection(object);
+      const sample = await sampleWithinBudget(
+        track(collection.find({}, { ...options, limit: OBJECT_SAMPLE_SIZE, batchSize: OBJECT_SAMPLE_SIZE, raw: true })),
+        budget,
+        label,
+      );
+      const indexes = objectKind === MONGODB_KIND_VIEW ? [] : await track(collection.listIndexes(options)).toArray();
+      return {
+        kind: "described",
+        container: bound,
+        object,
+        objectKind,
+        columns: this.inferSchemaFromDocuments(sample).map(({ name, type }) => ({ name, type })),
+        indexes: indexes.map((index) => ({ name: readText(index.name), columns: Object.keys(index.key ?? {}) })),
+        sampled: sample.length,
+      };
+    });
+  }
+
+  /** Refuses the agent's reads on a provider not opened to send statements: it carries no proven boundary. */
+  private assertOpenedToSendStatements(statement: string): void {
+    if (!this.readOnlyProfile) {
+      throw new QueryError(
+        "Read-only execution requires a provider opened under the agent read-only profile",
+        "mongodb",
+        statement,
+      );
+    }
   }
 
   private parseQuery(queryStr: string): MongoQuery {

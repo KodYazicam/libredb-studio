@@ -1,27 +1,45 @@
 /**
- * The agent's read-only execution profile for MongoDB (issue #1614): the bounded read itself. The boundary and its
- * proof at open are `agent-boundary.ts`'s.
+ * The agent read-only execution profile's read on MongoDB (issue #1614): one admitted command, read under the budget
+ * the run grants it. The boundary it runs inside is proven at open (`agent-boundary.ts`); this is what keeps one read
+ * bounded once it is sent.
  *
- * **The statement itself is bounded five ways**, each stated where it is enforced:
- * the fence (`mongo-admission.ts`) admits the five read operations of the editor's
- * envelope and refuses the write stages of a pipeline; the driver call carries
- * `maxTimeMS`, the SERVER's own deadline (measured: `code 50` ended a `$where`
- * `sleep()` past its 500 ms budget); the find and aggregate calls are capped at one
- * row past the budget SERVER-SIDE (`limit`, a trailing `$limit`), so an unbounded
- * cursor is never materialised in Node; the client owns a backstop timer for the case
- * the server's deadline does not fire; and the assembled result is refused on the
- * row budget's one-past signal and on the byte budget, which is where a `distinct` -
- * whose reply is the whole array of values, not a cursor - is bounded.
+ * - **One builder.** `openBoundedRead` is the only place a read's command is built, for execute and for the estimating
+ *   plan alike, so the plan the model reads is the plan of the command that runs. A `count` is the `$match` and
+ *   `$group` pipeline the driver's `countDocuments` sends, executed and explained as that.
+ * - **A server-side row bound.** A `find`'s limit is one past the row budget, or the command's own when it is smaller;
+ *   an `aggregate` carries a trailing `$limit` of one past it. The extra row is the refusal's signal.
+ * - **A streamed read, counted in BSON bytes.** A cursor is read one raw document at a time: the crossing row is the
+ *   row budget's refusal, and each document's own BSON size is added to the byte budget before it is decoded, so the
+ *   document that crosses it is never decoded (decision D7 on #1614). An admitted document is decoded as the driver
+ *   decodes one and kept only as its served row, so memory holds the budget's rows and one batch, not the result.
+ *   A `distinct` answers one reply, which the server holds to 16 MiB; the driver decodes it, and it is refused past
+ *   the row budget before any row is built and past the byte budget on the crossing row.
+ * - **An owned deadline.** Every call carries `maxTimeMS`, the server's own deadline, and runs in a session this
+ *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor,
+ *   and a lost server is a connection failure rather than a fault in the statement.
+ * - **The bound database.** A run reads the database its connection is bound to; a command naming another is refused
+ *   before anything is sent (decision D9 on #1614).
  *
- * What this profile does NOT overclaim: MongoDB's profiler, once switched on, writes on
- * every read; `getSlowQueries()` reads `system.profile` and the empty panel is the
- * ordinary case (see the provider's labels). The boundary is about what THIS principal
- * can do, not about what the server records.
+ * What matches the editor's `query()` for the same text, and what differs on purpose: the envelope and its parse are
+ * the editor's, and so is the serialization of every value; the bounds are the run's own. The editor answers a `find`
+ * with no limit with 100 documents and an `aggregate` with every document; the run answers at most its row budget,
+ * and REFUSES a read past it rather than truncating one, so a model is never shown part of an answer as the whole.
  */
-import { QueryError, mapDatabaseError } from "../../../errors";
-import { assertReadOnlyBudget, measureRowBytes } from "../../sql/read-only-budget";
+import {
+  type AggregationCursor,
+  type ClientSession,
+  type Collection,
+  type Document,
+  type FindCursor,
+  type MongoClient,
+} from "mongodb";
+// The BSON parser, reached through a namespace import for the reason `index.ts` gives: bun does not see `BSON` as a
+// named export of the driver's CommonJS entry.
+import * as mongodbDriver from "mongodb";
+import { ConnectionError, QueryError, mapDatabaseError } from "../../../errors";
+import { assertReadOnlyBudget, MAX_STATEMENT_TIMEOUT_MS } from "../../sql/read-only-budget";
 import type { ReadOnlyStatementBudget } from "../../../types";
-import type { Db, Document, MongoClient } from "mongodb";
+import { unionFields, uniquelyKeyedRows } from "../../../utils/result-fields";
 import type { RevivedMongoReadEnvelope } from "./extended-json";
 import { serializeMongoDocument } from "./values";
 
@@ -32,11 +50,53 @@ import { serializeMongoDocument } from "./values";
  */
 export const AGENT_COMMAND_COMMENT = "libredb-studio-agent";
 
-/** The client's backstop: how long after the server's own deadline the owned timer fires. */
-const CLIENT_BACKSTOP_SLACK_MS = 2_000;
+/**
+ * How long past the server's own deadline the provider's timer fires: the server's `maxTimeMS` ends a punctual read
+ * first, so the two never race a correct refusal, and the timer is for a server that did not end it. MySQL's profile
+ * keeps the same second (`AGENT_DEADLINE_BACKSTOP_MS` in `mysql.ts`).
+ */
+export const AGENT_DEADLINE_BACKSTOP_MS = 1_000;
+
+/** How long, after the timer kills the session, the read is given to end before the client stops waiting on it. */
+export const AGENT_KILL_GRACE_MS = 1_000;
+
+/** The deadline's two waits, a parameter so a test of the timer path runs in milliseconds. */
+export interface AgentDeadlineSeams {
+  readonly backstopMs: number;
+  readonly graceMs: number;
+}
+
+const AGENT_DEADLINE_SEAMS: AgentDeadlineSeams = Object.freeze({
+  backstopMs: AGENT_DEADLINE_BACKSTOP_MS,
+  graceMs: AGENT_KILL_GRACE_MS,
+});
 
 /** What a statement past `maxTimeMS` answers (measured: the executor's kill). */
 const MONGO_MAX_TIME_EXPIRED_CODE = 50;
+
+/**
+ * The failures that are the server going away rather than the statement failing, by the driver's class names:
+ * `mapDatabaseError` reads the first two as a timeout and the last as a generic error, and either would let a run
+ * treat a lost server as a statement to repair.
+ */
+const TRANSPORT_FAILURES: ReadonlySet<string> = new Set([
+  "MongoNetworkError",
+  "MongoNetworkTimeoutError",
+  "MongoServerSelectionError",
+]);
+
+/** How the driver decodes a document it hands back, written out because a raw cursor hands back bytes instead. */
+const DRIVER_DECODE = Object.freeze({
+  promoteLongs: true,
+  promoteValues: true,
+  promoteBuffers: false,
+  bsonRegExp: false,
+  useBigInt64: false,
+  validation: { utf8: true },
+});
+
+/** The most documents one batch of an agent read asks the server for. */
+const MAX_BATCH_DOCUMENTS = 100;
 
 /**
  * One read's answer, in the shape the agent pipeline takes from every other engine:
@@ -49,36 +109,17 @@ export interface MongoAgentReadResult {
   readonly executionTime: number;
 }
 
+/** A cursor the deadline closes when it fires. */
+interface Closable {
+  close(): Promise<void>;
+}
+
 /**
  * The server's own deadline on one statement, as `maxTimeMS`. The number is the budget's
  * own, so the deadline a run shows the model is the deadline the server holds.
  */
 function serverDeadline(budget: ReadOnlyStatementBudget): number {
-  return Math.max(1, budget.statementTimeoutMs);
-}
-
-/**
- * The owned backstop: a timer this module fires when the server's own deadline did not.
- * It is granted the slack above the server's deadline so the two never race a correct
- * refusal - the backstop exists for the silent server, not the punctual one - and a
- * cursor it fires under is closed, which ends the iteration on the wire too.
- */
-function withClientBackstop<T>(read: () => Promise<T>, budget: ReadOnlyStatementBudget): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const backstop = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new QueryError(
-            `Read-only execution exceeded the statement deadline of ${budget.statementTimeoutMs}ms and the server did not end it, so the client stopped waiting`,
-            "mongodb",
-            "",
-          ),
-        ),
-      budget.statementTimeoutMs + CLIENT_BACKSTOP_SLACK_MS,
-    );
-  });
-  return Promise.race([read(), backstop]).finally(() => clearTimeout(timer)) as Promise<T>;
+  return budget.statementTimeoutMs;
 }
 
 /** One past the row budget: the extra row is the signal, exactly as the SQL engines use it. */
@@ -86,8 +127,8 @@ function rowBound(budget: ReadOnlyStatementBudget): number {
   return budget.maxResultRows + 1;
 }
 
-/** The row-budget refusal, in the sentence the SQL profile already established. */
-function rowBudgetRefusal(rows: number, budget: ReadOnlyStatementBudget, statement: string): QueryError {
+/** The row-budget refusal, in the sentence the SQL profile established (`rowBudgetIn` in `context-snapshot.ts` reads it). */
+export function rowBudgetRefusal(rows: number, budget: ReadOnlyStatementBudget, statement: string): QueryError {
   return new QueryError(
     `Read-only execution exceeded the row budget: ${rows} rows > ${budget.maxResultRows} allowed`,
     "mongodb",
@@ -95,7 +136,7 @@ function rowBudgetRefusal(rows: number, budget: ReadOnlyStatementBudget, stateme
   );
 }
 
-/** The byte-budget refusal, same sentence, measured on the assembled rows. */
+/** The byte-budget refusal, same sentence, counted in BSON bytes. */
 function byteBudgetRefusal(bytes: number, budget: ReadOnlyStatementBudget, statement: string): QueryError {
   return new QueryError(
     `Read-only execution exceeded the byte budget: ${bytes} bytes > ${budget.maxResultBytes} allowed`,
@@ -104,156 +145,376 @@ function byteBudgetRefusal(bytes: number, budget: ReadOnlyStatementBudget, state
   );
 }
 
+function killedAtDeadline(budget: ReadOnlyStatementBudget, statement: string): QueryError {
+  return new QueryError(
+    `Read-only execution exceeded the statement deadline of ${budget.statementTimeoutMs}ms and was killed server-side`,
+    "mongodb",
+    statement,
+  );
+}
+
+function codeOf(error: unknown): unknown {
+  return typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+}
+
+function isTransportFailure(error: unknown): error is Error {
+  return error instanceof Error && TRANSPORT_FAILURES.has(error.name);
+}
+
+function connectionLost(error: Error): ConnectionError {
+  return new ConnectionError(
+    `The MongoDB server could not be reached while the statement ran: ${error.message}`,
+    "mongodb",
+  );
+}
+
 /**
- * One admitted statement, read under the profile's bounds.
- *
- * The envelope is the EDITOR's own, so what the run executes is what the user's editor
- * runs for the same text, and the hand-over of an auto-executed answer needs no
- * translation. `find` and `aggregate` are capped server-side - `limit` clamped to one
- * past the budget, a trailing `$limit` appended - so the rows a cursor can deliver are
- * bounded before they cross the wire; `distinct`'s reply is the whole array, which the
- * row budget refuses after assembly; `count` answers one number.
- *
- * `mode: "estimate-plan"` wraps the envelope's own operation in the server's `explain`
- * at `queryPlanner` verbosity, which plans and does not execute - the estimate the SQL
- * engines take from an `EXPLAIN`, in this engine's own word.
+ * The refusal of a command naming a database other than the one the run's connection is bound to. `named` is how the
+ * caller named it, `"database": "<name>"` for a command's key, so the sentence quotes what the model wrote.
  */
-export async function readMongoForAgent(
+export function anotherDatabaseRefusal(boundDatabase: string, named: string, statement: string): QueryError {
+  return new QueryError(
+    `This run reads the database "${boundDatabase}" its connection is bound to, and ${named} names another, so nothing was sent. Drop the key or name "${boundDatabase}".`,
+    "mongodb",
+    statement,
+  );
+}
+
+/**
+ * Runs `work` under the deadline this module owns, in a session of its own.
+ *
+ * `work` is handed the session and the server deadline, which it passes to every call it makes, and `track`, which
+ * registers a cursor for the deadline to close. A timer is armed one backstop past the server's deadline (clamped to
+ * the timer's 32-bit range, `MAX_STATEMENT_TIMEOUT_MS`: the hand-over budget's "no time limit" is that ceiling, and a
+ * delay past it fires after 1 ms). When it fires, the session is killed (`killSessions`, which a user holding only
+ * read may send for its own session: measured on 9.0.4, 8.3.11 and 7.0.43, the read ends with code 11601 and no
+ * operation is left), every tracked cursor is closed, and the read is given `graceMs` to end.
+ *
+ * The answer is the read's, except: the server's own deadline (code 50) and anything the read settles with after the
+ * kill, a result included, is the statement deadline, killed server-side; a read that has not ended `graceMs` after
+ * the kill is the client giving up on a server that did not end it; and a transport failure, of the read or of the
+ * kill, is a `ConnectionError`. Every other failure is `mapDatabaseError`'s, as on the editor's path. The session is
+ * ended on every path.
+ */
+export async function runUnderAgentDeadline<T>(
   client: MongoClient,
-  databaseName: string,
-  envelope: RevivedMongoReadEnvelope,
   budget: ReadOnlyStatementBudget,
-  mode: "execute" | "estimate-plan",
   statement: string,
-): Promise<MongoAgentReadResult> {
-  assertReadOnlyBudget(budget, "mongodb");
-  const db = envelope.database !== undefined ? client.db(envelope.database) : client.db(databaseName);
-  const startedAt = Date.now();
-  let documents: Document[];
-  try {
-    documents = await withClientBackstop(
-      () => (mode === "estimate-plan" ? explainEnvelope(db, envelope, budget) : readEnvelope(db, envelope, budget)),
-      budget,
+  work: (session: ClientSession, maxTimeMS: number, track: <C extends Closable>(cursor: C) => C) => Promise<T>,
+  seams: AgentDeadlineSeams = AGENT_DEADLINE_SEAMS,
+): Promise<T> {
+  const session = client.startSession();
+  const cursors: Closable[] = [];
+  let killIssued = false;
+  let killFailure: unknown;
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  const track = <C extends Closable>(cursor: C): C => {
+    cursors.push(cursor);
+    return cursor;
+  };
+  const read = work(session, serverDeadline(budget), track).then(
+    (value) => ({ settled: "value" as const, value }),
+    (error: unknown) => ({ settled: "error" as const, error }),
+  );
+  const abandoned = new Promise<{ readonly settled: "abandoned" }>((resolve) => {
+    backstop = setTimeout(
+      () => {
+        killIssued = true;
+        void client
+          .db("admin")
+          .command({ killSessions: [session.id], comment: AGENT_COMMAND_COMMENT })
+          .catch((error: unknown) => {
+            killFailure = error;
+          });
+        // `close()` settles on its own: the driver squashes a failed killCursors itself.
+        for (const cursor of cursors) void cursor.close();
+        grace = setTimeout(() => resolve({ settled: "abandoned" }), seams.graceMs);
+      },
+      Math.min(budget.statementTimeoutMs + seams.backstopMs, MAX_STATEMENT_TIMEOUT_MS),
     );
-  } catch (error) {
-    if (isMaxTimeExpired(error)) {
+  });
+  try {
+    const outcome = await Promise.race([read, abandoned]);
+    if (outcome.settled === "abandoned") {
+      if (isTransportFailure(killFailure)) throw connectionLost(killFailure);
       throw new QueryError(
-        `Read-only execution exceeded the statement deadline of ${budget.statementTimeoutMs}ms and was killed server-side`,
+        `Read-only execution exceeded the statement deadline of ${budget.statementTimeoutMs}ms and the server did not end it, so the client stopped waiting`,
         "mongodb",
         statement,
       );
     }
-    throw error instanceof QueryError ? error : mapDatabaseError(error, "mongodb", statement);
-  }
-
-  // The +1 row is the budget's own signal, read here rather than refused server-side for
-  // the operations whose reply is assembled rather than cursored.
-  if (documents.length > budget.maxResultRows) {
-    throw rowBudgetRefusal(documents.length, budget, statement);
-  }
-  let bytes = 0;
-  for (const document of documents) {
-    bytes += measureRowBytes(document);
-    if (bytes > budget.maxResultBytes) {
-      throw byteBudgetRefusal(bytes, budget, statement);
+    if (outcome.settled === "error") {
+      const { error } = outcome;
+      if (isTransportFailure(error)) throw connectionLost(error);
+      if (killIssued || codeOf(error) === MONGO_MAX_TIME_EXPIRED_CODE) throw killedAtDeadline(budget, statement);
+      throw error instanceof QueryError ? error : mapDatabaseError(error, "mongodb", statement);
     }
+    if (killIssued) throw killedAtDeadline(budget, statement);
+    return outcome.value;
+  } finally {
+    clearTimeout(backstop);
+    clearTimeout(grace);
+    await session.endSession();
   }
-
-  const rows = documents.map((document) => serializeMongoDocument(document));
-  const fields = [...new Set(documents.flatMap((document) => Object.keys(document)))];
-  return { rows, fields, rowCount: rows.length, executionTime: Date.now() - startedAt };
 }
 
-async function readEnvelope(
-  db: Db,
-  envelope: RevivedMongoReadEnvelope,
-  budget: ReadOnlyStatementBudget,
-): Promise<Document[]> {
-  const collection = db.collection(envelope.collection);
-  const maxTimeMS = serverDeadline(budget);
-  switch (envelope.operation) {
-    case "find": {
-      const cursor = collection.find(envelope.filter ?? {});
-      if (envelope.options?.projection !== undefined) cursor.project(envelope.options.projection);
-      if (envelope.options?.sort !== undefined) cursor.sort(envelope.options.sort);
-      if (envelope.options?.skip !== undefined) cursor.skip(envelope.options.skip);
-      // One past the budget, or the envelope's own limit when it is smaller: the server
-      // stops the cursor there, so the rows arrive already bounded.
-      cursor.limit(Math.min(envelope.options?.limit ?? Number.POSITIVE_INFINITY, rowBound(budget)));
-      cursor.maxTimeMS(maxTimeMS);
-      try {
-        return await cursor.toArray();
-      } finally {
-        await cursor.close().catch(() => {});
-      }
+/** The options every agent read is opened with: its session and server deadline, its comment, and how it is read. */
+export interface BoundedReadOptions {
+  readonly session: ClientSession;
+  readonly maxTimeMS: number;
+  readonly comment: string;
+  /** Execute reads raw BSON bytes, counted before they are decoded; the estimating plan reads a decoded reply. */
+  readonly raw: boolean;
+  readonly batchSize: number;
+}
+
+/** A read as the builder opens it: a cursor and what its documents answer, or a `distinct`'s command document. */
+export type BoundedRead =
+  | {
+      readonly kind: "cursor";
+      readonly cursor: FindCursor<Document> | AggregationCursor<Document>;
+      readonly answers: "documents" | "count";
     }
-    case "findOne": {
-      const document = await collection.findOne(envelope.filter ?? {}, {
-        projection: envelope.options?.projection,
-        maxTimeMS,
-      });
-      return document === null ? [] : [document];
-    }
-    case "aggregate": {
-      const pipeline = [...(envelope.pipeline ?? []), { $limit: rowBound(budget) }];
-      const cursor = collection.aggregate(pipeline, { maxTimeMS });
-      try {
-        return await cursor.toArray();
-      } finally {
-        await cursor.close().catch(() => {});
-      }
-    }
-    case "count": {
-      const count = await collection.countDocuments(envelope.filter ?? {}, { maxTimeMS });
-      return [{ count }];
-    }
-    case "distinct": {
-      const values = await collection.distinct(envelope.field!, envelope.filter ?? {}, { maxTimeMS });
-      return values.map((value) => ({ [envelope.field!]: value }));
-    }
-  }
+  | { readonly kind: "command"; readonly command: Document };
+
+/** A `distinct`'s command document, the one shape the read runs and the plan explains. */
+export function distinctCommand(envelope: RevivedMongoReadEnvelope & { readonly operation: "distinct" }): Document {
+  return { distinct: envelope.collection, key: envelope.field, query: envelope.filter ?? {} };
 }
 
 /**
- * The estimating plan: the envelope's own operation, wrapped in `explain` at
- * `queryPlanner` verbosity - measured on MongoDB 9.0.4, the reply carries
- * `queryPlanner.winningPlan` and `serverInfo` and runs no pipeline. The one row is the
- * plan itself, serialized the way every other row is.
+ * The one builder of an agent read, for execute and for the estimating plan alike: a cursor opened with the bounds
+ * above and `options`, or a `distinct`'s command document, which the caller sends.
  */
-async function explainEnvelope(
-  db: Db,
+export function openBoundedRead(
+  collection: Collection,
   envelope: RevivedMongoReadEnvelope,
   budget: ReadOnlyStatementBudget,
-): Promise<Document[]> {
-  const command = explainCommandFor(envelope);
-  const explained = await db.command({ explain: command, verbosity: "queryPlanner" });
-  return [explained as Document];
-}
-
-/** The envelope's operation as the `explain` command takes it: the wire form of the same read. */
-function explainCommandFor(envelope: RevivedMongoReadEnvelope): Document {
+  options: BoundedReadOptions,
+): BoundedRead {
   switch (envelope.operation) {
     case "find": {
-      const find: Document = { find: envelope.collection, filter: envelope.filter ?? {} };
-      if (envelope.options?.sort !== undefined) find.sort = envelope.options.sort;
-      if (envelope.options?.projection !== undefined) find.projection = envelope.options.projection;
-      if (envelope.options?.skip !== undefined) find.skip = envelope.options.skip;
-      if (envelope.options?.limit !== undefined) find.limit = envelope.options.limit;
-      return find;
+      const { limit, ...shape } = envelope.options ?? {};
+      return {
+        kind: "cursor",
+        cursor: collection.find(envelope.filter ?? {}, {
+          ...shape,
+          limit: Math.min(limit ?? Number.POSITIVE_INFINITY, rowBound(budget)),
+          ...options,
+        }),
+        answers: "documents",
+      };
     }
-    case "aggregate":
-      return { aggregate: envelope.collection, pipeline: envelope.pipeline ?? [], cursor: {} };
-    case "count":
-      return { count: envelope.collection, query: envelope.filter ?? {} };
-    case "distinct":
-      return { distinct: envelope.collection, key: envelope.field, query: envelope.filter ?? {} };
     case "findOne":
-      return { find: envelope.collection, filter: envelope.filter ?? {}, limit: 1 };
+      return {
+        kind: "cursor",
+        cursor: collection.find(envelope.filter ?? {}, { ...envelope.options, limit: 1, ...options }),
+        answers: "documents",
+      };
+    case "aggregate":
+      return {
+        kind: "cursor",
+        cursor: collection.aggregate([...envelope.pipeline, { $limit: rowBound(budget) }], options),
+        answers: "documents",
+      };
+    case "count":
+      return {
+        kind: "cursor",
+        cursor: collection.aggregate(
+          [{ $match: envelope.filter ?? {} }, { $group: { _id: 1, n: { $sum: 1 } } }],
+          options,
+        ),
+        answers: "count",
+      };
+    case "distinct":
+      return { kind: "command", command: distinctCommand(envelope) };
   }
 }
 
-function isMaxTimeExpired(error: unknown): boolean {
-  return (
-    typeof error === "object" && error !== null && (error as { code?: unknown }).code === MONGO_MAX_TIME_EXPIRED_CODE
+/** What the server says about itself in an explain reply, dropped from the plan wherever it sits. */
+const SERVER_KEYS: ReadonlySet<string> = new Set([
+  "serverInfo",
+  "serverParameters",
+  "connectionString",
+  "command",
+  "ok",
+  "$clusterTime",
+  "operationTime",
+]);
+
+/** The parts of an explain reply that are the plan: a find's or an aggregate's `queryPlanner`, a pipeline's `stages`. */
+const PLAN_KEYS = ["explainVersion", "queryPlanner", "stages"] as const;
+
+/**
+ * The plan of an explain reply, without what the server says about itself: the host and port, its parameters, the
+ * command echoed back and the cluster time, at any depth (a sharded plan carries each shard's `serverInfo` and
+ * `connectionString` inside its stages). The model reads a plan, and has no use for where the server runs. A copy;
+ * the reply is not changed. Recursive: a plan is as deep as its stages and the filter it echoes, which the server's
+ * own BSON nesting limit bounds.
+ */
+export function planOnly(reply: Document): Document {
+  const plan: Document = {};
+  for (const key of PLAN_KEYS) {
+    if (Object.hasOwn(reply, key)) plan[key] = withoutServerKeys(reply[key]);
+  }
+  return plan;
+}
+
+function withoutServerKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutServerKeys);
+  if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !SERVER_KEYS.has(key))
+      .map(([key, child]) => [key, withoutServerKeys(child)]),
   );
+}
+
+/**
+ * A raw cursor's documents, read one at a time under the budget: the row past the row budget, or the document whose
+ * BSON bytes carry the total past the byte budget, is the refusal, and the crossing document is never decoded. Each
+ * admitted document is decoded and kept only as its served row; the bytes are not kept, because the driver may hand
+ * back a view of a pooled buffer. The cursor is closed on every path.
+ */
+async function collectWithinBudget(
+  cursor: FindCursor<Document> | AggregationCursor<Document>,
+  budget: ReadOnlyStatementBudget,
+  statement: string,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  let bytes = 0;
+  try {
+    for (let next = await cursor.next(); next !== null; next = await cursor.next()) {
+      // Opened with `raw: true`: the document is its own BSON bytes.
+      const document = next as Uint8Array;
+      if (rows.length === budget.maxResultRows) throw rowBudgetRefusal(rows.length + 1, budget, statement);
+      bytes += document.byteLength;
+      if (bytes > budget.maxResultBytes) throw byteBudgetRefusal(bytes, budget, statement);
+      rows.push(serializeMongoDocument(mongodbDriver.BSON.deserialize(document, DRIVER_DECODE)));
+    }
+  } finally {
+    await cursor.close();
+  }
+  return rows;
+}
+
+/**
+ * The documents a sample of one object reads, for inferring its fields: a raw cursor read one document at a time,
+ * decoded as the driver decodes, stopping before the document whose BSON bytes would carry the total past the byte
+ * budget, which is never decoded. A sample is evidence for the object's fields rather than an answer the model reads,
+ * so it stops rather than refuses, and its length says how much it holds; but a first document that crosses the
+ * budget alone is refused, because an empty sample would describe an object with documents as one with none. The
+ * cursor is closed on every path.
+ */
+export async function sampleWithinBudget(
+  cursor: FindCursor<Document>,
+  budget: ReadOnlyStatementBudget,
+  statement: string,
+): Promise<Document[]> {
+  const documents: Document[] = [];
+  let bytes = 0;
+  try {
+    for (let next = await cursor.next(); next !== null; next = await cursor.next()) {
+      // Opened with `raw: true`: the document is its own BSON bytes.
+      const document = next as Uint8Array;
+      bytes += document.byteLength;
+      if (bytes > budget.maxResultBytes) {
+        if (documents.length === 0) throw byteBudgetRefusal(bytes, budget, statement);
+        break;
+      }
+      documents.push(mongodbDriver.BSON.deserialize(document, DRIVER_DECODE));
+    }
+  } finally {
+    await cursor.close();
+  }
+  return documents;
+}
+
+/**
+ * A `distinct`'s values as rows, one per value under the field's name: refused past the row budget before any row is
+ * built, then on the row whose BSON size carries the total past the byte budget.
+ */
+function distinctWithinBudget(
+  reply: Document,
+  field: string,
+  budget: ReadOnlyStatementBudget,
+  statement: string,
+): Record<string, unknown>[] {
+  const values: unknown = reply.values;
+  if (!Array.isArray(values)) {
+    throw new QueryError("The server answered the distinct with no list of values", "mongodb", statement);
+  }
+  if (values.length > budget.maxResultRows) throw rowBudgetRefusal(values.length, budget, statement);
+  const rows: Record<string, unknown>[] = [];
+  let bytes = 0;
+  for (const value of values) {
+    const document = { [field]: value };
+    bytes += mongodbDriver.BSON.calculateObjectSize(document);
+    if (bytes > budget.maxResultBytes) throw byteBudgetRefusal(bytes, budget, statement);
+    rows.push(serializeMongoDocument(document));
+  }
+  return rows;
+}
+
+/**
+ * One admitted command, read under the profile's bounds, in the database the run's connection is bound to.
+ *
+ * `mode: "estimate-plan"` explains the command the builder opens, at `queryPlanner` verbosity and under the same
+ * deadline, which `maxTimeMS` at the top of the explain command holds (measured: 8.3.11 and 7.0.43 ignore the one
+ * inside the explained command, and planned past it; 9.0.4 honours both). The server plans the command and, when
+ * several candidate plans fit, runs each for a bounded trial to choose; it returns no result rows. The one row is the
+ * plan, through `planOnly`.
+ */
+export async function readMongoForAgent(
+  client: MongoClient,
+  boundDatabase: string,
+  envelope: RevivedMongoReadEnvelope,
+  budget: ReadOnlyStatementBudget,
+  mode: "execute" | "estimate-plan",
+  statement: string,
+  seams: AgentDeadlineSeams = AGENT_DEADLINE_SEAMS,
+): Promise<MongoAgentReadResult> {
+  assertReadOnlyBudget(budget, "mongodb");
+  if (envelope.database !== undefined && envelope.database !== boundDatabase) {
+    throw anotherDatabaseRefusal(boundDatabase, `"database": "${envelope.database}"`, statement);
+  }
+  const db = client.db(boundDatabase);
+  const startedAt = Date.now();
+  const rows = await runUnderAgentDeadline(
+    client,
+    budget,
+    statement,
+    async (session, maxTimeMS, track) => {
+      const read = openBoundedRead(db.collection(envelope.collection), envelope, budget, {
+        session,
+        maxTimeMS,
+        comment: AGENT_COMMAND_COMMENT,
+        raw: mode === "execute",
+        batchSize: Math.min(rowBound(budget), MAX_BATCH_DOCUMENTS),
+      });
+      if (mode === "estimate-plan") {
+        const plan =
+          read.kind === "cursor"
+            ? await track(read.cursor).explain({ verbosity: "queryPlanner", maxTimeMS })
+            : await db.command(
+                { explain: read.command, verbosity: "queryPlanner", maxTimeMS, comment: AGENT_COMMAND_COMMENT },
+                { session },
+              );
+        return [serializeMongoDocument(planOnly(plan))];
+      }
+      if (read.kind === "command") {
+        const reply = await db.command({ ...read.command, maxTimeMS, comment: AGENT_COMMAND_COMMENT }, { session });
+        return distinctWithinBudget(reply, String(read.command.key), budget, statement);
+      }
+      const documents = await collectWithinBudget(track(read.cursor), budget, statement);
+      return read.answers === "count" ? [{ count: documents[0]?.n ?? 0 }] : documents;
+    },
+    seams,
+  );
+  return {
+    ...uniquelyKeyedRows(unionFields(rows), rows),
+    rowCount: rows.length,
+    executionTime: Date.now() - startedAt,
+  };
 }
