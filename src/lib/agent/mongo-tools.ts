@@ -191,16 +191,16 @@ function catalogRows(
 /**
  * The estimating plan: the command, wrapped in the engine's own `explain` at `queryPlanner` verbosity.
  *
- * The input is the command OBJECT the model wrote, read by the same `canonicalize` `runReadQueryTool` reads it with,
- * so the command planned is the command a read of it would run, in the order it was written, and the operation's
- * descriptor validates it with the same admission the statement path validates with. The `mode: "estimate-plan"` is
- * what makes the provider wrap the envelope in `explain` instead of running it - the same seam the SQL `EXPLAIN` arms
- * drive.
+ * The input is the command OBJECT the model wrote, read by the mongo language's own `canonicalize`, the one
+ * `runReadQueryTool` reads a mongo run's command with, so the command planned is the command a read of it would run,
+ * in the order it was written, and the operation's descriptor validates it with the same admission the statement path
+ * validates with. The `mode: "estimate-plan"` is what makes the provider wrap the envelope in `explain` instead of
+ * running it - the same seam the SQL `EXPLAIN` arms drive.
  */
 export async function mongoInspectPlanTool(context: AgentToolContext, input: unknown): Promise<AgentToolOutcome> {
   const parsed = mongoPlanCommandSchema.safeParse(input);
   if (!parsed.success) return unavailable("INVALID_TOOL_INPUT", issueText(parsed.error));
-  const statement = languageServer(context.statementLanguage ?? "sql").canonicalize(parsed.data.command);
+  const statement = languageServer("mongo").canonicalize(parsed.data.command);
   if (statement === null) return unavailable("INVALID_TOOL_INPUT", "The command is empty, and nothing was planned.");
   return executeAgentOperation(context, {
     operationId: "mongo.plan.estimate",

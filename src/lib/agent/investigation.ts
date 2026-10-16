@@ -1343,18 +1343,17 @@ interface PlanningGrounding {
  * sentences say: no statement of the USER'S was run, nothing was written, and the
  * model has no tools.
  *
- * FOUR sentences since #414, over the same two axes as `PLANNING_SNAPSHOT_PREFACE`,
- * and this record was left one-dimensional when that one was made 2x2 — which put the
- * two halves of one conversation in direct contradiction on twelve of the fourteen
- * said the inventory came "through the same read-only catalog path the agent mode
- * uses" and the message under them said it came from the engine's own inspection.
- * Both halves of the first were false there: no catalog statement is composed on a
- * dialect `CATALOG_PLANS` does not serve, and agent mode cannot take a read-only path
- * on those engines at all - it is refused the profile and ends `engine-unsupported`,
- * which is the whole reason the provider's own reading (`readObjectInventoryForGrounding`
- * in `tools.ts`) grounds them. Telling a model
- * how the run came by what it knows and getting it wrong is the defect class #414 was
- * opened to close, so it may not be stated in the rules either.
+ * FOUR sentences since #414, over the same two axes as `PLANNING_SNAPSHOT_PREFACE`.
+ * This record was left one-dimensional when that one was made 2x2, which put the two
+ * halves of one conversation in direct contradiction on every engine `CATALOG_PLANS`
+ * does not serve: the rules said the inventory came "through the same read-only
+ * catalog path the agent mode uses", and the message under them said it came from the
+ * engine's own inspection. Both halves of the first were false there: no catalog
+ * statement is composed on those engines, and at #414 agent mode took no read-only
+ * path on them at all. That is why the provider's own reading grounds them
+ * (`readObjectInventoryForGrounding` in `tools.ts`). Telling a model how the run came
+ * by what it knows and getting it wrong is the defect class #414 was opened to close,
+ * so it may not be stated in the rules either.
  *
  * The composed arms keep their reference to agent mode because it is true where they
  * are said: on PostgreSQL and SQLite the agent path takes exactly that read.
@@ -1879,7 +1878,7 @@ export const WORKFLOW_TOOL_RULES: Readonly<
       MONGO_COLLECTION_RULE,
       "profile_table at basic depth tells a large collection from a small one, and a field the documents fill from one they do not: it returns document counts and how many documents have a value, and reads no value out of any field.",
       "When you have the answer, call present_answer with the artifact id of the read that IS the answer.",
-      "Only a result of run_read_query can be presented: a plan describes a command without running it, and a profile counts a collection rather than answering the question. Cite either as evidence, but present a read.",
+      "Only a result of run_read_query can be presented: a plan returns none of the command's documents, and a profile counts a collection rather than answering the question. Cite either as evidence, but present a read.",
       "A chart names columns of THAT result: they are checked against the result's real column names and refused if they do not match.",
       AGENT_ANSWER_CONTRACT,
       "Then call compose_report. The presentation shows the result; the claims are what say what it means.",
@@ -4756,10 +4755,12 @@ export async function profileTable(
   });
   known.add(stepId);
 
+  // Recorded under the operation the run's own definition of the tool names, as every database tool's step is.
+  const { operationId } = agentToolDefinition(context.statementLanguage, context.workflowType, "profile_table");
   let modelText = "";
   const result = await service.runStep(
     record.runId,
-    { stepId, tool: "profile_table", operationId: arm.operationId },
+    { stepId, tool: "profile_table", ...(operationId === undefined ? {} : { operationId }) },
     async () => {
       const outcome = await arm.run(context, plan);
       modelText = outcome.modelText;

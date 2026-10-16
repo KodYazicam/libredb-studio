@@ -22,7 +22,12 @@ import {
   runReadQueryTool,
   selectAgentTools,
 } from "@/lib/agent/tools";
-import { mongoInspectPlanTool, mongoInspectSchemaTool, mongoProfileTablePlan } from "@/lib/agent/mongo-tools";
+import {
+  mongoInspectPlanTool,
+  mongoInspectSchemaTool,
+  mongoProfileTablePlan,
+  planMongoProfile,
+} from "@/lib/agent/mongo-tools";
 import { draftedStatement, profileTable } from "@/lib/agent/investigation";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -612,14 +617,23 @@ describe("profile_table on mongo", () => {
     expect(refused.kind === "unavailable" && refused.reasonCode).toBe("INVALID_TOOL_INPUT");
   });
 
-  /** A run service over a ledger holding `snapshot`, settling every step it is handed and recording what it writes. */
+  /**
+   * A run service over a ledger holding `snapshot`, settling every step it is handed and recording what it writes:
+   * the events, the step ids, and each step's invocation as the ledger would record it.
+   */
   function serviceOver(snapshot: AgentContextSnapshot) {
     const recorded: AgentRunEvent[] = [];
     const steps: string[] = [];
+    const invocations: { readonly stepId: string; readonly tool: string; readonly operationId?: string }[] = [];
     const service = {
       resume: async () => ({ record: recordOf([captured(snapshot)]) }),
-      runStep: async (_runId: string, step: { stepId: string }, execute: () => Promise<unknown>) => {
+      runStep: async (
+        _runId: string,
+        step: { readonly stepId: string; readonly tool: string; readonly operationId?: string },
+        execute: () => Promise<unknown>,
+      ) => {
         steps.push(step.stepId);
+        invocations.push(step);
         await execute();
         return { kind: "performed" as const };
       },
@@ -627,7 +641,7 @@ describe("profile_table on mongo", () => {
         recorded.push(event);
       },
     } as unknown as Parameters<typeof profileTable>[0];
-    return { service, recorded, steps };
+    return { service, recorded, steps, invocations };
   }
 
   test("the run settles a step under the mongo operation, records the profile, and answers in the SQL arm's sentences", async () => {
@@ -637,7 +651,7 @@ describe("profile_table on mongo", () => {
       rowCount: 1,
       executionTime: 3,
     }));
-    const { service, recorded } = serviceOver(snapshotOf([orders], ["app"]));
+    const { service, recorded, invocations } = serviceOver(snapshotOf([orders], ["app"]));
 
     const result = await profileTable(service, h.context, { input: { table: "app.orders" } }, new Set(), new Set());
 
@@ -645,8 +659,36 @@ describe("profile_table on mongo", () => {
     expect(result.kind === "answered" && result.text).toContain("Only counts were read");
     // The collection's name is database content, so the model reads it fenced.
     expect(result.kind === "answered" && result.text).toContain("UNTRUSTED");
+    // The step is recorded, and drawn on the timeline, under the operation its read ran under, never SQL's.
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ tool: "profile_table", operationId: "mongo.table.profile" });
     const profiled = recorded.find((event) => event.kind === "table-profiled");
     expect(profiled?.kind === "table-profiled" && profiled.artifact.operationId).toBe("mongo.table.profile");
+  });
+
+  test("a finding is fenced under the mongo profile's operation, the one its read ran under", async () => {
+    // 30 of 40 documents carry no customer, which crosses the high-null threshold.
+    const h = harness(undefined, async () => ({
+      rows: [{ row_count: 40, present_0: 10, present_1: 40, present_2: 40 }],
+      fields: ["row_count", "present_0", "present_1", "present_2"],
+      rowCount: 1,
+      executionTime: 3,
+    }));
+    const { service } = serviceOver(snapshotOf([orders], ["app"]));
+
+    const result = await profileTable(service, h.context, { input: { table: "orders" } }, new Set(), new Set());
+
+    const text = result.kind === "answered" ? result.text : "";
+    expect(text).toContain("high_null");
+    expect(text).toContain("profile finding(s); operation mongo.table.profile; reference server-derived");
+    expect(text).not.toContain("operation sql.table.profile");
+  });
+
+  test("a run record that is not this run's is a server fault, never a profile planned from another run's inventory", () => {
+    const h = harness();
+    expect(() => planMongoProfile(h.context, { runId: "another-run", events: [] }, { table: "orders" })).toThrow(
+      "agent tool layer: the profile's run record does not belong to this run",
+    );
   });
 
   test("an empty collection profiles as zero documents, because a $group over nothing answers no row", async () => {
@@ -844,6 +886,33 @@ describe("recommend_change on mongo", () => {
         evidence: [{ source: "artifact", correlationId: plan }],
       });
     }
+  });
+
+  test("a collection the inventory does not hold is named whole, in the session's database where the capture read one", async () => {
+    const { h, events, plan } = await runHoldingAPlan();
+    const card = {
+      change: "document-index",
+      collection: "archive",
+      keys: { customer: 1 },
+      evidence: [{ source: "artifact", correlationId: plan }],
+    };
+
+    const inSession = recommendChangeTool(h.context, { runId: "run-1", events }, card);
+    if (inSession.kind !== "recommended") throw new Error(`expected a card, got ${inSession.reasonCode}`);
+    expect(inSession.recommendation).toMatchObject({
+      change: "document-index",
+      collection: "archive",
+      database: "app",
+    });
+
+    // A capture that read no session database stamps none, rather than one nobody established.
+    const unplaced = events.map((event) =>
+      event.kind === "context-captured" ? captured(snapshotOf(snapshot.objects)) : event,
+    );
+    const outcome = recommendChangeTool(h.context, { runId: "run-1", events: unplaced }, card);
+    if (outcome.kind !== "recommended") throw new Error(`expected a card, got ${outcome.reasonCode}`);
+    expect(outcome.recommendation).toMatchObject({ change: "document-index", collection: "archive" });
+    expect(Object.hasOwn(outcome.recommendation, "database")).toBe(false);
   });
 
   test("a card citing nothing this run produced is refused as unverifiable", async () => {

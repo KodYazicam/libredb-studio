@@ -519,7 +519,7 @@ export interface AgentResourceSettings {
  * therefore already knows.
  */
 export interface AgentPlanSide {
-  /** The `sql.explain.estimate` artifact this side was read from. */
+  /** The artifact this side was read from, produced under a plan-estimate operation (`PLAN_ESTIMATE_OPERATIONS`). */
   readonly correlationId: string;
   /** The statement that was explained. */
   readonly sql: string;
@@ -1424,9 +1424,9 @@ export type AgentRunEvent =
        * verifier requires: a run that recommends a rewrite without having compared
        * the plans has recommended it on the strength of its own opinion.
        *
-       * Both sides cite an artifact THIS run produced under `sql.explain.estimate`,
-       * checked against the ledger the way a report's citations are, so a comparison
-       * of two plans the run never asked for is inexpressible.
+       * Both sides cite an artifact THIS run produced under a plan-estimate operation
+       * (`PLAN_ESTIMATE_OPERATIONS`), checked against the ledger the way a report's citations
+       * are, so a comparison of two plans the run never asked for is inexpressible.
        */
       readonly kind: "plan-comparison";
       readonly before: AgentPlanSide;
@@ -1483,8 +1483,9 @@ export type AgentRunEvent =
        * in the engine's own form (`{"field": 1}`), and any options. `keys` and `options` are validated by the card's
        * schema, not by this type, which says only that they are records - the engine's spelling of a key is its own.
        *
-       * `database` is the one the run's captured inventory read the collection in, stamped by the server rather than
-       * written by the model, and absent when the run captured no inventory naming one.
+       * `database` is stamped by the server, never written by the model: the database the run's captured inventory
+       * read the collection in, or, for a spelling the inventory does not resolve, the session's database where the
+       * capture read one. It is absent when neither is known.
        */
       readonly kind: "recommendation";
       readonly change: "document-index";

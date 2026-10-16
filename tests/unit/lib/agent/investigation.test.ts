@@ -12,7 +12,7 @@ import { UNTRUSTED_CONTENT_BEGIN, UNTRUSTED_CONTENT_END } from "@/lib/agent/untr
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
-import { AGENT_ANSWER_CONTRACT } from "@/lib/agent/tools";
+import { AGENT_ANSWER_CONTRACT, type AgentToolContext } from "@/lib/agent/tools";
 import type { AgentRunEvent, AgentRunMode, AgentRunWorkflowType } from "@/lib/agent/types";
 import { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
 import { ExecutionBudgetTracker } from "@/lib/db/operations/budgets";
@@ -965,16 +965,20 @@ describe("neutraliseAssistantMessages (B29)", () => {
 });
 
 /**
- * One agent-mode investigation of `turns` on `connection`, over a provider double that grounds the run on one object
+ * One agent-mode run of `turns` on `connection`, over a provider double that grounds the run on one object
  * (`orders`, in the session's own container `app` where the engine has containers) and answers every statement with
- * one row, and the events it recorded. `methods` adds to or replaces the double's methods.
+ * one row: the events it recorded and the requests it sent. `methods` adds to or replaces the double's methods;
+ * `options.workflowType` is the workflow (an investigation when absent), and `options.prior` is appended to the ledger
+ * before the drive, as a resumed run finds it.
  */
 async function agentDrive(
   connection: DatabaseConnection,
   declared: Declarations,
   turns: readonly ScriptedTurn[],
   methods: Readonly<Record<string, unknown>> = {},
-): Promise<readonly AgentRunEvent[]> {
+  options: { readonly workflowType?: AgentRunWorkflowType; readonly prior?: readonly AgentRunEvent[] } = {},
+): Promise<{ readonly events: readonly AgentRunEvent[]; readonly turns: readonly Turn[] }> {
+  const { workflowType = "investigation", prior = [] } = options;
   forgetHeldSnapshots();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-step-identity-"));
   dataDirs.push(dataDir);
@@ -997,16 +1001,20 @@ async function agentDrive(
   const tracker = new ExecutionBudgetTracker();
   const artifacts = new ExecutionArtifactStore<QueryResult>({ ttlMs: 60_000, maxArtifacts: 16 });
   const service = new AgentRunService({ store, resources: { tracker, artifacts } });
-  const availability = workflowAvailability("agent", "investigation", connection.type);
-  if (!availability.open) throw new Error(`investigation does not open on ${connection.type}`);
+  const availability = workflowAvailability("agent", workflowType, connection.type);
+  if (!availability.open) throw new Error(`${workflowType} does not open on ${connection.type}`);
   const run = await service.start({
     mode: "agent",
-    workflowType: "investigation",
-    ...persistedRunFacts("agent", "investigation", availability),
+    workflowType,
+    ...persistedRunFacts("agent", workflowType, availability),
     actor: { sessionId: "sess_1", role: "user" },
     connectionId: connection.id,
     objective: "Which customers ordered most?",
   });
+  for (const event of prior) {
+    // oxlint-disable-next-line no-await-in-loop -- a ledger is ordered: each event lands after the one before it.
+    await store.appendEvent(run.runId, event);
+  }
   const script = scriptedModel(...turns, answersProse("No report."), answersProse("No report."));
   await runInvestigation(run.runId, {
     service,
@@ -1018,14 +1026,14 @@ async function agentDrive(
       scope: createTargetScope(connection.id),
       tracker,
       artifacts,
-      deadline: new AgentRunDeadline(AGENT_WORKFLOW_BUDGETS.investigation.runDeadlineMs, () => 10_000),
+      deadline: new AgentRunDeadline(AGENT_WORKFLOW_BUDGETS[workflowType].runDeadlineMs, () => 10_000),
       repairs: new AgentRepairLedger(),
       acquireProvider: async () => provider,
     },
   }).catch(() => undefined);
   const view = await store.read(run.runId);
   if (!view) throw new Error(`run ${run.runId} has no ledger`);
-  return view.record.events;
+  return { events: view.record.events, turns: script.turns };
 }
 
 /** The `tool-invoked` step ids an agent drive recorded, in order. */
@@ -1034,22 +1042,22 @@ async function stepIdsOfDrive(
   declared: Declarations,
   turns: readonly ScriptedTurn[],
 ): Promise<readonly string[]> {
-  const events = await agentDrive(connection, declared, turns);
+  const { events } = await agentDrive(connection, declared, turns);
   return events.flatMap((event) => (event.kind === "tool-invoked" ? [event.stepId] : []));
 }
 
-describe("a step's identity is the call it makes", () => {
-  const mongoConnection: DatabaseConnection = {
-    id: "conn_mongo",
-    name: "MongoDB",
-    type: "mongodb",
-    host: "127.0.0.1",
-    port: 27017,
-    database: "app",
-    createdAt: new Date(0),
-  };
-  const mongo = new MongoDBProvider(mongoConnection);
+const mongoConnection: DatabaseConnection = {
+  id: "conn_mongo",
+  name: "MongoDB",
+  type: "mongodb",
+  host: "127.0.0.1",
+  port: 27017,
+  database: "app",
+  createdAt: new Date(0),
+};
+const mongo = new MongoDBProvider(mongoConnection);
 
+describe("a step's identity is the call it makes", () => {
   test("two mongo reads that differ only in their sort's key order are two steps, because they are two reads", async () => {
     // Key order is part of a MongoDB sort: {b: 1, a: 1} and {a: 1, b: 1} return different documents, so a step id
     // that sorted the keys would answer the second read with the first one's rows.
@@ -1081,7 +1089,7 @@ describe("a step's identity is the call it makes", () => {
       indexes: [],
       sampled: 1,
     }));
-    const events = await agentDrive(
+    const { events } = await agentDrive(
       mongoConnection,
       { capabilities: mongo.getCapabilities(), labels: mongo.getLabels() },
       [callsTool("inspect_schema", { table: "app.orders" })],
@@ -1124,6 +1132,38 @@ describe("a step's identity is the call it makes", () => {
   });
 });
 
+describe("a resumed mongo run that already recommended an index", () => {
+  test("is told the index it already recommended, by collection, with no statement", async () => {
+    const recommended: AgentRunEvent = {
+      kind: "recommendation",
+      atMs: 1,
+      change: "document-index",
+      collection: "orders",
+      database: "app",
+      keys: { customer: 1 },
+      evidence: [{ source: "artifact", correlationId: "p1" }],
+    };
+
+    const { turns } = await agentDrive(
+      mongoConnection,
+      { capabilities: mongo.getCapabilities(), labels: mongo.getLabels() },
+      [],
+      {},
+      { workflowType: "query-optimization", prior: [recommended] },
+    );
+    const [first] = turns;
+    if (first === undefined) throw new Error("the drive sent no request");
+    const { opening } = splitPrompt(first);
+
+    expect(opening).toContain(
+      "An index was already recommended and is recorded: on collection orders. Do not propose it a second time.",
+    );
+    // The SQL sentence quotes a statement; an index stated as data has none, so it must never reach that arm.
+    expect(opening).not.toContain("A document-index was already recommended");
+    expect(opening).not.toContain("undefined");
+  });
+});
+
 describe("the database tool dispatch", () => {
   /*
     A total record keyed by the tool name, so a new database tool stops `investigation.ts` compiling until it names
@@ -1137,5 +1177,17 @@ describe("the database tool dispatch", () => {
       "inspect_schema",
       "run_read_query",
     ]);
+  });
+
+  test("a tool the run's language has no arm for is the server's own fault, said by name, never SQL's arm", () => {
+    // No kubectl variant offers either tool, so only a server fault routes one here: it throws before anything is
+    // acquired, rather than running the SQL arm against a cluster.
+    const context = { statementLanguage: "kubectl" } as unknown as AgentToolContext;
+    expect(() => DATABASE_TOOL_HANDLERS.inspect_schema(context, {}, null)).toThrow(
+      "agent run loop: the kubectl language has no inspect_schema arm",
+    );
+    expect(() => DATABASE_TOOL_HANDLERS.inspect_plan(context, {}, null)).toThrow(
+      "agent run loop: the kubectl language has no inspect_plan arm",
+    );
   });
 });

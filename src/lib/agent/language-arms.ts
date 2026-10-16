@@ -4,9 +4,11 @@
  *
  * The execution half of what `TOOL_OVERRIDES` (`tools.ts`) is for the offer, keyed the same way, by language: a run
  * is offered a language's definition of a tool and executed by that language's arm of it, so the two cannot come to
- * disagree, and nothing anywhere tests a language id to choose between them. Each arm declares the schema it parses,
- * which is the very schema its definition offers (`tests/unit/lib/agent/tool-offer-census.test.ts` holds the two
- * equal), so what a run is offered is what it is held to.
+ * disagree, and nothing anywhere tests a language id to choose between them. Each arm declares as its input the
+ * exported schema its tool parses with, and `tests/unit/lib/agent/tool-offer-census.test.ts` holds that declaration
+ * equal to the schema the definition offers, so what a run is offered is what it is held to. The operation a step is
+ * recorded under is the definition's own (`agentToolDefinition`), as it is for every database tool, so an arm does
+ * not declare a second one.
  *
  * Total over `AgentStatementLanguageId`, so a later language does not compile until it says which arms it has. A
  * language that offers none of these tools has none (kubectl, whose variants offer reads and curated readings only);
@@ -20,7 +22,6 @@ import type { AgentStatementLanguageId } from "./agent-manifest";
 import { mongoInspectPlanTool, mongoInspectSchemaTool, planMongoProfile, runMongoProfile } from "./mongo-tools";
 import type { AgentProfileDepth } from "./table-profile";
 import {
-  type AgentOperationId,
   type AgentTableProfileOutcome,
   type AgentToolContext,
   type AgentToolOutcome,
@@ -60,12 +61,11 @@ export interface ProfileArmPlan {
 }
 
 /**
- * A profile arm: the operation its read is audited under, the selector it parses, the planning step that resolves and
- * composes and reaches nothing, and the read of what it planned. `run` is only ever handed the plan its own `plan`
- * produced, which is what lets each language's plan carry what that language's read needs.
+ * A profile arm: the selector its planning step parses, the planning step that resolves and composes and reaches
+ * nothing, and the read of what it planned. `run` is only ever handed the plan its own `plan` produced, which is what
+ * lets each language's plan carry what that language's read needs.
  */
 export interface ProfileArm<Plan extends ProfileArmPlan = ProfileArmPlan> {
-  readonly operationId: AgentOperationId;
   readonly inputSchema: z.ZodType<unknown>;
   plan(
     context: AgentToolContext,
@@ -94,7 +94,6 @@ export const LANGUAGE_TOOL_ARMS: Readonly<Record<AgentStatementLanguageId, Langu
       run: (context: AgentToolContext, input: unknown) => inspectPlanTool(context, input as { sql: string }),
     }),
     profile_table: Object.freeze({
-      operationId: "sql.table.profile",
       inputSchema: profileSelectorSchema,
       plan: planTableProfile,
       run: profileTableTool,
@@ -105,7 +104,6 @@ export const LANGUAGE_TOOL_ARMS: Readonly<Record<AgentStatementLanguageId, Langu
     inspect_schema: Object.freeze({ inputSchema: catalogSelectorSchema, run: mongoInspectSchemaTool }),
     inspect_plan: Object.freeze({ inputSchema: mongoPlanCommandSchema, run: mongoInspectPlanTool }),
     profile_table: Object.freeze({
-      operationId: "mongo.table.profile",
       inputSchema: mongoProfileSelectorSchema,
       plan: planMongoProfile,
       run: runMongoProfile,

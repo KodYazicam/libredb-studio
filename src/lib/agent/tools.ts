@@ -597,7 +597,10 @@ const readStatementSchema = z.strictObject({
   rationale: z.string().optional(),
 });
 
-/** What `inspect_plan` takes on SQL. Exported for the language arms (`language-arms.ts`), which parse with it. */
+/**
+ * What `inspect_plan` takes on SQL. Exported for the language arms (`language-arms.ts`), which declare it as the SQL
+ * arm's input, held equal to the offered schema by `tests/unit/lib/agent/tool-offer-census.test.ts`.
+ */
 export const planStatementSchema = z.strictObject({ sql: z.string().min(1) });
 
 const evidenceSchema = z.discriminatedUnion("source", [
@@ -669,7 +672,8 @@ const reportSchema = z.strictObject({
  * A profile names a TABLE, never columns and never SQL. The columns come from the
  * run's own captured inventory, so a profile cannot be aimed at something the run
  * never established exists — the same rule `compare_plans` follows about plans.
- * Exported for the language arms (`language-arms.ts`), which parse with it.
+ * Exported for the language arms (`language-arms.ts`), which declare it as the SQL
+ * arm's input, held equal to the offered schema by `tool-offer-census.test.ts`.
  */
 export const profileSelectorSchema = z.strictObject({
   /*
@@ -3266,9 +3270,11 @@ export type AgentObjectInventoryRead =
 /**
  * Whether a run's object-inventory grounding is taken under the execution profile its statements are sent under: an
  * agent-mode run of a workflow that sends statements, on an engine whose statement language is its own (`kubectl`,
- * `mongo`). Such a run is refused at its grounding exactly where its first statement would be. A SQL run grounds
- * through the composed catalog, which takes the read-only profile already; plan mode and the operations workflow send
- * no statement of the model's and ground under the operations profile.
+ * `mongo`). Such a run is refused at its grounding exactly where its first statement would be. A PostgreSQL or SQLite
+ * run grounds through the composed catalog (`CATALOG_PLANS`), under the read-only profile already; the other SQL
+ * engines ground through `readObjectInventoryForGrounding` under the operations profile, which refuses only what their
+ * own read-only open refuses, such as SQL Server's privileged principal (#1744's D345). Plan mode and the operations
+ * workflow send no statement of the model's and ground under the operations profile.
  */
 export function groundsUnderExecutionProfile(context: AgentToolContext): boolean {
   return context.mode === "agent" && context.workflowType !== "operations" && context.statementLanguage !== undefined;
@@ -4464,10 +4470,7 @@ function readPlanSide(
  * into a sentence the model would read as the server speaking. The finding codes
  * and the counts are this repository's own.
  */
-export function describeFindings(
-  findings: readonly AgentProfileFinding[],
-  operationId: AgentOperationId = "sql.table.profile",
-): string {
+export function describeFindings(findings: readonly AgentProfileFinding[], operationId: AgentOperationId): string {
   if (findings.length === 0) return "Nothing crossed a finding threshold.";
   return fenceUntrustedContent(
     findings.map((finding) => `${finding.column}: ${finding.code} — ${finding.detail}`).join("\n"),
@@ -4691,7 +4694,7 @@ export async function profileTableTool(
         operationId: "sql.table.profile",
         reference: outcome.artifact.correlationId,
       }),
-      describeFindings(findings),
+      describeFindings(findings, "sql.table.profile"),
     ].join(" "),
   };
 }

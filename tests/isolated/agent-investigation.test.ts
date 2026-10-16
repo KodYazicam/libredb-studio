@@ -5459,6 +5459,24 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     expect(rules).not.toContain("no document touched");
   });
 
+  test("a data-analysis run is told a plan returns none of the command's documents, never that it runs nothing", async () => {
+    // The variant offers inspect_plan as well, and a plan with several candidates runs each for a bounded trial, so
+    // "without running it" is not true of it: what a plan never does is answer with the command's documents.
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "data-analysis");
+    const script = scriptedModel(answersProse("ok"), answersProse("ok"));
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    });
+
+    const rules = rulesOfTurn(script.turns[0] as Turn);
+    expect(rules).toContain("a plan returns none of the command's documents");
+    expect(rules).not.toContain("without running it");
+  });
+
   test("a data-analysis record carrying auto-execute is not told it is on, because no mongo variant hands over", async () => {
     const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
     const run = await startMongoRun(b, "data-analysis", true);
