@@ -1391,7 +1391,7 @@ export interface ProviderCapabilities {
    * Optional for the same published-interface reason as `enforcesReadOnly`: a required field added
    * after the fact stops every external implementer compiling. Only the literal `true` is declared, so
    * an absent flag reads as "this engine has no file-access posture", the answer for every engine but
-   * DuckDB.
+   * DuckDB and SQLite.
    */
   readonly readsFileAccessPosture?: true;
   /**
@@ -1848,9 +1848,8 @@ export interface ProviderLabels {
  * refuses the whole call otherwise (fail closed).
  *
  * The row and byte caps bound the result, which is refused rather than truncated when it
- * would carry more. The timeout is held by the engine's own per-statement deadline where it
- * has one, and by a deadline the provider owns where it has none, because not every engine
- * can end a statement itself:
+ * would carry more. The timeout is held by the engine's own per-statement deadline, by a
+ * deadline the provider owns, or by both, as each engine allows:
  *
  * - PostgreSQL: `SET LOCAL statement_timeout`, transaction-local.
  * - MySQL and MariaDB: the provider kills the statement from another session at the deadline,
@@ -1908,11 +1907,6 @@ export interface ReadOnlyCatalogSelector {
    * (a MongoDB collection may be named `fs.files`). Absent lists the container's objects.
    */
   readonly object?: string;
-  /**
-   * Which half of a described object the caller presents. A described reading carries both halves whatever this
-   * names, so a half is never answered empty for not having been read.
-   */
-  readonly kind: "columns" | "indexes";
 }
 
 /**
@@ -1921,9 +1915,11 @@ export interface ReadOnlyCatalogSelector {
  * declared object kinds, as the engine's own catalog classifies the object, so a view is never described as the
  * collection underneath it.
  *
- * `described` carries columns inferred from a sample of the object's own records, because an engine answering this read
- * declares no columns, and `sampled` is how many records that sample held: no columns with `sampled: 0` is an object
- * whose sample held nothing. `not-found` is the only answer for an object the container does not hold.
+ * `described` carries both halves, columns and indexes, so the caller presents whichever one it was asked for and
+ * neither is ever answered empty for not having been read. Its columns are inferred from a sample of the object's own
+ * records, because an engine answering this read declares no columns, and `sampled` is how many records that sample
+ * held: no columns with `sampled: 0` is an object whose sample held nothing. `not-found` is the only answer for an
+ * object the container does not hold.
  */
 export type ReadOnlyCatalogReading =
   | {
@@ -2133,9 +2129,9 @@ export interface DatabaseProvider {
   query(sql: string, params?: unknown[], queryId?: string, scope?: string): Promise<QueryResult>;
 
   /**
-   * Execute exactly one statement, in the engine's own query language, under a declared
-   * read-only boundary (#328). The boundary takes one of three forms, and it never rests on
-   * parsing the statement text:
+   * Execute exactly one statement, in the language the provider declares (`queryLanguage`,
+   * `queryDialect`), under a declared read-only boundary (#328). The boundary takes one of
+   * three forms, and it never rests on parsing the statement text:
    *
    * - the engine's own read-only handle or transaction: SQLite and DuckDB open the file
    *   read-only; PostgreSQL, MySQL and MariaDB run the statement in a read-only transaction,
@@ -2620,13 +2616,16 @@ export interface ProviderExecutionContext {
    * on every open, a profiled one included, and refuses to open at all when it is `false`,
    * because its drivers cannot confine a statement's file access. Every other engine ignores it.
    *
-   * ABSENT MEANS DENY (fail closed): a caller that forgets to pass it gets the denied handle,
-   * never the open one, so a forged or missing context cannot widen file access. That
-   * includes an embedder calling `createDatabaseProvider` or `getOrCreateProvider` without a
-   * context, which had the full reach before this field existed and now passes `true` to keep
-   * it. On DuckDB `readOnly: true` already implies external access off and keeps precedence;
-   * an execution profile still carries the requester's posture (`executionContextFor`), which
-   * is what SQLite's refusal reads.
+   * On DuckDB, ABSENT MEANS DENY (fail closed): a caller that forgets to pass it gets the
+   * denied handle, never the open one, so a forged or missing context cannot widen file access.
+   * That includes an embedder calling `createDatabaseProvider` or `getOrCreateProvider` without
+   * a context, which had the full reach before this field existed and now passes `true` to keep
+   * it. `readOnly: true` already implies external access off there and keeps precedence.
+   *
+   * SQLite refuses only an explicit `false`. `getOrCreateProvider` reads an absent posture as
+   * `false`, and so does `executionContextFor`, which carries the requester's posture into
+   * every execution profile; `createDatabaseProvider` called without a context opens SQLite
+   * with the trusted reach (docs/providers/sqlite.md).
    */
   allowExternalFileAccess?: boolean;
 }

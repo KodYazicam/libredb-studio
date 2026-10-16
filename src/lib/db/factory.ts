@@ -38,12 +38,13 @@ import * as path from "path";
  *   the verified session and the resolved connection. What each provider establishes with `readOnly` and
  *   `sendsStatements` is stated once, on `ProviderExecutionContext` (types.ts); DuckDB reads
  *   `allowExternalFileAccess` on its editor handle, and SQLite refuses to open at all when it is
- *   `false`, a profiled handle included. ABSENT MEANS DENY: called without a context, as an
+ *   `false`, a profiled handle included. On DuckDB, ABSENT MEANS DENY: called without a context, as an
  *   embedder that predates the posture calls it, a DuckDB handle opens with
  *   `enable_external_access: 'false'`, so `read_csv`, `COPY`, `ATTACH` of a file and
  *   `INSTALL` are refused outside its private temp directory and its database's own file
  *   names (docs/providers/duckdb.md section 3.16) while the database stays writable; pass
- *   `{ allowExternalFileAccess: true }` for the full editor reach.
+ *   `{ allowExternalFileAccess: true }` for the full editor reach. SQLite refuses only an explicit
+ *   `false`, so called without a context it opens with the trusted reach.
  * @returns Promise<DatabaseProvider> instance
  * @throws DatabaseConfigError if connection type is not supported, or if its `readOnly` cannot be
  *   honoured (see assertReadOnlyHonoured)
@@ -1086,9 +1087,9 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * same `readOnly: true` (on PostgreSQL and SQL Server that still verifies the role or
  * principal at open, under every profile), the same `agentUser` credential resolution, and
  * the same profiled cache, so neither an operations run nor an editor replay is ever handed
- * the editor's writable pool. What they do not share is the proof of the statement boundary:
- * it keys on `sendsStatements`, which `executionContextFor` derives from the second field, so
- * a provider that proves the boundary at open (MongoDB) proves it for `agent-read-only` and
+ * the editor's writable pool. What they need not share is a proof a provider keys on
+ * `sendsStatements`, the flag `executionContextFor` derives from the second field: such a
+ * provider (MongoDB) proves its statement boundary at open for `agent-read-only` and
  * `agent-handover`, and opens `agent-operations`, which sends no statement, with neither the
  * proof nor its refusal.
  */
