@@ -25,6 +25,13 @@ import type { Db, Document, MongoClient } from "mongodb";
 import type { RevivedMongoReadEnvelope } from "./extended-json";
 import { serializeMongoDocument } from "./values";
 
+/**
+ * The comment every command of the agent's carries, and the application name of its client (`index.ts`), so the
+ * server's own records of a run (the profiler, the slow-query log, `$currentOp`, an audited authorization failure)
+ * can be told from every other client's.
+ */
+export const AGENT_COMMAND_COMMENT = "libredb-studio-agent";
+
 /** The client's backstop: how long after the server's own deadline the owned timer fires. */
 const CLIENT_BACKSTOP_SLACK_MS = 2_000;
 

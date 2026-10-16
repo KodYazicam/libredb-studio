@@ -68,8 +68,8 @@ import {
 import { formatBytes } from "../../../utils/pool-manager";
 import { unionFields, uniquelyKeyedRows } from "../../../utils/result-fields";
 import { CACHE_HIT_RATIO_UNAVAILABLE, formatCacheHitRatio, measuredNumber } from "@/lib/monitoring-cache-ratio";
-import { readMongoForAgent } from "./agent-read";
-import { verifyAgentProfile } from "./agent-boundary";
+import { AGENT_COMMAND_COMMENT, readMongoForAgent } from "./agent-read";
+import { AGENT_VERIFY_MAX_TIME_MS, agentHostsOf, verifyAgentProfile } from "./agent-boundary";
 import { parseExtendedJson, reviveEnvelope } from "./extended-json";
 import { readMongoCommand } from "./envelope";
 import { bsonTypeOf, serializeMongoDocument, uuidText } from "./values";
@@ -732,20 +732,26 @@ export class MongoDBProvider extends BaseDatabaseProvider {
   private db: Db | null = null;
 
   /**
-   * Whether this provider was opened under the agent read-only execution profile. Only
-   * then does `queryReadOnly` run, and only then does `connect()` prove the profile's
-   * boundary - the engine identified on the wire and the principal's inability to write,
-   * both by the server's own answers (`mongodb-agent.ts`). The verification runs at THIS
-   * connection's open rather than lazily on the first read because a profiled MongoDB
-   * connection is only ever opened for statement-sending paths: plan mode and the
-   * operations workflow ground through their own profile and never reach this one, which
-   * is the shape #1744's D345 names the reference for MySQL.
+   * Whether this provider was opened to send an agent's statements: under an execution profile (`readOnly`) whose
+   * acquisition calls `queryReadOnly` (`sendsStatements`). Only then does `connect()` prove the profile's boundary
+   * (`verifyAgentProfile` in `agent-boundary.ts`), and only then do `queryReadOnly` and `readCatalogReadOnly` answer.
+   * The operations profile's acquisitions send no statement, so they open unverified, as every MongoDB connection did
+   * before agent mode reached the engine, and the profiled cache, which keys on the profile, never hands such a handle
+   * to a statement-sending one (`ProviderExecutionContext.sendsStatements`).
    */
   private readonly readOnlyProfile: boolean;
 
+  /**
+   * Whether this provider was opened under any execution profile. Its client then retries no write, so a write the
+   * server accepts is attempted once, and names itself to the server as the agent (`AGENT_COMMAND_COMMENT`), so the
+   * server's own records of what it sent can be told from the editor's.
+   */
+  private readonly executionProfile: boolean;
+
   constructor(config: DatabaseConnection, options: ProviderOptions = {}, execution: ProviderExecutionContext = {}) {
     super(config, options);
-    this.readOnlyProfile = execution.readOnly === true;
+    this.executionProfile = execution.readOnly === true;
+    this.readOnlyProfile = this.executionProfile && execution.sendsStatements === true;
     this.validate();
   }
 
@@ -889,6 +895,7 @@ export class MongoDBProvider extends BaseDatabaseProvider {
         connectTimeoutMS: this.poolConfig.acquireTimeout,
         serverSelectionTimeoutMS: MONGODB_SERVER_SELECTION_TIMEOUT_MS,
         ...this.buildTLSOptions(),
+        ...(this.executionProfile ? { retryWrites: false, appName: AGENT_COMMAND_COMMENT } : {}),
       };
 
       this.client = new MongoClient(connectionString, options);
@@ -936,15 +943,15 @@ export class MongoDBProvider extends BaseDatabaseProvider {
         // Test connection
         await this.db.command({ ping: 1 });
 
-        // Under the profile, the connection IS the boundary's proof: the engine is
-        // identified by its own buildInfo and the principal's inability to write is
-        // proven by the server's refusal of one write (`mongodb-agent.ts`). A refusal
-        // here is a `ExecutionProfileError`, which the grounding path reads as the
-        // run's own refusal with advice rather than as a broken connection. Plan mode
-        // and the operations workflow never open a provider under this profile, so
-        // this refusal is exactly the statement-sending runs'.
+        // A connection that will send an agent's statements proves the boundary before it is used:
+        // the server is MongoDB, its user holds only reads of this database, and the server
+        // enforces that (`verifyAgentProfile`). A refusal is an `ExecutionProfileError`, which the
+        // run reads as its own refusal with advice rather than as a broken connection.
         if (this.readOnlyProfile) {
-          await verifyAgentProfile(this.client, dbName);
+          await verifyAgentProfile(this.client, dbName, {
+            maxTimeMS: AGENT_VERIFY_MAX_TIME_MS,
+            hosts: agentHostsOf(this.client),
+          });
         }
 
         this.setConnected(true);
@@ -952,8 +959,8 @@ export class MongoDBProvider extends BaseDatabaseProvider {
       }
     } catch (error) {
       // A profile verdict is not a connection failure and must not be wrapped as one:
-      // the refusal's own code (`PROFILE_PRIVILEGES_TOO_BROAD`, `PROFILE_UNSUPPORTED_TARGET`)
-      // is what the grounding path reads to name the run's reason and the advice, and a
+      // the refusal's own deny code (`PROFILE_PRIVILEGES_TOO_BROAD`, `PROFILE_SERVER_UNENFORCED`
+      // and the rest) is what the run reads to name its reason and the advice, and a
       // `ConnectionError` here would bury it in "failed to connect". The client still
       // closes below before it is rethrown.
       const isProfileVerdict = error instanceof ExecutionProfileError;
