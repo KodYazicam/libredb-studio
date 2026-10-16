@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createLocalWorld } from "@workflow/world-local";
 import { streamText, tool } from "ai";
+import { AGENT_WORKFLOW_VARIANTS, persistedRunFacts, workflowAvailability } from "@/lib/agent/agent-manifest";
 import { unreadStopAsksFor } from "@/lib/agent/models";
 import { forgetHeldSnapshots } from "@/lib/agent/context-snapshot";
 import { AgentRunDeadline } from "@/lib/agent/deadline";
@@ -21,7 +22,7 @@ import { resolveAgentProviderAdapter } from "@/lib/agent/provider-registry";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import { AgentRunService, AgentRunServiceError } from "@/lib/agent/run-service";
 import { AgentRunStore } from "@/lib/agent/run-store";
-import { AGENT_TOOL_DEFINITIONS } from "@/lib/agent/tools";
+import { AGENT_TOOL_DEFINITIONS, type AgentToolContext, groundsUnderExecutionProfile } from "@/lib/agent/tools";
 import type { AgentRunActor, AgentRunEvent, AgentRunRecord, AgentRunWorkflowType } from "@/lib/agent/types";
 import { UNTRUSTED_CONTENT_BEGIN } from "@/lib/agent/untrusted-content";
 import { ExecutionProfileError, QueryError } from "@/lib/db/errors";
@@ -160,10 +161,11 @@ interface BootOptions {
   readonly spentMs?: number;
   /**
    * Fails the provider acquisition — a reach that dies before the statement is
-   * sent. Called once per acquisition and may return nothing, so a fixture can let
-   * the drive's context capture succeed and take the pool away afterwards.
+   * sent. Called once per acquisition, with the execution profile asked for, and may
+   * return nothing, so a fixture can let the drive's context capture succeed and take
+   * the pool away afterwards, or refuse one profile and grant another.
    */
-  readonly acquireFails?: () => Error | undefined;
+  readonly acquireFails?: (profile: string) => Error | undefined;
   /**
    * What the provider says when asked to describe its own schema (#414).
    *
@@ -204,8 +206,8 @@ function boot(dataDir: string, options: BootOptions = {}): Boot {
       })),
     }),
   } as unknown as DatabaseProvider;
-  const acquireProvider = mock(async () => {
-    const failure = options.acquireFails?.();
+  const acquireProvider = mock(async (_connection: DatabaseConnection, profile: string) => {
+    const failure = options.acquireFails?.(profile);
     if (failure) throw failure;
     return provider;
   });
@@ -5314,6 +5316,279 @@ describe("a run opened with auto-execute is told what the gate needs", () => {
       expect(rulesOf(script.turns[0] as Turn), workflowType).not.toContain("AUTO-EXECUTE IS ON");
     }
   });
+});
+
+/*
+  A MongoDB run is offered no `compare_plans` (`agent-manifest.ts` says why), so every sentence it is told must name only
+  the tools it holds. Its plans are recorded under `mongo.plan.estimate`, and a count of plans taken over the SQL id
+  alone told a run that had inspected one plan that it had "inspected none", and sent it to a tool it does not have.
+*/
+describe("a MongoDB run is told only what its own tools can do", () => {
+  const column = (name: string): ColumnSchema => ({ name, type: "string", nullable: true, isPrimary: false });
+  const ORDERS: GroundedObject = { name: "orders", columns: [column("customerId")], indexes: [], foreignKeys: [] };
+
+  const mongoResources = (b: Boot): AgentToolResources => ({
+    ...b.resources,
+    connection: { ...CONNECTION, type: "mongodb" },
+    capabilities: { ...OBJECT_CAPABILITIES, queryLanguage: "json", declaresForeignKeys: false },
+  });
+
+  async function startMongoRun(
+    b: Boot,
+    workflowType: AgentRunWorkflowType,
+    autoExecute = false,
+  ): Promise<AgentRunRecord> {
+    const availability = workflowAvailability("agent", workflowType, "mongodb");
+    if (!availability.open) throw new Error(`${workflowType} does not open on mongodb`);
+    return b.service.start({
+      mode: "agent",
+      workflowType,
+      autoExecute,
+      ...persistedRunFacts("agent", workflowType, availability),
+      actor: ACTOR,
+      connectionId: "conn_1",
+      objective: OBJECTIVE,
+    });
+  }
+
+  test("a run that inspected one plan and reports is asked for an index citing that plan, never told it has none", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(
+      callsTool("inspect_plan", { command: { collection: "orders", operation: "find", filter: { customerId: 7 } } }),
+      reportOn("The orders read scans the whole collection."),
+      answersProse("No report."),
+      answersProse("No report."),
+    );
+
+    // A script that runs out is the driving process dying, which the drive surfaces as a rejection; the ledger it
+    // left is what this reads.
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    }).catch(() => undefined);
+
+    const events = await eventsOf(b.store, run.runId);
+    const plan = events.find(
+      (event) => event.kind === "tool-completed" && event.artifact.operationId === "mongo.plan.estimate",
+    );
+    if (plan?.kind !== "tool-completed") throw new Error("the run took no plan");
+    const held = events.find((event) => event.kind === "call-held");
+    if (held?.kind !== "call-held") throw new Error("the report was not held");
+    expect(held).toMatchObject({ tool: "compose_report", shortfall: "no-plan-comparison" });
+    expect(held.reason).toContain("recommend_change");
+    expect(held.reason).toContain(plan.artifact.correlationId);
+    expect(held.reason).not.toContain("inspected none");
+    expect(held.reason).not.toContain("compare_plans");
+    // The model reads the same sentence the ledger records.
+    expect(promptText(script.turns[2] as Turn)).toContain(plan.artifact.correlationId);
+  });
+
+  test("a run that reports holding no plan is sent to plan its command and recommend an index, never to compare", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(
+      callsTool("run_read_query", {
+        command: { collection: "orders", operation: "find", filter: { customerId: 7 }, options: { limit: 5 } },
+      }),
+      reportOn("The orders read returns few documents."),
+      answersProse("No report."),
+      answersProse("No report."),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    }).catch(() => undefined);
+
+    const held = (await eventsOf(b.store, run.runId)).find((event) => event.kind === "call-held");
+    if (held?.kind !== "call-held") throw new Error("the report was not held");
+    expect(held).toMatchObject({ tool: "compose_report", shortfall: "no-plan-comparison" });
+    // In the language's own noun, and by the one route its variant holds.
+    expect(held.reason).toContain(
+      "Call inspect_plan on the command in question, then recommend_change for an index citing that plan's artifact id",
+    );
+    expect(held.reason).not.toContain("compare_plans");
+  });
+
+  // Every workflow whose variant writes a command, read off the variants rather than listed, so a workflow added later
+  // is held to the rule by being offered the read.
+  const commandWorkflows = Object.entries(AGENT_WORKFLOW_VARIANTS.mongo).flatMap(([workflow, variant]) =>
+    variant?.tools.includes("run_read_query") === true ? [workflow as AgentRunWorkflowType] : [],
+  );
+
+  test.each(commandWorkflows)(
+    "a %s run is told a command names the collection alone, not as the inventory spells it",
+    async (workflowType) => {
+      // Written whole, the inventory's app.orders names a collection of that name inside the bound database, which does
+      // not exist, and the read answers empty rather than failing, so nothing else would tell the run its spelling.
+      const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+      const run = await startMongoRun(b, workflowType);
+      const script = scriptedModel(answersProse("ok"), answersProse("ok"));
+
+      await runInvestigation(run.runId, {
+        service: b.service,
+        model: await modelOver(script.fetch),
+        resources: mongoResources(b),
+      });
+
+      expect(rulesOfTurn(script.turns[0] as Turn)).toContain(
+        'a command names the collection alone, as in "collection": "orders", and reads the database this run\'s connection is bound to.',
+      );
+    },
+  );
+
+  test("its rules name neither a plan comparison nor an untouched document", async () => {
+    // A plan with several candidates runs each for a bounded trial, so "no document touched" is not true of it, and
+    // a comparison tool the run does not hold is a rule its tool set cannot satisfy (#350).
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const script = scriptedModel(answersProse("ok"), answersProse("ok"));
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    });
+
+    const rules = rulesOfTurn(script.turns[0] as Turn);
+    expect(rules).toContain("recommend_change");
+    expect(rules).not.toContain("compare_plans");
+    expect(rules).not.toContain("no document touched");
+  });
+
+  test("a data-analysis record carrying auto-execute is not told it is on, because no mongo variant hands over", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "data-analysis", true);
+    const script = scriptedModel(answersProse("ok"), answersProse("ok"));
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    });
+
+    expect(rulesOfTurn(script.turns[0] as Turn)).not.toContain("AUTO-EXECUTE IS ON");
+  });
+});
+
+/*
+  D11: a run that sends statements and whose grounding the execution profile refuses ends before its first model turn,
+  on every engine. Every database tool such a run holds acquires the same profile and would be refused the same way,
+  so a model turn there buys nothing but a drafted statement that never runs - and on MongoDB, before the probe changed
+  nothing, a second refused acquisition that wrote. Plan mode and the operations workflow send no statement of the
+  model's, and keep going ungrounded (B48).
+*/
+describe("a run whose grounding the execution profile refuses", () => {
+  const column = (name: string): ColumnSchema => ({ name, type: "string", nullable: true, isPrimary: false });
+  const ORDERS: GroundedObject = { name: "orders", columns: [column("customerId")], indexes: [], foreignKeys: [] };
+  const tooBroad = () =>
+    new ExecutionProfileError("this user can write, so the profile will not run as it", "PROFILE_PRIVILEGES_TOO_BROAD");
+
+  const mongoResources = (b: Boot): AgentToolResources => ({
+    ...b.resources,
+    connection: { ...CONNECTION, type: "mongodb" },
+    capabilities: { ...OBJECT_CAPABILITIES, queryLanguage: "json", declaresForeignKeys: false },
+  });
+
+  test("an engine's own inventory is read under the profile its statements take exactly when the run sends them", () => {
+    // The composed SQL catalog already reads under the read-only profile; the provider's own inventory does for a
+    // statement-sending agent run on a language of its own, so its refusal lands at the grounding, before any turn.
+    const run = (fields: Pick<AgentToolContext, "mode" | "workflowType" | "statementLanguage">) =>
+      groundsUnderExecutionProfile(fields as AgentToolContext);
+    expect(run({ mode: "agent", workflowType: "investigation", statementLanguage: "mongo" })).toBe(true);
+    expect(run({ mode: "agent", workflowType: "data-analysis", statementLanguage: "kubectl" })).toBe(true);
+    expect(run({ mode: "agent", workflowType: "operations", statementLanguage: "mongo" })).toBe(false);
+    expect(run({ mode: "planning", workflowType: "investigation", statementLanguage: "mongo" })).toBe(false);
+    expect(run({ mode: "agent", workflowType: "investigation" })).toBe(false);
+  });
+
+  async function startRunIn(
+    b: Boot,
+    mode: "agent" | "planning",
+    workflowType: AgentRunWorkflowType,
+    type: DatabaseType,
+  ): Promise<AgentRunRecord> {
+    const availability = workflowAvailability(mode, workflowType, type);
+    if (!availability.open) throw new Error(`${workflowType} does not open on ${type}`);
+    return b.service.start({
+      mode,
+      workflowType,
+      ...persistedRunFacts(mode, workflowType, availability),
+      actor: ACTOR,
+      connectionId: "conn_1",
+      objective: OBJECTIVE,
+    });
+  }
+
+  /** What every refused statement-sending run must show: no turn, no statement, the code recorded, the error thrown. */
+  async function expectEndedBeforeAnyTurn(b: Boot, run: AgentRunRecord, resources: AgentToolResources): Promise<void> {
+    const script = scriptedModel(answersProse("never asked"), answersProse("never asked"));
+    const refused = await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources,
+    }).catch((error: unknown) => error);
+
+    expect(refused).toBeInstanceOf(ExecutionProfileError);
+    expect((refused as ExecutionProfileError).reasonCode).toBe("PROFILE_PRIVILEGES_TOO_BROAD");
+    expect(script.turns).toHaveLength(0);
+    const events = await eventsOf(b.store, run.runId);
+    expect(kindsOf(events)).not.toContain("statement-drafted");
+    expect(kindsOf(events)).not.toContain("tool-invoked");
+    const unavailable = events.filter((event) => event.kind === "context-unavailable");
+    expect(unavailable).toHaveLength(1);
+    expect(unavailable[0]).toMatchObject({
+      reasonCode: "CATALOG_READ_REFUSED",
+      profileReasonCode: "PROFILE_PRIVILEGES_TOO_BROAD",
+    });
+  }
+
+  test("a MongoDB run ends before its first model turn, its grounding taken under the profile its reads take", async () => {
+    // Only the read-only profile refuses here: a grounding taken under the operations profile, which sends no
+    // statement and so proves nothing, would be granted, and the run would go on to a turn it cannot use.
+    const b = boot(freshDataDir(), {
+      describesSchema: async () => [ORDERS],
+      acquireFails: (profile) => (profile === "agent-read-only" ? tooBroad() : undefined),
+    });
+    const run = await startRunIn(b, "agent", "investigation", "mongodb");
+
+    await expectEndedBeforeAnyTurn(b, run, mongoResources(b));
+    expect(b.acquireProvider.mock.calls.map((call) => call[1])).toEqual(["agent-read-only"]);
+  });
+
+  test("a PostgreSQL run ends the same way: the drive decides it, never the engine", async () => {
+    // A superuser on PostgreSQL is refused at the composed catalog read, which acquires the read-only profile like
+    // every statement does. Before D11 it spent a paid turn and drafted a statement first.
+    const b = boot(freshDataDir(), { acquireFails: () => tooBroad() });
+    const run = await startRun(b, "agent");
+
+    await expectEndedBeforeAnyTurn(b, run, b.resources);
+  });
+
+  test.each([
+    ["planning", "investigation"],
+    ["agent", "operations"],
+  ] as const)(
+    "a %s %s run records the refusal and goes on to its first turn, ungrounded",
+    async (mode, workflowType) => {
+      const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS], acquireFails: () => tooBroad() });
+      const run = await startRunIn(b, mode, workflowType, "mongodb");
+      const script = scriptedModel(answersProse("a plan"), answersProse("a plan"));
+
+      await runInvestigation(run.runId, {
+        service: b.service,
+        model: await modelOver(script.fetch),
+        resources: mongoResources(b),
+      });
+
+      expect(script.turns.length).toBeGreaterThan(0);
+      const unavailable = (await eventsOf(b.store, run.runId)).find((event) => event.kind === "context-unavailable");
+      expect(unavailable).toMatchObject({ profileReasonCode: "PROFILE_PRIVILEGES_TOO_BROAD" });
+    },
+  );
 });
 
 describe("a run that would report an answer it never presented", () => {
