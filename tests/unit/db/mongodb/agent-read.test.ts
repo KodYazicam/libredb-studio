@@ -640,7 +640,7 @@ describe("the database a run is bound to", () => {
 });
 
 describe("the owned deadline", () => {
-  test("every call carries the session, the server deadline and the agent's comment", async () => {
+  test("every call carries the session, the server deadline and the agent's comment, in batches of at most 100", async () => {
     for (const envelope of [FIND, FIND_ONE, AGGREGATE, COUNT]) {
       for (const mode of ["execute", "estimate-plan"] as const) {
         const { client, opened, sessions } = fakeClient({ documents: [] });
@@ -648,8 +648,14 @@ describe("the owned deadline", () => {
         expect(opened[0].options).toMatchObject({ maxTimeMS: 5000, comment: AGENT_COMMAND_COMMENT });
         expect((opened[0].options.session as { id: unknown }).id).toEqual(sessions[0].id);
         expect(sessions[0].ended).toBe(true);
+        // One batch holds the row bound when it fits: one past the budget, which is 10 rows here.
+        expect(opened[0].options.batchSize).toBe(Math.min(BUDGET.maxResultRows + 1, 100));
       }
     }
+    // A larger budget is read in batches of 100, never in one batch of its whole bound.
+    const wide = fakeClient({ documents: [] });
+    await read(wide.client, FIND, "execute", { ...BUDGET, maxResultRows: 500 });
+    expect(wide.opened[0].options).toMatchObject({ batchSize: 100, limit: 50 });
     for (const mode of ["execute", "estimate-plan"] as const) {
       const { client, sent, sessions } = fakeClient({ values: [] });
       await read(client, DISTINCT, mode);
