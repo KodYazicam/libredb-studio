@@ -13,7 +13,11 @@ import { MCP_UNTRUSTED_NOTICE } from "@/lib/mcp/output";
 import { MCP_INSTRUCTIONS } from "@/lib/mcp/server";
 import { INSPECT_SCHEMA_DESCRIPTION } from "@/lib/mcp/tools/inspect-schema";
 import { LIST_CONNECTIONS_DESCRIPTION } from "@/lib/mcp/tools/list-connections";
-import { RUN_READ_QUERY_DESCRIPTION, RUN_READ_QUERY_ENGINES } from "@/lib/mcp/tools/run-read-query";
+import {
+  RUN_READ_QUERY_DESCRIPTION,
+  RUN_READ_QUERY_ENGINES,
+  RUN_READ_QUERY_TYPES,
+} from "@/lib/mcp/tools/run-read-query";
 import { pinMcpTestEnvironment, resetMcpTestState } from "../../helpers/mcp-fixtures";
 import { handlerServe, legacyPost, readJsonRpc } from "../../helpers/mcp-harness";
 
@@ -41,28 +45,35 @@ describe("the tool descriptions", () => {
     expect(LIST_CONNECTIONS_DESCRIPTION).not.toContain(MCP_UNTRUSTED_NOTICE);
   });
 
-  test("run_read_query names the execution engines whose MCP statement path it speaks", () => {
-    // The same filter the tool derives with: offered by MCP_EXPOSABLE, and speaking the SQL this
-    // tool's input is. MongoDB is agent-executable (issue #1614) and MCP-exposed, but its
-    // statement is a command envelope this SQL tool cannot run - naming it would advertise a
-    // tool that only ever refuses there, the same reason Kubernetes is absent.
-    const derived = namedList(
-      AGENT_EXECUTION_ENGINES.filter(
-        (type) => MCP_EXPOSABLE[type] && (AGENT_STATEMENT_LANGUAGE[type] ?? "sql") === "sql",
-      ).map((type) => getDBConfig(type).label),
-    );
-    expect(RUN_READ_QUERY_ENGINES).toBe(derived);
-    expect(derived).toBe("PostgreSQL, SQLite, DuckDB, SQL Server and MySQL");
+  test("run_read_query names the engines it serves, from the one list its handler gates on", () => {
+    expect(RUN_READ_QUERY_ENGINES).toBe(namedList(RUN_READ_QUERY_TYPES.map((type) => getDBConfig(type).label)));
+    expect(RUN_READ_QUERY_ENGINES).toBe("PostgreSQL, SQLite, DuckDB, SQL Server and MySQL");
     expect(RUN_READ_QUERY_DESCRIPTION).toContain(
-      `Runs on ${derived}; other engines refuse it, so use inspect_schema there.`,
+      `Runs on ${RUN_READ_QUERY_ENGINES}; other engines refuse it, so use inspect_schema there.`,
     );
   });
 
-  test("an execution engine MCP is not offered on is not named", () => {
+  test("an execution engine MCP is not offered on is neither served nor named", () => {
     const withheld = AGENT_EXECUTION_ENGINES.filter((candidate) => !MCP_EXPOSABLE[candidate]);
     // Not vacuous: Kubernetes executes for the agent and is not offered to MCP.
     expect(withheld).toEqual(["kubernetes"]);
-    for (const type of withheld) expect(RUN_READ_QUERY_ENGINES).not.toContain(getDBConfig(type).label);
+    for (const type of withheld) {
+      expect(RUN_READ_QUERY_TYPES).not.toContain(type);
+      expect(RUN_READ_QUERY_ENGINES).not.toContain(getDBConfig(type).label);
+    }
+  });
+
+  test("an execution engine whose statements are not SQL is neither served nor named", () => {
+    const otherLanguage = AGENT_EXECUTION_ENGINES.filter(
+      (candidate) => MCP_EXPOSABLE[candidate] && AGENT_STATEMENT_LANGUAGE[candidate] !== "sql",
+    );
+    // Not vacuous: MongoDB executes for the agent and is offered to MCP for inspect_schema, but its
+    // statement is a JSON command and this tool's input is SQL (issue #1614, decision 2).
+    expect(otherLanguage).toEqual(["mongodb"]);
+    for (const type of otherLanguage) {
+      expect(RUN_READ_QUERY_TYPES).not.toContain(type);
+      expect(RUN_READ_QUERY_ENGINES).not.toContain(getDBConfig(type).label);
+    }
   });
 
   test("inspect_schema and list_connections say they work on every engine", () => {
