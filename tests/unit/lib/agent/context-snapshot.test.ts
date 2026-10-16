@@ -18,6 +18,8 @@ import { assertPersistableState } from "@/lib/agent/state-guard";
 import type { AgentToolContext } from "@/lib/agent/tools";
 import type { AgentContextSnapshot, AgentRunEvent } from "@/lib/agent/types";
 import { UNTRUSTED_CONTENT_BEGIN, UNTRUSTED_CONTENT_END } from "@/lib/agent/untrusted-content";
+import { getDBConfig } from "@/lib/db-ui-config";
+import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { ConnectionError, ExecutionProfileError, QueryError } from "@/lib/db/errors";
 import { createDatabaseProvider } from "@/lib/db/factory";
 import { measureResultBytes } from "@/lib/db/providers/sql/read-only-budget";
@@ -773,6 +775,8 @@ describe("captureContextSnapshot — when no honest inventory can be built", () 
     if (capture.kind !== "unavailable") throw new Error("unreachable");
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.modelText).toContain("inspect_schema");
+    // The profile opened and the read itself was refused, so there is no profile refusal for a drive to act on.
+    expect(capture).not.toHaveProperty("profileRefusal");
   });
 
   test("a partial inventory is never presented as whole: one failed read loses the snapshot", async () => {
@@ -884,6 +888,8 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.detail).toContain("could not reach this postgres database to ask it for its schema");
     // The driver's own message stays out of the note a run reads as the server's voice.
     expect(capture.detail).not.toContain("ECONNREFUSED");
+    // An unreachable database is not the profile refusing anything, so no refusal travels for a drive to act on.
+    expect(capture).not.toHaveProperty("profileRefusal");
   });
 
   test("a credential the profile layer will not grant loses the grounding, not the run", async () => {
@@ -936,13 +942,110 @@ describe("captureContextSnapshot — an environment failure on the composed path
     if (capture.kind !== "unavailable") throw new Error("unreachable");
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
-    expect(capture.detail).toContain("Point the connection's agent credential at a least-privilege principal");
+    expect(capture.detail).toContain("Connect as a least-privilege user");
+    // No run can carry an agent credential (B85: runs open on seed ids, and a seed declares none), so advice naming
+    // one sends the operator to a field the run never reads.
+    expect(capture.detail).not.toContain("agent credential");
     // The generic sentence alone is not what a caller gets, and the advice is not the
     // credential code's: a shared sentence would make both assertions above vacuous.
     expect(capture.detail).not.toMatch(/so its schema was not read for this run\.$/);
     expect(capture.detail).not.toContain("both a user and a password are required");
     // The error's own message stays out of the note a run reads as the server's voice.
     expect(capture.detail).not.toContain("the session principal holds");
+  });
+
+  test("the profile's own refusal travels on the capture beside the entry it always wrote", async () => {
+    // The capture only reports it: plan mode and the operations workflow continue ungrounded on it (B48), and a
+    // run that sends statements is the drive's to end, which needs the code to record and the error to rethrow.
+    const h = harness("postgres");
+    const refusal = new ExecutionProfileError(
+      "the session principal holds privileges no read-only boundary can contain",
+      "PROFILE_PRIVILEGES_TOO_BROAD",
+    );
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw refusal;
+      },
+    });
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    // The entry a ledger reader already knows is unchanged.
+    expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.profileRefusal?.reasonCode).toBe("PROFILE_PRIVILEGES_TOO_BROAD");
+    // The thrown error itself, so a drive that rethrows it is classified on its own type and code.
+    expect(capture.profileRefusal?.error).toBe(refusal);
+  });
+
+  test("a server that does not enforce authorization is told to turn it on, not to change its user", async () => {
+    // Keyed by the deny code, so driven on the composed path like the test above. On such a server no user is held
+    // read-only, so the advice for a user holding too much, or too little, could not help.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError(
+          "the server accepted a write it should have refused",
+          "PROFILE_SERVER_UNENFORCED",
+        );
+      },
+    });
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.profileRefusal?.reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
+    expect(capture.detail).toContain("Turn on the server's authorization");
+    expect(capture.detail).not.toContain("holds privileges no read-only boundary can contain");
+    expect(capture.detail).not.toContain("the server accepted a write it should have refused");
+  });
+
+  test("a target the profile cannot be granted against is described by what it is, naming no engine", async () => {
+    // One code for an in-memory SQLite or DuckDB database, a server on the MySQL wire that is neither MySQL nor
+    // MariaDB, and a server on the MongoDB wire that is not MongoDB: advice naming one of them is false of the rest.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError(
+          "this server identifies itself as another engine",
+          "PROFILE_UNSUPPORTED_TARGET",
+        );
+      },
+    });
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    const advice = capture.detail.split("so its schema was not read for this run. ")[1] ?? "";
+    expect(advice).toContain("wire protocol");
+    expect(advice).toContain("in-memory database");
+    const engines = [
+      ...EXTERNAL_DATABASE_TYPES.map((type) => getDBConfig(type).label),
+      "MariaDB",
+      "Percona",
+      "FerretDB",
+      "DocumentDB",
+      "Cosmos DB",
+    ];
+    expect(engines.filter((engine) => advice.includes(engine))).toEqual([]);
+  });
+
+  test("a principal that lacks a privilege is told to grant it, or to connect as a user at all", async () => {
+    // The same code is raised for a connection that authenticated no user, whose repair is a user and not a grant.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError("the principal cannot ask for a plan", "PROFILE_PRIVILEGES_TOO_NARROW");
+      },
+    });
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.detail).toContain("Grant that user the missing privilege named in the server log");
+    expect(capture.detail).toContain("authenticated no user");
+    expect(capture.detail).toContain("connect as a user that holds it");
   });
 
   test("anything that is not one of those two is this server's own bug, and propagates", async () => {
@@ -1316,6 +1419,22 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     // The driver's own message stays out of it: this sentence is the server's voice in
     // the note a plan run reads, and nothing fenced it.
     expect(capture.detail).not.toContain("ECONNREFUSED");
+    expect(capture).not.toHaveProperty("profileRefusal");
+  });
+
+  test("the profile's own refusal travels on this path's capture too, the error itself included", async () => {
+    const refusal = new ExecutionProfileError(
+      "the server accepted a write it should have refused",
+      "PROFILE_SERVER_UNENFORCED",
+    );
+    const h = providerHarness({ acquireThrows: refusal });
+
+    const capture = await captureContextSnapshot(h.context);
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.profileRefusal?.reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
+    expect(capture.profileRefusal?.error).toBe(refusal);
   });
 
   test("a credential the profile layer will not grant loses the grounding, not the run", async () => {
