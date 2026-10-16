@@ -305,43 +305,157 @@ describe("the one builder", () => {
 });
 
 describe("planOnly", () => {
-  test("keeps the plan and drops what the server says about itself, at any depth", () => {
-    const reply = {
+  /** What a server answers beside the plan at the top level of every explain reply. */
+  const SERVER_SPEAKING = {
+    command: { find: "orders", filter: { ok: 1, command: "x" } },
+    serverInfo: { host: "h0", port: 27017, version: "9.0.4", gitVersion: "64ade602" },
+    serverParameters: { internalQueryFacetBufferSizeBytes: 104857600 },
+    ok: 1,
+    $clusterTime: { clusterTime: 1 },
+    operationTime: 1,
+  };
+
+  test("keeps the plan as the server wrote it, where it echoes the command's field names, whatever they are", () => {
+    // The shapes 9.0.4, 8.3.11 and 7.0.43 answer for field names chosen to collide with the server's own (measured):
+    // the names come back in the parsed query, a stage's filter, projection and sort, an index's key pattern, multikey
+    // paths and bounds, and an aggregate's stages, and the server's own keys only at the top level.
+    const find = {
       explainVersion: "1",
       queryPlanner: {
         namespace: "app.orders",
-        parsedQuery: { _id: new ObjectId("65f0a1b2c3d4e5f6a7b8c9d0") },
+        parsedQuery: { ok: { $eq: 1 }, command: { $eq: "x" }, _id: { $eq: new ObjectId("65f0a1b2c3d4e5f6a7b8c9d0") } },
+        winningPlan: {
+          stage: "PROJECTION_SIMPLE",
+          transformBy: { ok: true, serverInfo: true },
+          inputStage: {
+            stage: "SORT",
+            sortPattern: { connectionString: 1, ok: -1 },
+            inputStage: {
+              stage: "FETCH",
+              filter: { $and: [{ operationTime: { $eq: 5 } }, { serverParameters: { $eq: "s" } }] },
+              inputStage: {
+                stage: "IXSCAN",
+                keyPattern: { ok: 1 },
+                indexName: "ok_1",
+                multiKeyPaths: { ok: [] },
+                indexBounds: { ok: ["[1, 1]"] },
+              },
+            },
+          },
+        },
+        rejectedPlans: [],
+      },
+      queryShapeHash: "ABC",
+      ...SERVER_SPEAKING,
+    };
+    const plan = planOnly(find);
+    expect(plan).toEqual({ explainVersion: "1", queryPlanner: find.queryPlanner });
+    // A BSON value in the plan stays the value it is.
+    expect((plan.queryPlanner as { parsedQuery: { _id: { $eq: unknown } } }).parsedQuery._id.$eq).toBeInstanceOf(
+      ObjectId,
+    );
+    const aggregate = {
+      explainVersion: "2",
+      stages: [
+        { $cursor: { queryPlanner: { parsedQuery: { serverInfo: { $gte: 0 } }, winningPlan: { stage: "COLLSCAN" } } } },
+        { $group: { _id: "$command", serverInfo: { $sum: { $const: 1 } }, ok: { $max: "$ok" } } },
+        { $project: { _id: true, serverParameters: "$serverInfo", ok: true } },
+        { $sort: { sortKey: { serverParameters: -1 } } },
+        { $facet: { connectionString: [{ $match: { ok: { $eq: 1 } } }] } },
+        // A stage may hold a string `stage` beside a `shards` list of its own: echoed verbatim (measured).
+        { $addFields: { stage: "$c", shards: [{ connectionString: "$c", serverInfo: "$c" }] } },
+        // An unsharded $unionWith explains its pipeline as a list of stages (measured).
+        {
+          $unionWith: { coll: "u", pipeline: [{ $cursor: { queryPlanner: { parsedQuery: { host: { $eq: "a" } } } } }] },
+        },
+        { $limit: 11 },
+      ],
+      ...SERVER_SPEAKING,
+    };
+    expect(planOnly(aggregate)).toEqual({ explainVersion: "2", stages: aggregate.stages });
+  });
+
+  test("drops what the server says about itself, and the address of each shard a sharded plan names", () => {
+    // The sharded shapes, as the server's 9.0.4 source writes them (`ClusterExplain::buildPlannerInfo`,
+    // `mergeExplainOutputFromShards`): a find's plan lists its shards, each with its connection string and server; a
+    // split pipeline answers each shard's plan under `shards`, each with its host, at the top level of an aggregate's
+    // reply and as the explained pipeline of a $unionWith that reads a sharded collection.
+    const shardedFind = {
+      queryPlanner: {
         winningPlan: {
           stage: "SHARD_MERGE",
-          shards: [{ shardName: "a", connectionString: "a/h1:27018", serverInfo: { host: "h1" }, winningPlan: {} }],
+          shards: [
+            {
+              explainVersion: "1",
+              shardName: "a",
+              connectionString: "a/h1:27018,h2:27018",
+              serverInfo: { host: "h1", port: 27018 },
+              parsedQuery: { connectionString: { $eq: "kept" } },
+              winningPlan: { stage: "COLLSCAN" },
+              rejectedPlans: [],
+            },
+          ],
         },
       },
-      stages: [{ $cursor: { queryPlanner: { winningPlan: {} }, serverInfo: { host: "h2" } } }, { $group: {} }],
-      queryShapeHash: "ABC",
-      command: { find: "orders" },
-      serverInfo: { host: "h0", port: 27017 },
-      serverParameters: { internalQueryFacetBufferSizeBytes: 1 },
-      ok: 1,
-      $clusterTime: { clusterTime: 1 },
-      operationTime: 1,
+      ...SERVER_SPEAKING,
     };
-    const plan = planOnly(reply);
-    expect(Object.keys(plan)).toEqual(["explainVersion", "queryPlanner", "stages"]);
-    const text = JSON.stringify(plan);
-    for (const key of [
-      "serverInfo",
-      "serverParameters",
-      "connectionString",
-      '"command"',
-      "$clusterTime",
-      "operationTime",
-      '"ok"',
-    ]) {
-      expect(text).not.toContain(key);
-    }
-    // A BSON value in the plan stays the value it is.
-    expect((plan.queryPlanner as { parsedQuery: { _id: unknown } }).parsedQuery._id).toBeInstanceOf(ObjectId);
-    expect(reply.serverInfo).toEqual({ host: "h0", port: 27017 });
+    expect(planOnly(shardedFind)).toEqual({
+      queryPlanner: {
+        winningPlan: {
+          stage: "SHARD_MERGE",
+          shards: [
+            {
+              explainVersion: "1",
+              shardName: "a",
+              parsedQuery: { connectionString: { $eq: "kept" } },
+              winningPlan: { stage: "COLLSCAN" },
+              rejectedPlans: [],
+            },
+          ],
+        },
+      },
+    });
+    const shardStages = [{ $cursor: { queryPlanner: { parsedQuery: { host: { $eq: "kept" } } } } }];
+    const split = {
+      mergeType: "anyShard",
+      splitPipeline: { shardsPart: [{ $match: { host: { $eq: "kept" } } }], mergerPart: [{ $limit: 11 }] },
+      shards: { b: { host: "h2:27018", explainVersion: "2", stages: shardStages } },
+    };
+    const shardedAggregate = {
+      mergeType: "anyShard",
+      mergeShardId: "a",
+      splitPipeline: { shardsPart: [{ $match: { host: { $eq: "kept" } } }], mergerPart: [{ $limit: 11 }] },
+      shards: {
+        a: {
+          host: "h1:27018",
+          explainVersion: "2",
+          stages: [...shardStages, { $unionWith: { coll: "u", pipeline: split } }],
+        },
+      },
+      ...SERVER_SPEAKING,
+    };
+    expect(planOnly(shardedAggregate)).toEqual({
+      mergeType: "anyShard",
+      mergeShardId: "a",
+      splitPipeline: shardedAggregate.splitPipeline,
+      shards: {
+        a: {
+          explainVersion: "2",
+          stages: [
+            ...shardStages,
+            {
+              $unionWith: {
+                coll: "u",
+                pipeline: { ...split, shards: { b: { explainVersion: "2", stages: shardStages } } },
+              },
+            },
+          ],
+        },
+      },
+    });
+    // A copy: the reply is not changed.
+    expect(shardedFind.queryPlanner.winningPlan.shards[0].serverInfo).toEqual({ host: "h1", port: 27018 });
+    expect([shardedAggregate.shards.a.host, split.shards.b.host]).toEqual(["h1:27018", "h2:27018"]);
   });
 
   test("an estimating read answers the plan alone as its one row", async () => {

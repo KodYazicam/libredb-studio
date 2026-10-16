@@ -333,42 +333,100 @@ export function openBoundedRead(
   }
 }
 
-/** What the server says about itself in an explain reply, dropped from the plan wherever it sits. */
-const SERVER_KEYS: ReadonlySet<string> = new Set([
-  "serverInfo",
-  "serverParameters",
-  "connectionString",
-  "command",
-  "ok",
-  "$clusterTime",
-  "operationTime",
-]);
-
-/** The parts of an explain reply that are the plan: a find's or an aggregate's `queryPlanner`, a pipeline's `stages`. */
-const PLAN_KEYS = ["explainVersion", "queryPlanner", "stages"] as const;
+/**
+ * The keys of an explain reply that are the plan: a find's `queryPlanner` and an aggregate's `stages`, or, for an
+ * aggregate a sharded cluster splits, the keys the server's 9.0.4 source writes in their place (`appendExplainResults`:
+ * `mergeType`, `mergeShardId`, `splitPipeline` and each shard's plan under `shards`). Every other key at the top level
+ * is the server speaking about itself: `serverInfo` (its host and port), `serverParameters`, the `command` echoed
+ * back, `ok` and the cluster time.
+ */
+const PLAN_KEYS = [
+  "explainVersion",
+  "queryPlanner",
+  "stages",
+  "mergeType",
+  "mergeShardId",
+  "splitPipeline",
+  "shards",
+] as const;
 
 /**
- * The plan of an explain reply, without what the server says about itself: the host and port, its parameters, the
- * command echoed back and the cluster time, at any depth (a sharded plan carries each shard's `serverInfo` and
- * `connectionString` inside its stages). The model reads a plan, and has no use for where the server runs. A copy;
- * the reply is not changed. Recursive: a plan is as deep as its stages and the filter it echoes, which the server's
- * own BSON nesting limit bounds.
+ * A shard's address where a sharded find lists its shards, under `queryPlanner.winningPlan.shards`: the manual's
+ * sharded plan, written by `ClusterExplain::buildPlannerInfo`.
+ */
+const LISTED_SHARD_ADDRESS: ReadonlySet<string> = new Set(["connectionString", "serverInfo"]);
+
+/**
+ * A shard's address where a split pipeline answers each shard's plan under `shards`, written by
+ * `mergeExplainOutputFromShards`.
+ */
+const SPLIT_SHARD_ADDRESS: ReadonlySet<string> = new Set(["host"]);
+
+/**
+ * The plan of an explain reply, without what the server says about itself: at the top level only `PLAN_KEYS` pass.
+ * Below it the plan is kept as the server wrote it, because it echoes the command's own field names (in a filter, a
+ * projection, a sort, an index's keys and bounds, an aggregate's stages and a facet's arms), and a command may name a
+ * field `ok`, `command` or `serverInfo`: measured on 9.0.4, 8.3.11 and 7.0.43, an unsharded plan holds none of the
+ * server's own keys below the top level. A sharded plan names its shards' addresses, and those are dropped where the
+ * server's 9.0.4 source writes them: each shard a find lists loses its `connectionString` and `serverInfo`, and each
+ * shard a split pipeline answers for loses its `host`, at the top level and where a `$unionWith` explains its pipeline
+ * on a sharded collection (`finalizePipelineAndTargetShardsForExplain`). No sharded cluster is measured. The model
+ * reads a plan, and has no use for where the server runs. A copy; the reply is not changed. Recursive: a plan is as
+ * deep as its stages and the filter it echoes, which the server's own BSON nesting limit bounds.
  */
 export function planOnly(reply: Document): Document {
   const plan: Document = {};
   for (const key of PLAN_KEYS) {
-    if (Object.hasOwn(reply, key)) plan[key] = withoutServerKeys(reply[key]);
+    if (Object.hasOwn(reply, key)) plan[key] = reply[key];
+  }
+  return withoutShardAddresses(plan);
+}
+
+function isPlainDocument(value: unknown): value is Document {
+  return typeof value === "object" && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/** An explain's plan copied as the server wrote it, without the address of each shard it names. */
+function withoutShardAddresses(explain: Document): Document {
+  const plan = copyPlan(explain) as Document;
+  if (isPlainDocument(explain.shards)) {
+    plan.shards = Object.fromEntries(
+      Object.entries(explain.shards).map(([name, shard]) => [name, withoutKeys(shard, SPLIT_SHARD_ADDRESS)]),
+    );
+  }
+  const winningPlan: unknown = isPlainDocument(explain.queryPlanner) ? explain.queryPlanner.winningPlan : undefined;
+  if (isPlainDocument(winningPlan) && Array.isArray(winningPlan.shards)) {
+    ((plan.queryPlanner as Document).winningPlan as Document).shards = winningPlan.shards.map((shard: unknown) =>
+      withoutKeys(shard, LISTED_SHARD_ADDRESS),
+    );
   }
   return plan;
 }
 
-function withoutServerKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutServerKeys);
-  if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) return value;
+/**
+ * `value` copied as the server wrote it. A `$unionWith` whose `pipeline` is a document rather than a list of stages
+ * holds the explain of a pipeline on a sharded collection, which names its shards as a split pipeline does.
+ */
+function copyPlan(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(copyPlan);
+  if (!isPlainDocument(value)) return value;
   return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !SERVER_KEYS.has(key))
-      .map(([key, child]) => [key, withoutServerKeys(child)]),
+    Object.entries(value).map(([key, child]) => [
+      key,
+      key === "$unionWith" && isPlainDocument(child) && isPlainDocument(child.pipeline)
+        ? { ...(copyPlan(child) as Document), pipeline: withoutShardAddresses(child.pipeline) }
+        : copyPlan(child),
+    ]),
+  );
+}
+
+/** One shard's entry without the keys that name its address, the rest of it copied as a plan. */
+function withoutKeys(shard: unknown, address: ReadonlySet<string>): unknown {
+  if (!isPlainDocument(shard)) return copyPlan(shard);
+  return Object.fromEntries(
+    Object.entries(shard)
+      .filter(([key]) => !address.has(key))
+      .map(([key, child]) => [key, copyPlan(child)]),
   );
 }
 
