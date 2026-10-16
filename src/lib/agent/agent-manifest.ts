@@ -231,12 +231,13 @@ const READ_CLASS_TOOLS: readonly AgentToolName[] = [
  * The operations workflow, one variant for every language because it sends no statement at all.
  *
  * Its tools are the ONLY set not built on the read-class four. All three of the read-class tools it leaves out,
- * `inspect_schema`, `run_read_query` and `inspect_plan`, reach the database through `provider.queryReadOnly`, which
- * only the engines `AGENT_EXECUTION_ENGINES` (`engine-support.ts`) names implement. Offering any of them here would
- * reintroduce, tool by tool, the exact engine restriction this workflow exists to escape: the run would open on an
- * engine with no read-only statement path, be offered a tool, call it, and be answered by an acquisition that
- * refuses the engine. `inspect_schema` was checked rather than assumed: it composes a statement and runs it through
- * `provider.queryReadOnly`, so it is left out.
+ * `inspect_schema`, `run_read_query` and `inspect_plan`, reach the database under the `agent-read-only` profile,
+ * which the factory grants only to a provider with `queryReadOnly`, and only the engines `AGENT_EXECUTION_ENGINES`
+ * (`engine-support.ts`) names implement it. Offering any of them here would reintroduce, tool by tool, the exact
+ * engine restriction this workflow exists to escape: the run would open on an engine with no read-only statement
+ * path, be offered a tool, call it, and be answered by an acquisition that refuses the engine. `inspect_schema` was
+ * checked rather than assumed: it is answered under that profile too (a composed catalog statement through
+ * `provider.queryReadOnly` on a SQL engine, the provider's own inventory on MongoDB), so it is left out.
  *
  * `recommend_change` is here and `compare_plans` is not: a comparison names two `inspect_plan` artifacts this run
  * cannot produce, so offering it would be offering a tool that can only ever refuse.
