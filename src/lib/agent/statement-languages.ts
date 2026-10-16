@@ -67,10 +67,12 @@ function canonicalMongoText(raw: unknown): string | null {
 }
 
 /**
- * JSON with every object's keys in code-unit order, so two parses of one read serialise alike.
+ * JSON with every object's keys in code-unit order, so the text does not depend on the order in which the parser
+ * built the object's keys.
  *
- * kubectl's identity only: a kubectl flag map has no meaningful order, so `-n shop -l app=a` and `-l app=a -n shop`
- * are one read. A MongoDB command is never sorted (see `canonicalMongoText`).
+ * kubectl's identity only, where key order carries no meaning: a kubectl flag map has none, and `readKubectlRun`
+ * already builds one statement for `-n shop -l app=a` and `-l app=a -n shop`. A MongoDB command is never sorted (see
+ * `canonicalMongoText`).
  */
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, entry: unknown) =>

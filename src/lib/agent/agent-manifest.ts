@@ -230,7 +230,7 @@ const READ_CLASS_TOOLS: readonly AgentToolName[] = [
 /**
  * The operations workflow, one variant for every language because it sends no statement at all.
  *
- * Its tools are the ONLY set not built on the read-class four. All three of the read-class tools it leaves out,
+ * Its tools are not built on the read-class four. All three of the read-class tools it leaves out,
  * `inspect_schema`, `run_read_query` and `inspect_plan`, reach the database under the `agent-read-only` profile,
  * which the factory grants only to a provider with `queryReadOnly`, and only the engines `AGENT_EXECUTION_ENGINES`
  * (`engine-support.ts`) names implement it. Offering any of them here would reintroduce, tool by tool, the exact

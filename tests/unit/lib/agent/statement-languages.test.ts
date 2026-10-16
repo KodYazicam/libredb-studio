@@ -26,7 +26,7 @@ describe("the kubectl fingerprint", () => {
     expect(fingerprintKubectl("get pods -n shop -l app=a")).not.toBe(fingerprintKubectl("get pods -n shop -l app=A"));
   });
 
-  test("is the same for two flag orders: a flag map has no meaningful order", () => {
+  test("is the same for two flag orders: the parser builds one statement for both", () => {
     expect(fingerprintKubectl("get pods -l app=a -n shop")).toBe(fingerprintKubectl("get pods -n shop -l app=a"));
   });
 
@@ -41,8 +41,9 @@ describe("the kubectl fingerprint", () => {
     );
   });
 
-  // Pinned digests, so the mongo fingerprint's move to written order cannot move kubectl's: a kubectl flag map has
-  // no meaningful order, and its identity is still the sorted one.
+  // Pinned digests: kubectl's identity is the key-sorted JSON of its parsed statement, whatever order the parser
+  // builds its fields in and however the mongo fingerprint serialises. The pins hold that sort; the flag-order test
+  // above holds the parser.
   test("is the digest it has always been, parsed and unparsed", () => {
     expect(fingerprintKubectl("get pods -n shop")).toBe(
       "eac2daa40ca752687e46ac9d5163ed9edca576379996a083461da3960143bb83",
