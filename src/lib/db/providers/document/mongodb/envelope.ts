@@ -26,7 +26,8 @@
  * Key order is the order written, which a sort and an embedded document's equality depend on, with one residual:
  * JavaScript puts integer-like keys such as "0" and "42" first, in ascending order, wherever the text wrote them. A
  * key written twice in one object is read as its last value: `JSON.parse` drops the first in silence, so the text can
- * show a condition the command does not send.
+ * show a condition the command does not send. And a plain JSON number past 2^53 is read as the nearest double, so
+ * `9007199254740993` is sent as `9007199254740992`; `{"$numberLong": "9007199254740993"}` sends it exactly.
  */
 
 /** One JSON value, as `JSON.parse` answers it. */
@@ -157,15 +158,15 @@ export const READ_PIPELINE_STAGES: ReadonlySet<string> = new Set([
 const PIPELINE_WRITE_STAGES: ReadonlySet<string> = new Set(["$out", "$merge"]);
 
 /**
- * The operators that run JavaScript on the server: `$where` in a filter, `$function` and `$accumulator` in an
- * expression. The key is the refusal, not its value: a body arrives as code the model wrote. A key that starts with
- * `$` in a filter, a projection or a pipeline is an operator by the engine's own grammar, except where the engine
- * reads the object holding it as data, as it does (measured on 9.0.4) in a `$literal`'s value and, in a filter, in the
- * operand of `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` or `$all`, in an embedded document compared for equality and
- * in a `$jsonSchema` `enum`. The walk refuses these keys, and every `$_` key, there too, on purpose: telling data from
- * operator would make it a second parser of the engine's grammar, so a read is refused even where the engine would
- * have taken the name as data. The operators that only match and compute (`$regex`, `$regexMatch`, `$expr`, `$cond`)
- * are not here.
+ * The operators that run JavaScript on the server: `$where` in a filter, `$function` in an expression, and
+ * `$accumulator`, an accumulator of `$group`, `$bucket`, `$bucketAuto` and `$setWindowFields`. The key is the refusal,
+ * not its value: a body arrives as code the model wrote. A key that starts with `$` in a filter, a projection or a
+ * pipeline is an operator by the engine's own grammar, except where the engine reads the object holding it as data, as
+ * it does (measured on 9.0.4) in a `$literal`'s value and, in a filter, in the operand of `$eq`, `$ne`, `$gt`, `$gte`,
+ * `$lt`, `$lte` or `$all`, in an embedded document compared for equality and in a `$jsonSchema` `enum`. The walk
+ * refuses these keys, and every `$_` key, there too, on purpose: telling data from operator would make it a second
+ * parser of the engine's grammar, so a read is refused even where the engine would have taken the name as data. The
+ * operators that only match and compute (`$regex`, `$regexMatch`, `$expr`, `$cond`) are not here.
  */
 const SERVER_SIDE_JAVASCRIPT_OPERATORS: ReadonlySet<string> = new Set(["$where", "$function", "$accumulator"]);
 

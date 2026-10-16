@@ -2471,7 +2471,12 @@ describe("MongoDBProvider", () => {
 
       test("a read before the connection is open, or under an invalid budget, is refused with nothing sent", async () => {
         const profiled = profiledProvider();
-        await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow();
+        await expect(profiled.queryReadOnly(envelope("find"), budget)).rejects.toThrow(
+          "Provider is not connected. Call connect() first.",
+        );
+        await expect(profiled.readCatalogReadOnly!({}, budget)).rejects.toThrow(
+          "Provider is not connected. Call connect() first.",
+        );
         await profiled.connect();
         mongoDriver.sessions = [];
         for (const invalid of [

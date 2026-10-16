@@ -503,6 +503,21 @@ describe("a pipeline admits only read stages, at every depth the server runs one
     for (const pipeline of nested) refused(aggregate(pipeline), "pipeline-stage");
   });
 
+  test("stages are judged in written order: a stage, then the stages nested in it, then its next sibling", () => {
+    // Nested before the next sibling: the $facet arm's $collStats is met before the $out after the $facet.
+    expect(
+      refused(aggregate([{ $facet: { a: [{ $collStats: {} }] } }, { $out: "elsewhere" }]), "pipeline-stage"),
+    ).toContain('"$collStats" is not a stage this run admits');
+    // Arms and nested pipelines in the order written: arm a's $merge before arm b's $collStats.
+    expect(
+      refused(aggregate([{ $facet: { a: [{ $merge: { into: "x" } }], b: [{ $collStats: {} }] } }]), "pipeline-writes"),
+    ).toContain('"$merge" writes');
+    // A stage before the stages nested in it: the $facet's own malformed arm before its other arm's $out.
+    expect(refused(aggregate([{ $facet: { a: [{ $out: "x" }], b: "stages" } }]), "bad-pipeline")).toContain(
+      '"$facet" takes a JSON object of named arms',
+    );
+  });
+
   test("a stage that is not one object naming one stage", () => {
     expect(refused(aggregate(["$match"]), "bad-pipeline")).toContain(
       "Every pipeline stage must be a JSON object naming one stage",
