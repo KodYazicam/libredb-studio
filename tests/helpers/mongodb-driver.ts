@@ -114,6 +114,11 @@ function commandNotSupportedOnView(command: string, name: string): Error {
   return error;
 }
 
+/**
+ * What `serverStatus` answers by default. The state holds a function rather than a literal: the metric paths have to be
+ * driven on a server that publishes NO `wiredTiger` section (mongos, the in-memory storage engine, an API-compatible
+ * service) and on one where the command fails outright, and both used to reach the panel as a cache hit ratio of 99%.
+ */
 const defaultServerStatus = (): Doc => ({
   connections: { current: 5, available: 95 },
   uptime: 86400,
@@ -128,6 +133,11 @@ const defaultServerStatus = (): Doc => ({
   opcounters: { query: 100, insert: 50, update: 30, delete: 20 },
 });
 
+/**
+ * What `db.stats()` answers by default, a function for the same reason: `databaseSizeBytes` is optional, so the byte
+ * figure has to be driven on a database that measures 0 bytes AND on a deployment that answers without `dataSize` at
+ * all, and both used to reach the Storage tab as a measured 0.
+ */
 const defaultDbStats = (): Doc => ({
   dataSize: 2048,
   indexSize: 512,
@@ -150,14 +160,25 @@ function initialState() {
     killOpCommands: [] as Doc[],
     /** What `listDatabases` answers. */
     databaseList: [] as { name: string }[],
+    /**
+     * One `listCollections` per database name. The object surface reads across DATABASES, so the stand-in honours
+     * the name `MongoClient.db(name)` is given instead of answering one fixed database: that is what makes a wrong
+     * container bind visible, because a provider reading the connected database instead of the one the container
+     * names gets a different collection list here rather than the same one (#789).
+     */
     collectionsByDb: {} as Record<string, MockCollectionInfo[]>,
     /** A database whose `listCollections` is refused, by name, with the server's own error. */
     listCollectionsErrors: {} as Record<string, Error>,
     /** The documents per `<database>.<collection>`; absent falls back to `collectionData`. */
     documentsByNs: {} as Record<string, Doc[]>,
-    /** Every database name `MongoClient.db()` was opened with, in order. */
+    /** Every database name `MongoClient.db()` was opened with, in order, so a test sees which database was read. */
     openedDatabases: [] as string[],
-    /** Every pipeline of the bulk sample chain (`describeObjects`), in order (#789). */
+    /**
+     * Every pipeline of the bulk sample chain (`describeObjects`), in order. The bulk column read's claim is that a
+     * folder costs ONE aggregate per chunk rather than one read per object, and nothing about the RESULT can tell the
+     * two apart, so the pipelines themselves are captured and a test asserts how many there were and which
+     * collections each one named (#789).
+     */
     samplePipelines: [] as Doc[][],
     /** Every `<database>.<collection>` whose indexes were read, in order. */
     indexReads: [] as string[],
@@ -165,28 +186,52 @@ function initialState() {
     foundCollections: [] as string[],
     /** A server refusal per `<database>.<collection>`, raised when a cursor on it is read. */
     findErrors: {} as Record<string, Error>,
-    /** The arguments each collection method received, by method name, last call wins. */
+    /**
+     * The arguments each collection method received, by method name, last call wins. The query is read as Extended
+     * JSON, and what that changes is visible only in what the driver is HANDED: `{"$oid": ...}` has to arrive as an
+     * ObjectId and `{"$date": ...}` as a Date, and a stand-in that ignored its arguments would answer the same rows
+     * either way.
+     */
     args: {} as Record<string, unknown[]>,
     lastListDatabasesCommand: {} as Doc,
     listDatabasesCommands: [] as Doc[],
-    /** Decides whether one `listDatabases` command is refused, and with what. */
+    /**
+     * Decides whether one `listDatabases` command is refused, and with what; `undefined` answers every one, as MongoDB
+     * does.
+     */
     listDatabasesRefusal: undefined as ((command: Doc) => Error | undefined) | undefined,
-    /** The URI the last client was constructed with. */
+    /**
+     * The URI the last client was constructed with, as `buildConnectionString()` composed it. The only place the query
+     * string is observable: `MongoClient` is where it goes.
+     */
     lastUri: "",
-    /** The options object the last client was constructed with. */
+    /**
+     * The options object the last client was constructed with. TLS is observable nowhere else: the `MongoClient`
+     * constructor is the only place it is stated.
+     */
     lastOptions: {} as Doc,
-    /** How the next `connect()` behaves; `undefined` connects at once (#1573). */
+    // #1573, the connect deadline. The client behaves like the driver on the two paths the deadline opens: it RELAYS
+    // the heartbeat failure the way `Topology` relays `serverHeartbeatFailed` to the client, and its `close()` is
+    // countable, because "no client outlives a timed-out connect" is the issue's second acceptance criterion.
+    /**
+     * How the next `connect()` behaves. `undefined` connects at once; a function returns its promise, which the
+     * deadline tests leave pending the way a server-selection loop retries a refused port until its own 30 s bound.
+     */
     connectBehavior: undefined as (() => Promise<void>) | undefined,
-    /** The failure the monitoring delivers to every `serverHeartbeatFailed` listener. */
+    /** The failure the monitoring delivered, handed to every `serverHeartbeatFailed` listener, as the driver does. */
     heartbeatFailure: undefined as Error | undefined,
     /** Every `close()` the clients received, per client, in order. */
     clientCloses: [] as number[],
+    /** The provider's heartbeat listeners on the current client, as `on()` registered them. */
     heartbeatListeners: [] as ((event: { failure: Error }) => void)[],
     /** A per-collection `validate` / `compact` refusal, by collection name (#1408). */
     maintenanceRefusals: {} as Record<string, Error>,
     serverStatus: defaultServerStatus as () => Doc,
     dbStats: defaultDbStats as () => Doc,
-    /** Per-collection `collStats` answers. */
+    /**
+     * Per-collection `collStats` answers, for a test that drives the ROW BYTES rather than the shared answer: a
+     * collection the map does not name answers `{ size: 1024, totalIndexSize: 512, count: 42 }`.
+     */
     collStatsByCollection: {} as Record<string, { size: number; totalIndexSize: number; count: number }>,
     /** What `buildInfo` answers on a database; the default is the measured MongoDB 9.0.4 document. */
     buildInfo: buildInfo904.reply as Doc,
@@ -236,6 +281,7 @@ const isView = (name: string, database: string): boolean =>
 /** Delivers the configured heartbeat failure the way the driver relays it. */
 function emitHeartbeatFailure(): void {
   if (mongoDriver.heartbeatFailure === undefined) return;
+  // The event shape `ServerHeartbeatFailedEvent` carries: the refusal is on `.failure`.
   const event = { failure: mongoDriver.heartbeatFailure };
   for (const listener of mongoDriver.heartbeatListeners) listener(event);
 }
@@ -261,7 +307,13 @@ async function inFlight(session: unknown): Promise<void> {
   });
 }
 
-/** The bulk sample pipeline of `describeObjects`, interpreted rather than ignored (standing ruling 5b, #789). */
+/**
+ * The bulk sample pipeline, INTERPRETED rather than ignored (standing ruling 5b, #789). `describeObjects` reads every
+ * object's documents in one `$unionWith` chain, and a stand-in that answered one canned array whatever the pipeline
+ * said could not see a rewrite of it: the collection names, the per-collection `$limit` and the `__ks` tag would all be
+ * unasserted. So this walks the exact stage shape the provider builds and refuses anything else by name, which is what
+ * makes a mutation of that construction fail here rather than only against a live server.
+ */
 function runSampleChain(name: string, database: string, pipeline: Doc[]): Doc[] {
   const project = pipeline[1] as { $project?: { __ks?: { $literal?: string } } } | undefined;
   const readLimit = (stage: unknown): number => {
@@ -269,6 +321,8 @@ function runSampleChain(name: string, database: string, pipeline: Doc[]): Doc[] 
     if (typeof limit !== "number") throw new Error("the bulk sample pipeline must start each arm with $limit");
     return limit;
   };
+  // The SAME fallback a `find()` takes for a namespace no test named, so the stand-in models one server for both reads:
+  // an asymmetry here would show up as the bulk read and the single read disagreeing about a collection.
   const sample = (collection: string, limit: number): Doc[] =>
     documentsOf(`${database}.${collection}`)
       .slice(0, limit)
@@ -639,8 +693,8 @@ class MockMongoClient {
   }
 
   // The driver's client is an event emitter and `Topology` relays the monitor's
-  // `serverHeartbeatFailed` to it, which is where the provider reads the refusal the
-  // deadline reports (#1573).
+  // `serverHeartbeatFailed` to it (`constants.js` SERVER_RELAY_EVENTS), which is where the
+  // provider reads the refusal the deadline reports (#1573).
   on(event: string, listener: (...args: never[]) => void) {
     if (event === "serverHeartbeatFailed") {
       mongoDriver.heartbeatListeners.push(listener as (event: { failure: Error }) => void);
@@ -649,9 +703,11 @@ class MockMongoClient {
   }
 
   async connect() {
-    // Deferred to a microtask: the provider registers its `serverHeartbeatFailed` listener
-    // between the constructor and this call, and the monitor of a real client fires only once
-    // the topology starts connecting.
+    // The heartbeat failure lands while the connect is still selecting, as it does on a closed
+    // port: the monitor's connect attempt fails at once and the selection loop keeps retrying
+    // (#1458). Deferred to a microtask: the provider registers its `serverHeartbeatFailed`
+    // listener between the constructor and this call, and the monitor of a real client fires
+    // only once the topology starts connecting.
     queueMicrotask(() => emitHeartbeatFailure());
     return mongoDriver.connectBehavior?.();
   }

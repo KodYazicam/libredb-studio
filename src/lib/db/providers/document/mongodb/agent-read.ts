@@ -21,10 +21,12 @@
  * - **The bound database.** A run reads the database its connection is bound to; a command naming another is refused
  *   before anything is sent, as issue #1614 settled.
  *
- * What matches the editor's `query()` for the same text, and what differs on purpose: the envelope and its parse are
- * the editor's, and so is the serialization of every value; the bounds are the run's own. The editor answers a `find`
- * with no limit with 100 documents and an `aggregate` with every document; the run answers at most its row budget,
- * and REFUSES a read past it rather than truncating one, so a model is never shown part of an answer as the whole.
+ * What matches the editor's `query()` for the same text, and what differs on purpose: the envelope, the rules its
+ * Extended JSON values are read by, and the serialization of every value are the editor's; the reader is the agent's
+ * own (`readMongoCommand`), stricter than the editor's parse, and the bounds are the run's own. The editor answers a
+ * `find` with no limit with 100 documents and an `aggregate` with every document; the run answers at most its row
+ * budget, and REFUSES a read past it rather than truncating one, so a model is never shown part of an answer as the
+ * whole.
  */
 import {
   type AggregationCursor,
@@ -76,9 +78,10 @@ const AGENT_DEADLINE_SEAMS: AgentDeadlineSeams = Object.freeze({
 const MONGO_MAX_TIME_EXPIRED_CODE = 50;
 
 /**
- * The failures that are the server going away rather than the statement failing, by the driver's class names:
- * `mapDatabaseError` reads the first two as a timeout and the last as a generic error, and either would let a run
- * treat a lost server as a statement to repair.
+ * The failures that are the server going away rather than the statement failing, by the driver's class names.
+ * `mapDatabaseError` reads an error by its message, not its class: a closed or reset socket reads as a generic error,
+ * and a network or server-selection timeout as a timeout, so either would let a run treat a lost server as a statement
+ * to repair.
  */
 const TRANSPORT_FAILURES: ReadonlySet<string> = new Set([
   "MongoNetworkError",

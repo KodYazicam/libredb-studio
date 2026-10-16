@@ -137,7 +137,7 @@ describe("assertAgentEngineIsAdmissible", () => {
     }
   });
 
-  test("keys on no unstable field: allocator, javascriptEngine and gitVersion change nothing", () => {
+  test("reads none of allocator, javascriptEngine and gitVersion: their values change between releases", () => {
     const stable = without(BUILD_INFO["9.0.4"], "allocator", "javascriptEngine", "gitVersion");
     expect(() => assertAgentEngineIsAdmissible(stable, HOSTS)).not.toThrow();
     expect(() =>
