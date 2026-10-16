@@ -1021,7 +1021,7 @@ const PROFILE_REFUSAL_ADVICE: Readonly<Record<ExecutionProfileDenyCode, string>>
     "This engine has no database-native read-only statement path, so the profile cannot be granted on it at all.",
   // One code for several targets on several engines, so it says what the target is and names none of them.
   PROFILE_UNSUPPORTED_TARGET:
-    "This engine can grant the profile, but not against this target: a server on the engine's wire protocol that is not, or does not identify itself as, the server its read-only enforcement was measured on, or an in-memory database, which a read-only handle opens empty. Point the connection at the measured engine itself, or at a database file.",
+    "This engine can grant the profile, but not against this target: a server on the engine's wire protocol that is not, or does not identify itself as, the server its read-only enforcement was measured on, or an in-memory database, where a read-only handle has nothing to read. Point the connection at the measured engine itself, or at a database file.",
   UNSUPPORTED_PROFILE: "The execution profile asked for is not one this server vends.",
   AGENT_CREDENTIAL_UNRESOLVABLE:
     "The connection configures an agent credential that could not be resolved: both a user and a password are required, and a sealed password must be decryptable.",

@@ -90,9 +90,9 @@ describe("the mongo language's server adapter", () => {
   // Key order is part of a MongoDB command: a sort document and an exact embedded-document match return different
   // documents in another order. So the identity is the command as written, and only the spacing around it is not.
   test("the fingerprint keeps the written key order, so two sort orders are two reads", () => {
-    const sortedBA = JSON.stringify({ collection: "c", operation: "find", options: { sort: { b: 1, a: 1 } } });
-    const sortedAB = JSON.stringify({ collection: "c", operation: "find", options: { sort: { a: 1, b: 1 } } });
-    expect(fingerprintMongo(sortedBA)).not.toBe(fingerprintMongo(sortedAB));
+    const byBThenA = JSON.stringify({ collection: "c", operation: "find", options: { sort: { b: 1, a: 1 } } });
+    const byAThenB = JSON.stringify({ collection: "c", operation: "find", options: { sort: { a: 1, b: 1 } } });
+    expect(fingerprintMongo(byBThenA)).not.toBe(fingerprintMongo(byAThenB));
     expect(fingerprintMongo('{"options":{"sort":{"b":1,"a":1}}}')).not.toBe(
       fingerprintMongo('{"options":{"sort":{"a":1,"b":1}}}'),
     );

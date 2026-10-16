@@ -229,8 +229,8 @@ const READS_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPostur
 
 /**
  * Agent mode on MongoDB: the boundary is a user the server holds to read privileges on this
- * one database, which the profile reads and tests before the run's first model turn, with the
- * fence in front of the engine.
+ * one database, which the profile reads and tests before the first model turn of a run that
+ * sends commands, with the fence in front of the engine.
  *
  * The qualifier names the same numbers the SQL arm does, because the budgets are the same
  * budgets; what differs is who holds them, and the body says so in the engine's own terms:

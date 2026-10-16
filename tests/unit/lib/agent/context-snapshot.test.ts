@@ -980,7 +980,7 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.profileRefusal?.error).toBe(refusal);
   });
 
-  test("a server that does not enforce authorization is told to turn it on, not to change its user", async () => {
+  test("a server that does not enforce authorization is told to turn it on, since changing its user alone cannot help", async () => {
     // Keyed by the deny code, so driven on the composed path like the test above. On such a server no user is held
     // read-only, so the advice for a user holding too much, or too little, could not help.
     const h = harness("postgres");
@@ -999,6 +999,7 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
     expect(capture.profileRefusal?.reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
     expect(capture.detail).toContain("Turn on the server's authorization");
+    expect(capture.detail).toContain("changing the connection's user alone cannot help");
     expect(capture.detail).not.toContain("holds privileges no read-only boundary can contain");
     expect(capture.detail).not.toContain("the server accepted a write it should have refused");
   });
@@ -1022,6 +1023,9 @@ describe("captureContextSnapshot — an environment failure on the composed path
     const advice = capture.detail.split("so its schema was not read for this run. ")[1] ?? "";
     expect(advice).toContain("wire protocol");
     expect(advice).toContain("in-memory database");
+    // Not "opens empty": bun:sqlite refuses to open an anonymous database read-only at all (measured), so the claim
+    // was false for one of the two engines that raise this code for an in-memory target.
+    expect(advice).not.toContain("opens empty");
     const engines = [
       ...EXTERNAL_DATABASE_TYPES.map((type) => getDBConfig(type).label),
       "MariaDB",

@@ -88,7 +88,7 @@ interface HandoverChip {
 }
 
 /**
- * What the editor hand-over costs, in chips, per language and keyed rather than compared like
+ * What the editor hand-over costs, in chips, per language, and keyed rather than compared, like
  * the terms they label, with every figure read from the budget the server enforces rather than
  * typed here. #425's lesson is that a typed figure outlives the value it described; these are
  * the same numbers `AGENT_HANDOVER_BUDGET` hands the replay.
