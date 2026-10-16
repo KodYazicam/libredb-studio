@@ -2297,16 +2297,93 @@ describe("MongoDBProvider", () => {
         await profiled.disconnect();
       });
 
-      test("an Extended JSON value reaches the driver as the BSON value it names", async () => {
+      test("every object slot of every read reaches the driver revived, each value the BSON value it names", async () => {
+        const OID = { $oid: "65f0a1b2c3d4e5f6a7b8c9d0" };
+        const AT = { $date: "2026-01-01T00:00:00Z" };
+        const ONE = { $numberInt: "1" };
+        /**
+         * A value as the driver was handed it, its BSON values named, so a revived ObjectId or Date reads apart from
+         * the wrapper's own subdocument: a slot left unrevived would send `{"$oid": ...}` as a field to match.
+         */
+        const named = (value: unknown): unknown => {
+          if (value instanceof realMongoDriver.BSON.ObjectId) return `ObjectId(${value.toHexString()})`;
+          if (value instanceof Date) return `Date(${value.toISOString()})`;
+          if (Array.isArray(value)) return value.map(named);
+          if (typeof value !== "object" || value === null) return value;
+          return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, named(child)]));
+        };
+        const oid = "ObjectId(65f0a1b2c3d4e5f6a7b8c9d0)";
+        const at = "Date(2026-01-01T00:00:00.000Z)";
+        // Each read carries a wrapper in every object slot it takes; `$numberInt` stands where the server reads a plain
+        // number (a projection's inclusion, a sort's direction), and revives to that number.
+        const reads: { command: Record<string, unknown>; sent: () => unknown; expected: unknown }[] = [
+          {
+            command: {
+              operation: "find",
+              filter: { _id: OID, at: { $gte: AT } },
+              options: {
+                projection: { total: ONE, recent: { $gte: ["$at", AT] } },
+                sort: { total: { $numberInt: "-1" } },
+                skip: 2,
+                limit: 5,
+              },
+            },
+            sent: () => {
+              const { filter, options } = lastCursor();
+              return named({
+                filter,
+                projection: options.projection,
+                sort: options.sort,
+                skip: options.skip,
+                limit: options.limit,
+              });
+            },
+            expected: {
+              filter: { _id: oid, at: { $gte: at } },
+              projection: { total: 1, recent: { $gte: ["$at", at] } },
+              sort: { total: -1 },
+              skip: 2,
+              limit: 5,
+            },
+          },
+          {
+            command: {
+              operation: "findOne",
+              filter: { _id: OID },
+              options: { projection: { total: ONE, at: { $max: ["$at", AT] } } },
+            },
+            sent: () => {
+              const { filter, options } = lastCursor();
+              return named({ filter, projection: options.projection, limit: options.limit });
+            },
+            expected: { filter: { _id: oid }, projection: { total: 1, at: { $max: ["$at", at] } }, limit: 1 },
+          },
+          {
+            command: {
+              operation: "aggregate",
+              pipeline: [{ $match: { at: { $gte: AT } } }, { $project: { total: ONE } }],
+            },
+            sent: () => named(lastCursor().pipeline),
+            expected: [{ $match: { at: { $gte: at } } }, { $project: { total: 1 } }, { $limit: 11 }],
+          },
+          {
+            command: { operation: "count", filter: { _id: OID } },
+            sent: () => named(lastCursor().pipeline),
+            expected: [{ $match: { _id: oid } }, { $group: { _id: 1, n: { $sum: 1 } } }],
+          },
+          {
+            command: { operation: "distinct", field: "customer", filter: { at: { $lt: AT } } },
+            sent: () => named(mongoDriver.commands.at(-1)?.command.query),
+            expected: { at: { $lt: at } },
+          },
+        ];
         const profiled = profiledProvider();
         await profiled.connect();
-        await profiled.queryReadOnly(
-          envelope("find", { filter: { _id: { $oid: "65f0a1b2c3d4e5f6a7b8c9d0" } } }),
-          budget,
-        );
-        const filter = mongoDriver.args.find?.[0] as { _id: { _bsontype?: string; toHexString(): string } };
-        expect(filter._id._bsontype).toBe("ObjectId");
-        expect(filter._id.toHexString()).toBe("65f0a1b2c3d4e5f6a7b8c9d0");
+        for (const { command, sent, expected } of reads) {
+          const { operation, ...rest } = command;
+          await profiled.queryReadOnly(envelope(String(operation), rest), budget);
+          expect(sent()).toEqual(expected);
+        }
         await profiled.disconnect();
       });
 
