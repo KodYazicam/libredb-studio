@@ -64,7 +64,7 @@ const READABLE_SYSTEM_COLLECTION = "system.js";
  * Atlas Data Federation answers `dataLake`, the field MongoDB's own `mongodb-build-info` keys on. None of the three is
  * measured under this profile, so each is refused by name.
  */
-export const SELF_IDENTIFYING_BUILDINFO_KEYS: Readonly<Record<string, string>> = Object.freeze({
+const SELF_IDENTIFYING_BUILDINFO_KEYS: Readonly<Record<string, string>> = Object.freeze({
   ferretdb: "FerretDB",
   psmdbVersion: "Percona Server for MongoDB",
   dataLake: "Atlas Data Federation",
@@ -76,7 +76,7 @@ export const SELF_IDENTIFYING_BUILDINFO_KEYS: Readonly<Record<string, string>> =
  * Firestore's is the suffix `mongodb-build-info` keys on. A name check, defeated by a tunnel or a CNAME, which is why
  * the positive shape of `buildInfo` is checked after it.
  */
-export const WIRE_RELATIVE_HOSTS: readonly { readonly suffix: RegExp; readonly server: string }[] = Object.freeze([
+const WIRE_RELATIVE_HOSTS: readonly { readonly suffix: RegExp; readonly server: string }[] = Object.freeze([
   { suffix: /\.docdb(-elastic)?\.amazonaws\.com$/i, server: "Amazon DocumentDB" },
   { suffix: /\.cosmos\.azure\.com$/i, server: "Azure Cosmos DB" },
   { suffix: /\.firestore\.goog$/i, server: "Firestore" },

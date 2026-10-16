@@ -386,6 +386,7 @@ async function collectWithinBudget(
   const rows: Record<string, unknown>[] = [];
   let bytes = 0;
   try {
+    // oxlint-disable-next-line no-await-in-loop -- a cursor yields its documents one after another.
     for (let next = await cursor.next(); next !== null; next = await cursor.next()) {
       // Opened with `raw: true`: the document is its own BSON bytes.
       const document = next as Uint8Array;
@@ -416,6 +417,7 @@ export async function sampleWithinBudget(
   const documents: Document[] = [];
   let bytes = 0;
   try {
+    // oxlint-disable-next-line no-await-in-loop -- a cursor yields its documents one after another.
     for (let next = await cursor.next(); next !== null; next = await cursor.next()) {
       // Opened with `raw: true`: the document is its own BSON bytes.
       const document = next as Uint8Array;
