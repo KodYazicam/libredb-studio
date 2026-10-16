@@ -100,6 +100,66 @@ describe("admitMongoStatement", () => {
     expect(admitMongoStatement(envelope("distinct"))?.code).toBe("missing-field");
   });
 
+  test("refuses the server-side JavaScript operators wherever the envelope carries them", () => {
+    // In a find's filter, plainly.
+    const plain = admitMongoStatement(envelope("find", { filter: { $where: "this.total > 5" } }));
+    expect(plain?.code).toBe("server-side-javascript");
+    expect(plain?.message).toContain('"$where" runs JavaScript');
+    // Nested inside $and - the reach is the whole filter, not its top level.
+    const nested = admitMongoStatement(
+      envelope("find", { filter: { $and: [{ status: "shipped" }, { $where: "this.total > 5" }] } }),
+    );
+    expect(nested?.code).toBe("server-side-javascript");
+    // Inside $expr in a filter, as $function.
+    const expressed = admitMongoStatement(
+      envelope("find", { filter: { $expr: { $function: { body: "function() { return 1; }" } } } }),
+    );
+    expect(expressed?.code).toBe("server-side-javascript");
+    // Inside a $match stage of a pipeline.
+    const matched = admitMongoStatement(
+      envelope("aggregate", { pipeline: [{ $match: { $where: "this.total > 5" } }] }),
+    );
+    expect(matched?.code).toBe("server-side-javascript");
+    // As a $group accumulator and inside a $project expression.
+    const accumulated = admitMongoStatement(
+      envelope("aggregate", {
+        pipeline: [{ $group: { _id: null, m: { $accumulator: { init: "function() {}", combine: "function() {}" } } } }],
+      }),
+    );
+    expect(accumulated?.code).toBe("server-side-javascript");
+    const projected = admitMongoStatement(
+      envelope("aggregate", {
+        pipeline: [{ $project: { computed: { $function: { body: "function(x) { return x; }" } } } }],
+      }),
+    );
+    expect(projected?.code).toBe("server-side-javascript");
+    // A count and a distinct carry the same reach through their query.
+    const counted = admitMongoStatement(envelope("count", { filter: { $where: "true" } }));
+    expect(counted?.code).toBe("server-side-javascript");
+  });
+
+  test("admits the operators that merely match and compute - no false positive on the JavaScript refusal", () => {
+    // The engine's own grammar makes a `$`-key an operator, and the matching/computing ones are not the
+    // JavaScript ones: every one of these is the plain filter or expression the refusal's own sentence points at.
+    expect(admitMongoStatement(envelope("find", { filter: { status: { $regex: "^sh" } } }))).toBeNull();
+    expect(admitMongoStatement(envelope("aggregate", { pipeline: [{ $match: { total: { $gte: 5 } } }] }))).toBeNull();
+    expect(
+      admitMongoStatement(
+        envelope("aggregate", {
+          pipeline: [{ $project: { ok: { $regexMatch: { input: "$status", regex: "^sh" } } } }],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      admitMongoStatement(envelope("find", { filter: { $expr: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } } })),
+    ).toBeNull();
+    expect(
+      admitMongoStatement(envelope("aggregate", { pipeline: [{ $group: { _id: "$customer", n: { $sum: 1 } } }] })),
+    ).toBeNull();
+    // An array value and a deep plain filter are walked without a hit and without complaint.
+    expect(admitMongoStatement(envelope("find", { filter: { tags: { $in: ["a", "b"] } } }))).toBeNull();
+  });
+
   test("refuses the malformed shapes of the envelope's own fields", () => {
     expect(admitMongoStatement(envelope("find", { filter: ["not", "an", "object"] }))?.code).toBe("bad-filter");
     expect(admitMongoStatement(envelope("aggregate", { pipeline: "not-an-array" }))?.code).toBe("bad-pipeline");

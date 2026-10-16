@@ -1359,7 +1359,12 @@ five stated layers ([`mongodb-agent.ts`](../../src/lib/db/providers/document/mon
    and an auto-executed answer's hand-over needs no translation. The fence admits the five read
    operations and refuses everything else: a write operation (the editor's envelope accepts
    them; this path never sends one), a write's payload under a read's name, the write stages of
-   a pipeline (`$out`, `$merge`), an unknown top-level key, a document that names no one
+   a pipeline (`$out`, `$merge`), the SERVER-SIDE JAVASCRIPT operators (`$where`, `$function`,
+   `$accumulator`) wherever the envelope carries them - a declaration rather than a mitigation:
+   the operators cannot write and `maxTimeMS` bounds even their busy loops (measured), but
+   admitting model-authored code into the engine's JavaScript sandbox would add a trust boundary
+   the profile never declared, when a plain filter or aggregation expression says nearly
+   everything a read needs - an unknown top-level key, a document that names no one
    command, and past 4,096 characters - the kubectl fence's deliberately narrower contract, for
    its reason: a model has no reason to send a longer read.
 4. **The read is bounded five ways.** `maxTimeMS` is the SERVER's own deadline (measured: code

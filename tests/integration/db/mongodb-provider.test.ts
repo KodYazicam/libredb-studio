@@ -2721,6 +2721,17 @@ describe("MongoDBProvider", () => {
       await profiled.disconnect();
     });
 
+    test("the provider re-admits and refuses the JavaScript operators the fence refuses", async () => {
+      const profiled = profiledProvider();
+      await profiled.connect();
+      // The provider never trusts the caller: a statement that reached queryReadOnly any other way
+      // meets the same admission the model's tool path meets - including the JavaScript operators.
+      await expect(
+        profiled.queryReadOnly(envelope("find", { filter: { $where: "this.total > 5" } }), budget),
+      ).rejects.toThrow(/runs JavaScript this run wrote on the server/);
+      await profiled.disconnect();
+    });
+
     test("a result past the row budget is the refusal, on the one-past signal", async () => {
       mockCollectionData = Array.from({ length: 40 }, (_, i) => ({ id: i }));
       const profiled = profiledProvider();

@@ -5,13 +5,23 @@
  * the same Extended-JSON rules the editor's `query()` parses it with, so what the model is told it may write is
  * exactly what the user's editor runs. The fence admits the five READ operations of that envelope and refuses
  * everything else: the writes the editor also accepts (`insertOne` and friends), the write stages of an aggregation
- * pipeline (`$out`, `$merge`), a document that carries two operations, and an unknown top-level key. 4,096
+ * pipeline (`$out`, `$merge`), the SERVER-SIDE JAVASCRIPT operators (`$where`, `$function`, `$accumulator`) wherever
+ * they sit in the envelope, a document that carries two operations, and an unknown top-level key. 4,096
  * characters is a deliberately narrower contract than the editor's own, for the reason the kubectl fence's is: a
  * model has no reason to send a longer read, and a shorter contract is one it can be told.
  *
  * Not the boundary. The boundary is the server's own refusal of everything the `read` role cannot do, proven at
  * open by a negative write probe (`mongodb-agent.ts`); this is what lets the model read the reason it was refused,
  * before anything is sent.
+ *
+ * WHY THE JAVASCRIPT OPERATORS ARE REFUSED, stated rather than implied: they are not writes - they cannot write,
+ * and nothing they read leaves the collection the command already names - and `maxTimeMS` bounds even a busy loop
+ * (measured: a `$where` `sleep()` died at its 500 ms budget). The refusal is a DECLARATION, not a mitigation: every
+ * other layer of this profile trusts exactly two things, the principal's roles and the server's own deadline, and
+ * admitting model-authored code into the engine's JavaScript sandbox would silently add a third - the sandbox. A
+ * trust boundary nobody declared is the one a reviewer has to find by reading the engine's internals; this fence's
+ * sentence says it instead, and a model with a genuine condition to express can express it as a plain filter or an
+ * aggregation expression, which is what nearly every read already is.
  */
 import { z } from "zod";
 import { parseExtendedJson } from "@/lib/db/providers/document/mongodb";
@@ -35,6 +45,18 @@ const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
 /** The aggregation stages that write, in the spelling the server knows them. */
 const PIPELINE_WRITE_STAGES: ReadonlySet<string> = new Set(["$out", "$merge"]);
 
+/**
+ * The operators that run JavaScript ON THE SERVER, in the spelling the engine knows them: `$where` in a filter
+ * (including inside `$and`/`$or` and a `$match` stage), `$function` and `$accumulator` in an aggregation expression
+ * (including inside `$expr` in a filter). Their PRESENCE is the refusal, not their value: the key is the operator,
+ * and a body arrives as code the model wrote.
+ *
+ * No false positives are possible at the key level: a JSON key starting with `$` in a filter or a pipeline is an
+ * operator by the engine's own grammar - field names cannot carry the prefix - and the operators that merely match
+ * and compute (`$regex`, `$regexMatch`, `$expr`, `$cond`) are not in this set.
+ */
+const SERVER_SIDE_JAVASCRIPT_KEYS: ReadonlySet<string> = new Set(["$where", "$function", "$accumulator"]);
+
 export type MongoAdmissionCode =
   | "agent-too-large"
   | "not-json"
@@ -46,6 +68,7 @@ export type MongoAdmissionCode =
   | "write-payload"
   | "bad-pipeline"
   | "pipeline-writes"
+  | "server-side-javascript"
   | "bad-filter"
   | "missing-field"
   | "bad-options"
@@ -178,6 +201,17 @@ export function admitMongoStatement(text: string): MongoAdmissionRefusal | null 
       };
     }
   }
+  // The JavaScript operators are refused wherever they sit - a filter (under `$and`, inside `$expr`), a pipeline
+  // stage (`$match`'s filter, `$project`'s expression, `$group`'s accumulator) - because their reach is the whole
+  // envelope, not one field of it. The scan runs after the shape checks so a malformed envelope reads its own
+  // sentence first, and before nothing: every operation carries a filter or a pipeline, and both are walked.
+  const javaScriptOperator = firstServerSideJavaScriptKey(command);
+  if (javaScriptOperator !== null) {
+    return {
+      code: "server-side-javascript",
+      message: `"${javaScriptOperator}" runs JavaScript this run wrote on the server, and this run's contract runs none: the boundary is the principal's roles and the engine's own deadline, not a code sandbox. Express the condition as a plain filter or an aggregation expression ($regex, $cond, $switch) and send that. Nothing was sent.`,
+    };
+  }
   if (command.options !== undefined) {
     const options = command.options;
     if (typeof options !== "object" || options === null || Array.isArray(options)) {
@@ -197,6 +231,31 @@ export function admitMongoStatement(text: string): MongoAdmissionRefusal | null 
         return { code: "bad-options", message: `"${key}" must be a JSON object. Nothing was sent.` };
       }
     }
+  }
+  return null;
+}
+
+/**
+ * The first server-side-JavaScript operator key anywhere in the envelope, or null when there is none.
+ *
+ * Walks objects by every key and arrays by every element, to the depth the envelope itself reaches: the 4,096-
+ * character contract bounds the tree (a nesting level costs at least two characters of braces), and the parser has
+ * already walked it once - this walk cannot be deeper than the parse that produced it, so it needs no depth cap of
+ * its own, and one without a cap is one without a hole a level deeper than it stops.
+ */
+function firstServerSideJavaScriptKey(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = firstServerSideJavaScriptKey(entry);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (SERVER_SIDE_JAVASCRIPT_KEYS.has(key)) return key;
+    const found = firstServerSideJavaScriptKey(nested);
+    if (found !== null) return found;
   }
   return null;
 }
