@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   AGENT_LANGUAGE_COPY,
+  AGENT_PLAN_ESTIMATE_OPERATION,
   AGENT_REQUIREMENT_ENGINES,
   AGENT_STATEMENT_LANGUAGE,
   AGENT_WORKFLOW_VARIANTS,
+  type AgentStatementArgument,
   type AgentStatementLanguageId,
   agentVariant,
+  PLAN_ESTIMATE_OPERATIONS,
   persistedRunFacts,
   planDeliverableOf,
   planObjectiveOf,
@@ -14,6 +17,7 @@ import {
 } from "@/lib/agent/agent-manifest";
 import { composesCatalogFor, composesEstimatingExplainFor } from "@/lib/agent/composed-sql";
 import { AGENT_WORKFLOW_GOALS } from "@/lib/agent/goal-verifier";
+import { agentToolDefinition } from "@/lib/agent/tools";
 import { AGENT_WORKFLOW_PRESENTS_ANSWER, type AgentRunWorkflowType } from "@/lib/agent/types";
 import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { createDatabaseProvider } from "@/lib/db/factory";
@@ -90,6 +94,48 @@ describe("AGENT_LANGUAGE_COPY", () => {
     expect(AGENT_LANGUAGE_COPY.kubectl.subject).toBe("a Kubernetes cluster");
     expect(AGENT_LANGUAGE_COPY.kubectl.adviceKeys).toEqual(["get", "top", "logs", "events"]);
   });
+
+  test("AgentStatementArgument is exactly the arguments the languages name", () => {
+    // `satisfies` fails to compile when the union gains or loses a member this record does not name.
+    const everyArgument = { sql: true, statement: true, command: true } satisfies Record<AgentStatementArgument, true>;
+    const named = new Set<string>(Object.values(AGENT_LANGUAGE_COPY).map((copy) => copy.argument));
+    expect([...named].sort()).toEqual(Object.keys(everyArgument).sort());
+  });
+});
+
+describe("the plan-estimate operation of each language", () => {
+  test("names each language's plan operation, and null where a language has no plan", () => {
+    expect(AGENT_PLAN_ESTIMATE_OPERATION).toEqual({
+      sql: "sql.explain.estimate",
+      kubectl: null,
+      mongo: "mongo.plan.estimate",
+    });
+    expect(Object.isFrozen(AGENT_PLAN_ESTIMATE_OPERATION)).toBe(true);
+  });
+
+  test("PLAN_ESTIMATE_OPERATIONS is the record's non-null values", () => {
+    expect([...PLAN_ESTIMATE_OPERATIONS].sort()).toEqual(["mongo.plan.estimate", "sql.explain.estimate"]);
+  });
+
+  // The mirror the record is held to: what inspect_plan actually drives on each language, read off the definitions
+  // the run is offered. A language with no plan operation offers inspect_plan on no workflow.
+  test.each(Object.keys(AGENT_WORKFLOW_VARIANTS) as AgentStatementLanguageId[])(
+    "%s: every variant offering inspect_plan drives the language's plan-estimate operation",
+    (language) => {
+      const offering = Object.entries(AGENT_WORKFLOW_VARIANTS[language])
+        .filter(([, variant]) => variant.tools.includes("inspect_plan"))
+        .map(([workflow]) => workflow as AgentRunWorkflowType);
+      const operation = AGENT_PLAN_ESTIMATE_OPERATION[language];
+      if (operation === null) {
+        expect(offering).toEqual([]);
+        return;
+      }
+      expect(offering.length).toBeGreaterThan(0);
+      for (const workflow of offering) {
+        expect(agentToolDefinition(language, workflow, "inspect_plan").operationId, workflow).toBe(operation);
+      }
+    },
+  );
 });
 
 const WORKFLOWS = [
@@ -248,6 +294,53 @@ describe("the SQL variants", () => {
     for (const workflow of WORKFLOWS) {
       expect(Object.isFrozen(AGENT_WORKFLOW_VARIANTS.sql[workflow]?.tools), workflow).toBe(true);
     }
+  });
+});
+
+describe("the MongoDB variants (issue #1614)", () => {
+  /*
+    The auto-execute gate weighs the answer's plan by a reading of the engine's explain format, and no reading of a
+    MongoDB plan exists, so a ticked MongoDB run could only ever be declined. The setting is not offered instead, as on
+    a cluster: the route refuses it and the rail shows no consent step.
+  */
+  test.each(Object.keys(AGENT_WORKFLOW_VARIANTS.mongo))("the %s variant never auto-executes", (workflow) => {
+    expect(requiredVariant("mongo", workflow as AgentRunWorkflowType).canAutoExecute).toBe(false);
+  });
+
+  test("every statement workflow is offered the read-class four whole, inspect_plan included", () => {
+    expect(requiredVariant("mongo", "investigation").tools).toEqual([
+      "inspect_schema",
+      "run_read_query",
+      "inspect_plan",
+      "compose_report",
+    ]);
+    expect(requiredVariant("mongo", "database-assessment").tools).toEqual([
+      "inspect_schema",
+      "run_read_query",
+      "inspect_plan",
+      "compose_report",
+      "profile_table",
+    ]);
+    expect(requiredVariant("mongo", "data-analysis").tools).toEqual([
+      "inspect_schema",
+      "run_read_query",
+      "inspect_plan",
+      "compose_report",
+      "profile_table",
+      "present_answer",
+    ]);
+    // The optimization keeps its own list: the read-class four and the index card, and no compare_plans.
+    expect(requiredVariant("mongo", "query-optimization").tools).toEqual([
+      "inspect_schema",
+      "run_read_query",
+      "inspect_plan",
+      "recommend_change",
+      "compose_report",
+    ]);
+  });
+
+  test("the operations variant is the one every language shares", () => {
+    expect(AGENT_WORKFLOW_VARIANTS.mongo.operations).toBe(AGENT_WORKFLOW_VARIANTS.sql.operations);
   });
 });
 

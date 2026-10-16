@@ -796,6 +796,31 @@ describe("POST /api/agent/runs", () => {
     expect(mockStart.mock.calls[0]?.[0]).toMatchObject({ workflowType: "data-analysis", statementLanguage: "kubectl" });
   });
 
+  // No plan of a MongoDB answer can be weighed, so the gate could only ever decline: the setting is refused at the
+  // door, before a run id or a model call, exactly as on a cluster.
+  test("auto-execute is refused on a MongoDB data-analysis run, whose answer is never run in the editor", async () => {
+    mockResolveConnection.mockResolvedValueOnce({ id: "seed:docs", name: "Docs", type: "mongodb" });
+
+    const res = await POST(startRequest({ ...VALID_BODY, workflowType: "data-analysis", autoExecute: true }));
+    const body = await parseResponseJSON<{ error: string }>(res);
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe(
+      "autoExecute is not offered for this workflow on this engine: its answer is never run in the editor.",
+    );
+    expect(mockStart).not.toHaveBeenCalled();
+    expect(mockDriveAgentRun).not.toHaveBeenCalled();
+  });
+
+  test("the same MongoDB data-analysis run without auto-execute opens under the mongo variant", async () => {
+    mockResolveConnection.mockResolvedValueOnce({ id: "seed:docs", name: "Docs", type: "mongodb" });
+
+    const res = await POST(startRequest({ ...VALID_BODY, workflowType: "data-analysis" }));
+
+    expect(res.status).toBe(202);
+    expect(mockStart.mock.calls[0]?.[0]).toMatchObject({ workflowType: "data-analysis", statementLanguage: "mongo" });
+  });
+
   test("a Postgres data-analysis run with auto-execute still opens", async () => {
     const res = await POST(startRequest({ ...VALID_BODY, workflowType: "data-analysis", autoExecute: true }));
 
