@@ -26,6 +26,10 @@ describe("the kubectl fingerprint", () => {
     expect(fingerprintKubectl("get pods -n shop -l app=a")).not.toBe(fingerprintKubectl("get pods -n shop -l app=A"));
   });
 
+  test("is the same for two flag orders: a flag map has no meaningful order", () => {
+    expect(fingerprintKubectl("get pods -l app=a -n shop")).toBe(fingerprintKubectl("get pods -n shop -l app=a"));
+  });
+
   test("-n Shop and -n shop do not collide: one parses and one does not", () => {
     expect(fingerprintKubectl("get pods -n Shop")).not.toBe(fingerprintKubectl("get pods -n shop"));
   });
@@ -34,6 +38,17 @@ describe("the kubectl fingerprint", () => {
     expect(fingerprintKubectl("get pods | grep x")).toMatch(/^[0-9a-f]{64}$/);
     expect(fingerprintKubectl("get pods -n shop\n# libredb:page offset=0 limit=5")).not.toBe(
       fingerprintKubectl("get pods -n shop"),
+    );
+  });
+
+  // Pinned digests, so the mongo fingerprint's move to written order cannot move kubectl's: a kubectl flag map has
+  // no meaningful order, and its identity is still the sorted one.
+  test("is the digest it has always been, parsed and unparsed", () => {
+    expect(fingerprintKubectl("get pods -n shop")).toBe(
+      "eac2daa40ca752687e46ac9d5163ed9edca576379996a083461da3960143bb83",
+    );
+    expect(fingerprintKubectl("get pods | grep x")).toBe(
+      "c52dd92bf94081fff912a2dea7444074741b261b2b228fb88f4686866bbf7893",
     );
   });
 });
@@ -71,14 +86,25 @@ describe("row-cap advice by command", () => {
 });
 
 describe("the mongo language's server adapter", () => {
-  // The canonical text every layer carries is sorted-key JSON, so two spellings of one
-  // command are ONE identity: the repair ledger's whole reason for the fingerprint.
-  test("the fingerprint is key-order total over the command", () => {
-    expect(fingerprintMongo('{"collection": "orders", "operation": "find"}')).toBe(
-      fingerprintMongo('{"operation": "find", "collection": "orders"}'),
+  // Key order is part of a MongoDB command: a sort document and an exact embedded-document match return different
+  // documents in another order. So the identity is the command as written, and only the spacing around it is not.
+  test("the fingerprint keeps the written key order, so two sort orders are two reads", () => {
+    const sortedBA = JSON.stringify({ collection: "c", operation: "find", options: { sort: { b: 1, a: 1 } } });
+    const sortedAB = JSON.stringify({ collection: "c", operation: "find", options: { sort: { a: 1, b: 1 } } });
+    expect(fingerprintMongo(sortedBA)).not.toBe(fingerprintMongo(sortedAB));
+    expect(fingerprintMongo('{"options":{"sort":{"b":1,"a":1}}}')).not.toBe(
+      fingerprintMongo('{"options":{"sort":{"a":1,"b":1}}}'),
     );
     expect(fingerprintMongo('{"collection": "orders", "operation": "count"}')).not.toBe(
       fingerprintMongo('{"collection": "orders", "operation": "find"}'),
+    );
+  });
+
+  test("the fingerprint ignores whitespace around and inside the command", () => {
+    const written = '{"options":{"sort":{"b":1,"a":1}}}';
+    expect(fingerprintMongo(' {"options": {"sort": {"b": 1, "a": 1}}}\n')).toBe(fingerprintMongo(written));
+    expect(fingerprintMongo('{\n  "options": {\n    "sort": { "b": 1, "a": 1 }\n  }\n}')).toBe(
+      fingerprintMongo(written),
     );
   });
 
@@ -127,5 +153,77 @@ describe("the shape advice", () => {
     expect(languageServer("kubectl").shapeAdvice).toContain("a valid kubectl statement");
     expect(languageServer("kubectl").shapeAdvice).not.toContain("SQL");
     expect(languageServer("sql").shapeAdvice).toBeUndefined();
+  });
+});
+
+/**
+ * One model argument as the statement text the fence, the provider, the ledger and the repair identity read. Every
+ * value that is not a statement is null, so a caller refuses it rather than sending something it did not mean.
+ */
+describe("canonicalize", () => {
+  const NOT_A_STATEMENT: readonly unknown[] = ["", null, undefined, 0, 42, true, [], ["SELECT 1"], {}];
+
+  test.each(["sql", "kubectl"] as const)("%s passes a non-empty string through unchanged", (language) => {
+    const { canonicalize } = languageServer(language);
+    expect(canonicalize("SELECT 1")).toBe("SELECT 1");
+    expect(canonicalize("  get pods -n shop\n")).toBe("  get pods -n shop\n");
+  });
+
+  test.each(["sql", "kubectl"] as const)("%s answers null for anything that is not a string", (language) => {
+    const { canonicalize } = languageServer(language);
+    for (const raw of [...NOT_A_STATEMENT, { sql: "SELECT 1" }, { statement: "get pods" }]) {
+      expect(canonicalize(raw), JSON.stringify(raw) ?? String(raw)).toBeNull();
+    }
+  });
+
+  test("mongo passes a non-empty string through unchanged", () => {
+    const { canonicalize } = languageServer("mongo");
+    expect(canonicalize('{"operation": "find", "collection": "orders"}')).toBe(
+      '{"operation": "find", "collection": "orders"}',
+    );
+  });
+
+  test("mongo writes a command object as JSON in the order the model wrote it, at every depth", () => {
+    const { canonicalize } = languageServer("mongo");
+    expect(canonicalize({ operation: "find", collection: "orders", filter: { status: "shipped" } })).toBe(
+      '{"operation":"find","collection":"orders","filter":{"status":"shipped"}}',
+    );
+    expect(canonicalize({ collection: "c", operation: "find", options: { sort: { b: 1, a: 1 } } })).toBe(
+      '{"collection":"c","operation":"find","options":{"sort":{"b":1,"a":1}}}',
+    );
+    expect(canonicalize({ collection: "c", operation: "aggregate", pipeline: [{ $sort: { z: 1, a: -1 } }] })).toBe(
+      '{"collection":"c","operation":"aggregate","pipeline":[{"$sort":{"z":1,"a":-1}}]}',
+    );
+    expect(
+      canonicalize({ collection: "people", operation: "count", filter: { address: { zip: "1", city: "x" } } }),
+    ).toBe('{"collection":"people","operation":"count","filter":{"address":{"zip":"1","city":"x"}}}');
+  });
+
+  // The one residual of written order: JavaScript puts integer-like keys first in every object, before any code here
+  // sees it, so a field named "2" cannot keep its place after a field named "a".
+  test("mongo keeps written order except for integer-like keys, which JavaScript puts first", () => {
+    expect(languageServer("mongo").canonicalize({ a: 1, "2": 1, "1": 1 })).toBe('{"1":1,"2":1,"a":1}');
+  });
+
+  test("mongo answers null for an empty command and for anything that is not a plain object or a string", () => {
+    const { canonicalize } = languageServer("mongo");
+    const serialisesToNothing = { toJSON: () => undefined };
+    for (const raw of [
+      ...NOT_A_STATEMENT,
+      [{ collection: "c" }],
+      { only: undefined },
+      serialisesToNothing,
+      new Date(0),
+      new Map(),
+    ]) {
+      expect(canonicalize(raw), Object.prototype.toString.call(raw)).toBeNull();
+    }
+  });
+
+  test("the mongo text of an object fingerprints as the same read as its spaced-out spelling", () => {
+    const command = { collection: "c", operation: "find", options: { sort: { b: 1, a: 1 } } };
+    const text = languageServer("mongo").canonicalize(command);
+    expect(text).not.toBeNull();
+    expect(fingerprintMongo(text as string)).toBe(fingerprintMongo(JSON.stringify(command, null, 2)));
   });
 });

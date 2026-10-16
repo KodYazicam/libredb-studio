@@ -3,9 +3,9 @@
  *
  * Server only. `agent-manifest.ts` holds the facts a browser may read (which engine speaks which language, which
  * workflows a language offers, the copy the rail shows); this file holds the behaviour that must stay on the server:
- * the descriptor a model-written read is evaluated under, the repair ledger's identity of one call, and the advice a
- * refused read carries back. It reaches `node:crypto` through `repair-ledger.ts`, which is why it is a separate module
- * and why nothing a client component imports may reach it.
+ * the statement text a model's argument is read as, the descriptor a model-written read is evaluated under, the
+ * repair ledger's identity of one call, and the advice a refused read carries back. It reaches `node:crypto` through
+ * `repair-ledger.ts`, which is why it is a separate module and why nothing a client component imports may reach it.
  *
  * The record is total over `AgentStatementLanguageId`, so a later language does not compile until it registers its
  * adapter here. A language id the record does not hold can still arrive from a ledger, and reaching one is a named
@@ -22,6 +22,12 @@ import { fingerprintStatement } from "./repair-ledger";
 export interface AgentLanguageServerAdapter {
   /** The descriptor this language's model-written reads are evaluated under. */
   readonly readOperation: "sql.query.read" | "kubectl.query.read" | "mongo.query.read";
+  /**
+   * The model's argument as the one statement text every server layer reads: the fence, the provider, the ledger
+   * and the repair identity. Null for any value that carries no statement, which the caller refuses rather than
+   * sending.
+   */
+  readonly canonicalize: (raw: unknown) => string | null;
   /** Total over any text: the repair ledger's identity of one call. */
   readonly fingerprint: (text: string) => string;
   /** The sentence for a read refused past the row budget. */
@@ -35,7 +41,37 @@ export interface AgentLanguageServerAdapter {
 const SQL_ROW_CAP_ADVICE = (_statement: string, allowed: string) =>
   `Ask for fewer rows: add LIMIT ${allowed} (or an aggregate that returns one row) and run it again.`;
 
-/** JSON with every object's keys in code-unit order, so two parses of one read serialise alike. */
+/** A language whose argument is text: the statement is the string as written, and nothing else is one. */
+const canonicalText = (raw: unknown): string | null => (typeof raw === "string" && raw.length > 0 ? raw : null);
+
+/**
+ * A MongoDB command as text: a string as written, and a plain object as its JSON in the order the model wrote it.
+ *
+ * Written order, never sorted, because key order is part of the command: `{"b": 1, "a": 1}` and `{"a": 1, "b": 1}`
+ * are two sorts and two exact embedded-document matches, and a sorted text would run a different read from the one
+ * the model wrote. `JSON.stringify` keeps the insertion order `JSON.parse` gave the arguments, so the text is that
+ * order. The one residual is JavaScript's own: integer-like keys come first in every object before any code here
+ * sees it.
+ *
+ * An array, `{}` (and an object whose every value JSON drops) and any object that is not plain, such as a `Date`,
+ * carry no command and answer null.
+ */
+function canonicalMongoText(raw: unknown): string | null {
+  if (typeof raw === "string") return canonicalText(raw);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const prototype: unknown = Object.getPrototypeOf(raw);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  // Typed with undefined because a `toJSON` that returns nothing serialises to nothing at all.
+  const text: string | undefined = JSON.stringify(raw);
+  return text !== undefined && text.length > 2 ? text : null;
+}
+
+/**
+ * JSON with every object's keys in code-unit order, so two parses of one read serialise alike.
+ *
+ * kubectl's identity only: a kubectl flag map has no meaningful order, so `-n shop -l app=a` and `-l app=a -n shop`
+ * are one read. A MongoDB command is never sorted (see `canonicalMongoText`).
+ */
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, entry: unknown) =>
     entry !== null && typeof entry === "object" && !Array.isArray(entry)
@@ -86,12 +122,13 @@ export function kubectlRowCapAdvice(statement: string, allowed: string): string 
 }
 
 /**
- * A MongoDB command's identity in the repair ledger: the envelope with every object's keys in code-unit order,
- * so `{"collection": "orders", "operation": "find"}` and `{"operation": "find", "collection": "orders"}` are ONE
- * read and two collections are two. Total: a line that does not parse is identified by its raw text, so a
- * refused line is still refused the second time. The fingerprint is taken over the text the pipeline carries
- * rather than over the object the model sent, so the ledger, the timeline and the editor hand-over - which all
- * carry text - agree with it by construction.
+ * A MongoDB command's identity in the repair ledger: the command re-serialised in the order it was written, so
+ * whitespace is not part of it and key order is. Two key orders are two reads, because order is meaningful in a
+ * sort document and in an exact embedded-document match: `{"b": 1, "a": 1}` and `{"a": 1, "b": 1}` return different
+ * documents. Total: a line that does not parse is identified by its raw text, so a refused line is still refused
+ * the second time. The fingerprint is taken over the text the pipeline carries (the adapter's `canonicalize`) rather
+ * than over the object the model sent, so the ledger and the timeline, which carry text, agree with it by
+ * construction.
  *
  * Exported for its tests; the registry below is its production reader.
  */
@@ -103,7 +140,7 @@ export function fingerprintMongo(text: string): string {
     return createHash("sha256").update(`mongo-raw:${text}`).digest("hex");
   }
   return createHash("sha256")
-    .update(`mongo:${stableJson(parsed)}`)
+    .update(`mongo:${JSON.stringify(parsed)}`)
     .digest("hex");
 }
 
@@ -141,12 +178,14 @@ export function mongoRowCapAdvice(statement: string, allowed: string): string {
 const AGENT_LANGUAGE_SERVER: Readonly<Record<AgentStatementLanguageId, AgentLanguageServerAdapter>> = Object.freeze({
   sql: Object.freeze({
     readOperation: "sql.query.read",
+    canonicalize: canonicalText,
     fingerprint: fingerprintStatement,
     rowCapAdvice: SQL_ROW_CAP_ADVICE,
     admit: null,
   }),
   kubectl: Object.freeze({
     readOperation: "kubectl.query.read",
+    canonicalize: canonicalText,
     fingerprint: fingerprintKubectl,
     rowCapAdvice: kubectlRowCapAdvice,
     admit: admitKubectlStatement,
@@ -155,6 +194,7 @@ const AGENT_LANGUAGE_SERVER: Readonly<Record<AgentStatementLanguageId, AgentLang
   }),
   mongo: Object.freeze({
     readOperation: "mongo.query.read",
+    canonicalize: canonicalMongoText,
     fingerprint: fingerprintMongo,
     rowCapAdvice: mongoRowCapAdvice,
     admit: admitMongoStatement,
