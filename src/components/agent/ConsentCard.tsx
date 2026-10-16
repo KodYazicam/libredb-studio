@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, type RefObject } from "react";
 import { Info, Play } from "lucide-react";
+import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { AGENT_HANDOVER_BUDGET } from "@/lib/agent/execution-policy";
 import { autoExecuteTerms } from "@/lib/agent/posture";
 import type { AgentRunWorkflowType } from "@/lib/agent/types";
@@ -55,6 +56,12 @@ export interface ConsentCardProps {
    * costs, and the sentence that says so has to stay with the run it is true of.
    */
   readonly engine: DatabaseType | null;
+  /**
+   * The statement language the rail offered this hand-over in, resolved when the step was
+   * raised. The terms and the chips are that language's own: a card that assumed one would
+   * state SQL's read-only session on an engine that has none.
+   */
+  readonly language: AgentStatementLanguageId;
   /** The hand-over decision. OFF is the default, and the caller owns the state. */
   readonly autoExecute: boolean;
   readonly onAutoExecuteChange: (next: boolean) => void;
@@ -75,6 +82,22 @@ export interface ConsentCardProps {
   readonly regionRef: RefObject<HTMLElement | null>;
 }
 
+interface HandoverChip {
+  readonly text: string;
+  readonly tone: "neutral" | "warn";
+}
+
+/**
+ * The chip naming the session the editor's run shares with the run's own read, per language,
+ * keyed rather than compared like the terms it labels. Only SQL replays in the same
+ * database-enforced read-only session; the other languages have no such session to name.
+ */
+const SESSION_CHIP: Readonly<Record<AgentStatementLanguageId, readonly HandoverChip[]>> = {
+  sql: [{ text: "same read-only session", tone: "neutral" }],
+  kubectl: [],
+  mongo: [],
+};
+
 /**
  * What the editor hand-over costs, in chips, and every figure read from the budget the
  * server enforces rather than typed here. #425's lesson is that a typed figure outlives the
@@ -86,8 +109,8 @@ export interface ConsentCardProps {
  * "no" is the part of the promise that does not hold literally. The terms popover carries
  * that full claim; the chip is its label, and sits beside it.
  */
-const handoverChips = (): readonly { readonly text: string; readonly tone: "neutral" | "warn" }[] => [
-  { text: "same read-only session", tone: "neutral" },
+const handoverChips = (language: AgentStatementLanguageId): readonly HandoverChip[] => [
+  ...SESSION_CHIP[language],
   { text: `${AGENT_HANDOVER_BUDGET.maxResultRows} rows`, tone: "neutral" },
   { text: "no time limit", tone: "warn" },
 ];
@@ -105,6 +128,7 @@ export function ConsentCard({
   workflowLabel,
   connectionName,
   engine,
+  language,
   autoExecute,
   onAutoExecuteChange,
   onOpen,
@@ -208,7 +232,7 @@ export function ConsentCard({
               : "sr-only",
           )}
         >
-          {autoExecuteTerms(workflowType)}
+          {autoExecuteTerms(workflowType, language)}
         </p>
         {/*
           The bounds of what was ticked, and only once it is ticked: with the box off there
@@ -218,7 +242,7 @@ export function ConsentCard({
         {autoExecute && (
           <div data-testid="agent-consent-bounds" className="ml-5 flex flex-wrap items-center gap-1">
             {[
-              ...handoverChips(),
+              ...handoverChips(language),
               /*
                 The SQLite chip is the label of the sentence below it, not a second opinion:
                 the two are adjacent, so nothing can show the compressed form alone.

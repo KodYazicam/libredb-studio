@@ -103,16 +103,11 @@ const engineNames = (types: readonly DatabaseType[]): string => namedList(types.
  * It lives here, beside the posture that quotes it, so the strip's widened body and the
  * checkbox's accessible description are one string with one author.
  *
- * The language defaults to SQL because the consent step is only ever raised on a SQL
- * engine: `canHandOver` in the rail asks the language's workflow variant, and no kubectl
- * variant can auto-execute, so `ConsentCard` never renders on a cluster and passes no
- * language. The kubectl sentence exists so the function stays total over the languages and
- * cannot be read as a promise of a hand-over that engine does not offer.
+ * The language has no default. The terms are that language's own, and a caller that named
+ * none would be shown SQL's on whatever engine it is on; a language whose variants offer no
+ * hand-over says so in its own sentence rather than borrowing another language's terms.
  */
-export function autoExecuteTerms(
-  workflowType: AgentRunWorkflowType,
-  language: AgentStatementLanguageId = "sql",
-): string {
+export function autoExecuteTerms(workflowType: AgentRunWorkflowType, language: AgentStatementLanguageId): string {
   return handoverTerms(AGENT_WORKFLOW_BUDGETS[workflowType].policy.budgets, language);
 }
 
@@ -131,13 +126,9 @@ const HANDOVER_TERMS: Readonly<Record<AgentStatementLanguageId, (budgets: Statem
   sql: sqlHandoverTerms,
   kubectl: () =>
     "A kubectl answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
-  mongo: mongoHandoverTerms,
+  mongo: () =>
+    "A MongoDB answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
 };
-
-/** The MongoDB consent sentence: the principal's own inability to write bounds both paths. */
-function mongoHandoverTerms(budgets: StatementBudgets): string {
-  return `The run always produces its answer on its own read-only path, bounded to ${budgets.maxResultRows} rows and ${budgets.statementTimeoutMs / 1000} seconds, on a connection whose inability to write the server itself proved. Tick this and it will also put that command in your editor and run it there — on the connection the run was opened on, at the editor's ${AGENT_HANDOVER_BUDGET.maxResultRows}-row limit and with no time limit. The command is the editor's own envelope either way, and its writes are refused by the fence before the engine and by the principal's roles at it. Commands whose plan reads as expensive, or which the run measured as slow, are put in the editor without being run.`;
-}
 
 /** The SQL consent sentence: the database's own read-only session bounds both paths. */
 function sqlHandoverTerms(budgets: StatementBudgets): string {
@@ -206,9 +197,9 @@ function unresolvedPosture(): AgentPosture {
 /**
  * Agent mode with the editor hand-over consented: still read-only, and one statement wider.
  *
- * Only SQL has a widened reading. On a cluster no workflow variant offers the hand-over, so
- * a tick there consents to nothing and the posture stays the reads one: a "widened" pill
- * would claim an editor run the engine never performs.
+ * Only SQL has a widened reading. On a cluster and on MongoDB no workflow variant offers the
+ * hand-over, so a tick there consents to nothing and the posture stays the reads one: a
+ * "widened" pill would claim an editor run the engine never performs.
  */
 const WIDENED_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPosture>> = {
   sql: () => ({
@@ -219,13 +210,7 @@ const WIDENED_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPost
     body: handoverTerms(STATEMENT_BOUNDS, "sql"),
   }),
   kubectl: () => kubectlReadsPosture(),
-  mongo: () => ({
-    tone: "widened",
-    headline: "Reads only, and one command in your editor",
-    qualifier: `${AGENT_HANDOVER_BUDGET.maxResultRows} rows, no time limit, same principal`,
-    title: "Reads only, and one command lands in your editor",
-    body: handoverTerms(STATEMENT_BOUNDS, "mongo"),
-  }),
+  mongo: () => mongoReadsPosture(),
 };
 
 function widenedPosture(language: AgentStatementLanguageId): AgentPosture {
@@ -243,11 +228,14 @@ const READS_POSTURE: Readonly<Record<AgentStatementLanguageId, () => AgentPostur
 };
 
 /**
- * Agent mode on MongoDB: the boundary is the server's own refusal of the principal's writes, proven at open.
+ * Agent mode on MongoDB: the boundary is a user the server holds to read privileges on this
+ * one database, which the profile reads and tests before the run's first model turn, with the
+ * fence in front of the engine.
  *
- * The qualifier names the same numbers the SQL arm does, because the budgets are the same budgets; what differs is
- * who holds them, and the body says so in the engine's own terms - `maxTimeMS` and the probe, not a read-only
- * transaction, because MongoDB has none to name.
+ * The qualifier names the same numbers the SQL arm does, because the budgets are the same
+ * budgets; what differs is who holds them, and the body says so in the engine's own terms:
+ * `maxTimeMS` and the privilege read, not a read-only transaction, because MongoDB has none
+ * to name. It says "per command" because that is what the language calls one unit.
  */
 function mongoReadsPosture(): AgentPosture {
   const rows = STATEMENT_BOUNDS.maxResultRows;
@@ -255,9 +243,9 @@ function mongoReadsPosture(): AgentPosture {
   return {
     tone: "reads",
     headline: "Reads only",
-    qualifier: `${rows} rows and ${seconds} s per statement, enforced by the server`,
+    qualifier: `${rows} rows and ${seconds} s per command, enforced by the server`,
     title: "Agent mode reads, under a boundary the server enforces",
-    body: `Agent mode runs commands it wrote itself, bounded to ${rows} rows and ${seconds} seconds each: the deadline is maxTimeMS, the server's own, and find and aggregate are capped at the row budget before they cross the wire. The connection it runs on was proven read-only at open - the server was asked to refuse a write and did - so a connection that can write, or a server with authentication off, is refused before the run begins. Writes and the write stages of a pipeline are refused by the fence before the engine. Nothing reaches your editor unless you tick the hand-over when the run opens.`,
+    body: `Agent mode runs commands it wrote itself, bounded to ${rows} rows and ${seconds} seconds each: maxTimeMS is the server's own deadline, and Studio ends a command the server does not. On the server, find and aggregate stop one row past the budget. Before the first model turn of a run that sends commands, the server must report that this connection's user holds only read privileges on this database and must refuse a write from it: a user that can write, a server without authentication, or a server that is not MongoDB ends that run there. The fence refuses writes, write stages, server-side JavaScript and diagnostic stages before the engine is reached. Nothing reaches your editor.`,
   };
 }
 

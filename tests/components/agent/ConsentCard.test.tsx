@@ -4,6 +4,7 @@ import React, { type RefObject } from "react";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { ConsentCard } from "@/components/agent/ConsentCard";
+import type { AgentStatementLanguageId } from "@/lib/agent/agent-manifest";
 import { AGENT_HANDOVER_BUDGET } from "@/lib/agent/execution-policy";
 import { autoExecuteTerms } from "@/lib/agent/posture";
 import type { DatabaseType } from "@/lib/types";
@@ -26,6 +27,8 @@ import type { DatabaseType } from "@/lib/types";
  *    to the budget cannot leave the copy behind (#425's lesson);
  *  - **the SQLite sentence is read off the engine the start was decided on**, keeps its
  *    exact words, and does not wait for the tick: it is true of the run either way;
+ *  - **the terms and the chips are the statement language's own**, as the rail resolved
+ *    it: no language is assumed, so a card can never state SQL's session on another engine;
  *  - **focus moves into the region when it is raised**, which is the announcement a
  *    keyboard user gets that two buttons appeared under a Start that just went
  *    disabled.
@@ -40,6 +43,7 @@ function refObject(): RefObject<HTMLElement | null> {
 interface Overrides {
   readonly connectionName?: string | null;
   readonly engine?: DatabaseType | null;
+  readonly language?: AgentStatementLanguageId;
   readonly autoExecute?: boolean;
   readonly onAutoExecuteChange?: (next: boolean) => void;
   readonly onOpen?: () => void;
@@ -54,6 +58,7 @@ function renderCard(overrides: Overrides = {}) {
       workflowLabel={WORKFLOW_LABEL}
       connectionName={overrides.connectionName === undefined ? "Sales" : overrides.connectionName}
       engine={overrides.engine === undefined ? "postgres" : overrides.engine}
+      language={overrides.language ?? "sql"}
       autoExecute={overrides.autoExecute ?? false}
       onAutoExecuteChange={overrides.onAutoExecuteChange ?? (() => {})}
       onOpen={overrides.onOpen ?? (() => {})}
@@ -158,7 +163,7 @@ describe("ConsentCard", () => {
       expect(terms.id).toBe("agent-consent-terms");
       // Verbatim, and from the one author: the sentence the safety strip's widened
       // reading quotes is the sentence this checkbox is described by.
-      expect(terms.textContent).toBe(autoExecuteTerms("data-analysis"));
+      expect(terms.textContent).toBe(autoExecuteTerms("data-analysis", "sql"));
       expect(getByTestId("agent-auto-execute").getAttribute("aria-describedby")).toBe("agent-consent-terms");
       // Present in the accessibility tree while the popover is closed — hidden from
       // sight only. `aria-hidden` or a conditional render here would remove the
@@ -221,6 +226,34 @@ describe("ConsentCard", () => {
 
       const other = renderCard({ autoExecute: true, engine: "postgres" });
       expect(other.getByTestId("agent-consent-bounds").textContent).not.toContain("SQLite");
+    });
+
+    // Only SQL replays in the database-enforced read-only session the run's own read used, so only SQL names one.
+    test.each(["kubectl", "mongo"] as const)(
+      "no session chip is shown for %s, which has no such session",
+      (language) => {
+        const { getByTestId } = renderCard({ autoExecute: true, engine: null, language });
+
+        const chips = getByTestId("agent-consent-bounds").textContent ?? "";
+        expect(chips).not.toContain("read-only session");
+        expect(chips).toContain(`${AGENT_HANDOVER_BUDGET.maxResultRows} rows`);
+      },
+    );
+  });
+
+  describe("the statement language the rail resolved", () => {
+    test.each(["sql", "kubectl", "mongo"] as const)("the terms are %s's own", (language) => {
+      const { getByTestId } = renderCard({ language });
+
+      expect(getByTestId("agent-auto-execute-terms").textContent).toBe(autoExecuteTerms("data-analysis", language));
+    });
+
+    test("a MongoDB card states no SQL session, because the language's own terms are read", () => {
+      const { getByTestId } = renderCard({ engine: "mongodb", language: "mongo" });
+
+      const terms = getByTestId("agent-auto-execute-terms").textContent ?? "";
+      expect(terms).toContain("A MongoDB answer is never run in your editor");
+      expect(terms).not.toContain("read-only session");
     });
   });
 

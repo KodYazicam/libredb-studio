@@ -160,34 +160,63 @@ describe("agentPosture in agent mode, on an engine it can execute on", () => {
       `${AGENT_HANDOVER_BUDGET.maxResultRows} rows, no time limit, same read-only session`,
     );
     expect(posture.title).toBe("Reads only, and one statement lands in your editor");
-    expect(posture.body).toBe(autoExecuteTerms("investigation"));
+    expect(posture.body).toBe(autoExecuteTerms("investigation", "sql"));
+  });
+});
+
+describe("the posture on MongoDB", () => {
+  const posture = agentPosture({
+    mode: "agent",
+    engine: "mongodb",
+    engineLabel: getDBConfig("mongodb").label,
+    handover: false,
+  });
+  const rows = STATEMENT_BUDGETS.maxResultRows;
+  const seconds = STATEMENT_BUDGETS.statementTimeoutMs / 1000;
+
+  // Who holds each bound, in this engine's own terms: the server's deadline with Studio's kill behind it, the server's
+  // row bound, a principal the server must report and test before a command-sending run's first model turn (the
+  // operations workflow sends none and is not verified), and the fence. There is no read-only session to name.
+  test("states the reviewed wording, with the figures read from the policy row", () => {
+    expect(posture.tone).toBe("reads");
+    expect(posture.headline).toBe("Reads only");
+    expect(posture.qualifier).toBe(`${rows} rows and ${seconds} s per command, enforced by the server`);
+    expect(posture.title).toBe("Agent mode reads, under a boundary the server enforces");
+    expect(posture.body).toBe(
+      `Agent mode runs commands it wrote itself, bounded to ${rows} rows and ${seconds} seconds each: maxTimeMS is the server's own deadline, and Studio ends a command the server does not. On the server, find and aggregate stop one row past the budget. Before the first model turn of a run that sends commands, the server must report that this connection's user holds only read privileges on this database and must refuse a write from it: a user that can write, a server without authentication, or a server that is not MongoDB ends that run there. The fence refuses writes, write stages, server-side JavaScript and diagnostic stages before the engine is reached. Nothing reaches your editor.`,
+    );
   });
 
-  test("the mongo language states the boundary in this engine's own words, and the hand-over in its own", () => {
-    // The reads posture: maxTimeMS and the probe, not a read-only session - the sentence says
-    // who holds each bound, which is the whole difference from the SQL engines' copy.
-    const reads = agentPosture({
-      mode: "agent",
-      engine: "mongodb",
-      engineLabel: getDBConfig("mongodb").label,
-      handover: false,
-    });
-    expect(reads.tone).toBe("reads");
-    expect(reads.body).toContain("maxTimeMS");
-    expect(reads.body).toContain("proven read-only at open");
+  test("a hand-over tick widens nothing, because no hand-over is offered on this engine", () => {
+    const ticked = agentPosture({ mode: "agent", engine: "mongodb", engineLabel: "MongoDB", handover: true });
 
-    // The widened arm: one COMMAND in the editor, same principal - the consent sentence the
-    // language's own handover terms write, with the fence and the roles named for this engine.
-    const widened = agentPosture({
-      mode: "agent",
-      engine: "mongodb",
-      engineLabel: getDBConfig("mongodb").label,
-      handover: true,
-    });
-    expect(widened.tone).toBe("widened");
-    expect(widened.headline).toBe("Reads only, and one command in your editor");
-    expect(widened.body).toContain("command in your editor and run it there");
-    expect(widened.body).toContain("the fence before the engine");
+    expect(ticked).toEqual(posture);
+  });
+
+  test("autoExecuteTerms on mongo says no hand-over runs there, in the kubectl sentence's shape", () => {
+    expect(autoExecuteTerms("data-analysis", "mongo")).toBe(
+      "A MongoDB answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
+    );
+  });
+
+  test("no MongoDB sentence promises what the engine does not do", () => {
+    const ticked = agentPosture({ mode: "agent", engine: "mongodb", engineLabel: "MongoDB", handover: true });
+    const sentences = [
+      ...Object.values(posture),
+      ...Object.values(ticked),
+      ...WORKFLOW_TYPES.map((workflowType) => autoExecuteTerms(workflowType, "mongo")),
+    ];
+    for (const sentence of sentences) {
+      for (const overclaim of [
+        "proven read-only at open",
+        "no time limit",
+        "run it there",
+        "read-only session",
+        "before they cross the wire",
+      ]) {
+        expect(sentence, sentence).not.toContain(overclaim);
+      }
+    }
   });
 });
 
@@ -296,17 +325,20 @@ describe("the posture on Kubernetes", () => {
       "A kubectl answer is never run in your editor: the hand-over is not offered on this engine, so the run produces its answer on its own read-only path only.",
     );
   });
-
-  test("autoExecuteTerms defaults to SQL, the language the consent step is shown for", () => {
-    expect(autoExecuteTerms("data-analysis")).toBe(autoExecuteTerms("data-analysis", "sql"));
-  });
 });
 
 describe("autoExecuteTerms", () => {
+  // No default: a caller that names no language would be shown SQL's terms on whatever engine it is on, SQL's
+  // read-only session included, on an engine that has none.
+  test("takes the language it states, with no default", () => {
+    // @ts-expect-error: the language is required, so this call does not compile
+    expect(() => autoExecuteTerms("data-analysis")).toThrow();
+  });
+
   test("names the run's own bounds and the editor's, for every workflow", () => {
     for (const workflowType of WORKFLOW_TYPES) {
       const budgets = AGENT_WORKFLOW_BUDGETS[workflowType].policy.budgets;
-      const terms = autoExecuteTerms(workflowType);
+      const terms = autoExecuteTerms(workflowType, "sql");
 
       expect(terms).toContain(
         `bounded to ${budgets.maxResultRows} rows and ${budgets.statementTimeoutMs / 1000} seconds`,
@@ -332,7 +364,7 @@ describe("autoExecuteTerms", () => {
       const budgets = AGENT_WORKFLOW_BUDGETS[workflowType].policy.budgets;
       expect(budgets.maxResultRows).toBe(STATEMENT_BUDGETS.maxResultRows);
       expect(budgets.statementTimeoutMs).toBe(STATEMENT_BUDGETS.statementTimeoutMs);
-      expect(autoExecuteTerms(workflowType)).toBe(
+      expect(autoExecuteTerms(workflowType, "sql")).toBe(
         agentPosture({
           mode: "agent",
           engine: "postgres",

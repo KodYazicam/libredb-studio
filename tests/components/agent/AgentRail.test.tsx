@@ -15,8 +15,9 @@ import {
 } from "@/hooks/use-connection-payload";
 import { applyStatementName } from "@/components/agent/rail-parts";
 import { useAgentRun } from "@/components/agent/use-agent-run";
+import * as manifest from "@/lib/agent/agent-manifest";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
-import { agentPosture } from "@/lib/agent/posture";
+import { agentPosture, autoExecuteTerms } from "@/lib/agent/posture";
 import type { AgentRunWorkflowType, AgentThreadContext } from "@/lib/agent/types";
 import { getDBConfig } from "@/lib/db-ui-config";
 import type { DatabaseConnection } from "@/lib/types";
@@ -4063,6 +4064,21 @@ describe("AgentRail", () => {
         expect(startBodyOf(fetchMock).autoExecute).toBe(false);
       });
 
+      // No plan of a MongoDB answer can be weighed, so a tick could only ever be declined: the setting is not offered,
+      // as on a cluster, and the run opens with it off.
+      test("a MongoDB data-analysis run reaches no consent step: its variant cannot auto-execute", async () => {
+        const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE]);
+        const view = analyze({ connectionType: "mongodb" });
+        fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "orders by status" } });
+        await act(async () => {
+          fireEvent.click(view.getByTestId("agent-start"));
+        });
+
+        expect(view.queryByTestId("agent-consent")).toBeNull();
+        expect(view.queryByTestId("agent-auto-execute")).toBeNull();
+        expect(startBodyOf(fetchMock).autoExecute).toBe(false);
+      });
+
       test.each([undefined, null, "postgres"])("a connection type of %p is offered it", async (connectionType) => {
         mockAgentFetch([OPENED_LINE, STARTED_LINE]);
         const view = analyze({ connectionType });
@@ -4072,6 +4088,45 @@ describe("AgentRail", () => {
         });
 
         expect(view.getByTestId("agent-consent")).toBeTruthy();
+      });
+
+      test.each([undefined, null, "postgres", "sqlite"])(
+        "a connection type of %p is stated the terms of SQL, the language the rail resolved for it",
+        async (connectionType) => {
+          const view = await consentOf({ connectionType });
+
+          expect(view.getByTestId("agent-auto-execute-terms").textContent).toBe(
+            autoExecuteTerms("data-analysis", "sql"),
+          );
+        },
+      );
+
+      /*
+        SQL is the only language whose variants offer the hand-over today, so a real manifest can only show the step
+        stating SQL's terms. This one test substitutes a kubectl data-analysis variant that may auto-execute, to show
+        the step states the terms of whichever language the rail resolved rather than SQL's by assumption. Restored
+        in `finally`: `mock.module` reaches every importer in this process.
+      */
+      test("the step states the terms of the language the rail resolved, not SQL's by assumption", async () => {
+        const real = { ...manifest };
+        // Built before the substitution: the manifest's own functions read the substitute once it is in place.
+        const handingOver = { ...real.requiredVariant("kubectl", "data-analysis"), canAutoExecute: true };
+        try {
+          mock.module("@/lib/agent/agent-manifest", () => ({
+            ...real,
+            agentVariant: (language: manifest.AgentStatementLanguageId | undefined, workflow: AgentRunWorkflowType) =>
+              language === "kubectl" && workflow === "data-analysis"
+                ? handingOver
+                : real.agentVariant(language, workflow),
+          }));
+          const view = await consentOf({ connectionType: "kubernetes" });
+
+          expect(view.getByTestId("agent-auto-execute-terms").textContent).toBe(
+            autoExecuteTerms("data-analysis", "kubectl"),
+          );
+        } finally {
+          mock.module("@/lib/agent/agent-manifest", () => real);
+        }
       });
     });
 
