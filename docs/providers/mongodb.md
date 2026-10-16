@@ -1342,7 +1342,8 @@ Over the API: `POST /api/db/query` (JSON MQL in the `sql` field) and `POST /api/
 Agent mode executes on MongoDB through `queryReadOnly()`, and reads the catalog for `inspect_schema` through `readCatalogReadOnly()`, both on [`mongodb/index.ts`](../../src/lib/db/providers/document/mongodb/index.ts).
 MongoDB has no read-only session or transaction, so the boundary is the connection's user, proven at open by the server's own answers ([`agent-boundary.ts`](../../src/lib/db/providers/document/mongodb/agent-boundary.ts)), and each read is bounded once it is sent ([`agent-read.ts`](../../src/lib/db/providers/document/mongodb/agent-read.ts)).
 The command a model writes is read by [`envelope.ts`](../../src/lib/db/providers/document/mongodb/envelope.ts), which both the run's tool path ([`mongo-admission.ts`](../../src/lib/db/operations/mongo-admission.ts)) and the provider use, so the two refuse the same commands with the same sentences.
-The checks run only on a connection opened to send statements (`sendsStatements` beside `readOnly` on the execution context): the operations workflow's curated reads, MCP's `inspect_schema` and plan-mode grounding open as every MongoDB connection opens, unverified.
+The checks run only on a connection opened to send statements (`sendsStatements` beside `readOnly` on the execution context).
+The operations workflow, MCP's `inspect_schema` and plan mode's grounding open under the operations profile, which sends no statement: unverified, as the editor's connection opens, but naming themselves to the server as the agent and retrying no write, as every execution-profile client does.
 
 #### Setting up the agent's user
 
@@ -1361,6 +1362,8 @@ The checks run only on a connection opened to send statements (`sendsStatements`
 3. Seed a connection whose own user is that user ([`SEED_CONNECTIONS.md`](../SEED_CONNECTIONS.md)):
 
    ```yaml
+   version: "1"
+
    connections:
      - id: "app-agent"
        name: "App (agent)"
@@ -1371,6 +1374,7 @@ The checks run only on a connection opened to send statements (`sendsStatements`
        password: "${MONGO_AGENT_PASSWORD}"
        database: app
        authSource: app
+       roles: ["admin"]
    ```
 
    The seed's own user is the read user because a run opens on a seed only and a seed carries no separate agent credential (B85); an agent credential beside a connection string is refused with `AGENT_CREDENTIAL_WITH_CONNECTION_STRING`.
@@ -1385,7 +1389,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
 
 1. **The server is MongoDB** (`assertAgentEngineIsAdmissible`).
    `buildInfo` must not name another server, no host the client was given or resolved may be a wire-compatible service's, and the reply must hold the stable fields a MongoDB answers: a version whose first three numbers `versionArray` repeats, and `storageEngines` listing `wiredTiger`.
-   The unstable fields (`allocator`, `javascriptEngine`, `gitVersion`) are never read: 9.0.4 answers `tcmalloc-google` and `mozjs-wasm` where 7.0.43 answers `tcmalloc` and `mozjs`, and FerretDB answers a `gitVersion` of its own.
+   `allocator` (unstable, by the manual's own account) and `javascriptEngine` and `gitVersion` (stable fields whose values change between releases) are never read: 9.0.4 answers `tcmalloc-google` and `mozjs-wasm` where 7.0.43 answers `tcmalloc` and `mozjs`, and FerretDB answers a 40-hex `gitVersion` of its own.
    Each server refused here is refused with `PROFILE_UNSUPPORTED_TARGET` until its own enforcement is measured, the D347 precedent that keeps Percona off the MySQL wire:
 
    | Server | Recognised by | Measured |
@@ -1423,7 +1427,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    The row past the budget is the refusal, in the sentence every engine's profile uses.
 7. **The byte budget, in BSON bytes**, the measure issue #1614 settled on.
    A cursor is read raw, one document at a time, and each document's own BSON size is added to the byte budget before it is decoded, so the document that crosses it is never decoded and memory holds the budget's rows and one batch, not the result.
-   Measured on 9.0.4 under a 512 MiB memory limit: an aggregate projecting `$range: [0, 200000]` over 1,000 documents is refused on the byte budget with the process growing 13 MiB, and a 15 MiB document is refused without being decoded.
+   Measured on 9.0.4 under a 512 MiB memory limit: an aggregate projecting `$range: [0, 200000]` over 1,000 documents is refused on the byte budget, and a 15 MiB document is refused without being decoded, each with the process's resident memory growing 0 to 31 MiB across runs, under the 64 MiB ceiling [`tests/live/mysql-agent-profile.ts`](../../tests/live/mysql-agent-profile.ts) holds its own reads to.
    So the budget counts what the server sends, not the served text: a document holding a large `Binary` counts its bytes, though the grid shows it as `<Binary: N bytes>`.
    A `distinct` answers one reply, which the server holds to 16 MiB and the driver decodes; it is refused past the row budget before any row is built, then on the row whose BSON size carries the total past the byte budget.
 8. **The bound database**, as issue #1614 settled.
@@ -1433,7 +1437,9 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
 
 The estimating plan (`inspect_plan`) explains the command the read would run, built by the same builder (`openBoundedRead`), at `queryPlanner` verbosity and under the same deadline.
 The server plans it and, when several candidate plans fit, runs each for a bounded trial to choose one; it returns no result rows.
-The plan is answered without what the server says about itself (`serverInfo`, `serverParameters`, the echoed `command`, a shard's `connectionString`, the cluster time), at any depth.
+The plan is answered without what the server says about itself: only the plan's own keys pass the reply's top level, so `serverInfo` (its host and port), `serverParameters`, the echoed `command`, `ok` and the cluster time do not.
+Below the top level the plan passes as the server wrote it, because it echoes the command's field names, whatever they are: a filter on a field named `ok` keeps `ok` in the parsed query, the index's key pattern and its bounds (measured on 9.0.4, 8.3.11 and 7.0.43, where an unsharded plan holds none of the server's own keys below the top level).
+A sharded plan names each shard's address, and those are dropped where the server's 9.0.4 source writes them (a shard a find lists loses its `connectionString` and `serverInfo`, and a shard a split pipeline answers for its `host`); no sharded cluster is measured.
 
 The catalog read answers the bound database's collections and views, or one of them: one `listCollections` decides what a name is, the name is taken whole (a collection may be called `fs.files`), its fields are inferred from up to 100 sampled documents by the editor's own inference, the sample stopping short of the byte budget, and a collection's indexes are read beside them.
 A view has no indexes of its own, and the server refuses `listIndexes` on one.
@@ -1475,7 +1481,8 @@ The profile writes nothing, but the server records what it is sent:
 - Every verified open writes one `ACCESS` line (id 20436, "Checking authorization failed") with the refused probe's whole command, measured on 9.0.4; on MongoDB Enterprise and Atlas, whose auditing logs authorization failures by default, it is also one audited `authCheck` failure (not measured).
 - A read slower than `slowms` (100 ms by default) is a "Slow query" line (id 51803) in the server's log, its filter written out literally.
 - `allowDiskUseByDefault` is on (measured on 9.0.4, 8.3.11 and 7.0.43), so a large sort or group may spill to the server's disk.
-- Every client of an execution profile names itself `libredb-studio-agent` (`appName`), and every command of the agent's carries the comment `libredb-studio-agent`, so each of these records can be filtered to the agent's own; the client also retries no write.
+- Every client of an execution profile names itself `libredb-studio-agent` (`appName`) and retries no write, and the commands a statement-sending run sends (the checks at open, each read and plan, the catalog read and the kill of a read's session) also carry the comment `libredb-studio-agent`, so each of these records can be filtered to the agent's own.
+  The operations profile's acquisitions send the editor's own reads, which carry no comment.
 
 #### What matches the editor, and what differs on purpose
 
