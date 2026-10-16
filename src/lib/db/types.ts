@@ -1895,7 +1895,9 @@ export type WorkloadProfileReading =
   | { readonly kind: "rows"; readonly result: QueryResult }
   | { readonly kind: "over-ceiling" };
 
-/** What the agent's catalog read asks of `readCatalogReadOnly`: one container's objects, or one object's description. */
+/**
+ * What the agent's catalog read asks of `readCatalogReadOnly`: one container's objects, or one object's description.
+ */
 export interface ReadOnlyCatalogSelector {
   /**
    * The container to read. Absent or empty reads the container the provider is bound to, so the agent layer never

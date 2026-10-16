@@ -1019,7 +1019,8 @@ export async function getOrCreateProvider(
 
   // Create new provider (async - dynamically loads the provider module). Only the derived posture
   // is handed on, so the handle opens under exactly the posture its key frames; every provider but
-  // DuckDB ignores it (non-admin DuckDB file access).
+  // DuckDB and SQLite ignores it: DuckDB closes file access under a denied posture, and SQLite
+  // refuses to open under one.
   const provider = await createDatabaseProvider(effectiveConnection, options, { allowExternalFileAccess });
   try {
     await connectPhase(() => provider.connect());
@@ -1119,9 +1120,10 @@ const EXECUTION_PROFILES: ReadonlySet<string> = new Set(Object.keys(PROFILE_ACQU
  * boundary at open does not prove it there. `allowExternalFileAccess` is the requester's posture, absent read as
  * denied.
  *
- * An unknown profile is refused here too, and never defaulted: the table is a plain object, so a name such as
- * `toString` would read an inherited member and answer a context with no `readOnly` in it. Exported for the tests;
- * `acquireExecutionProfileProvider` is the one caller.
+ * An unknown profile is refused here, never defaulted: the table is a plain object, so a name such as `toString`
+ * would read an inherited member and answer a context with no `readOnly` in it. This is the acquisition's refusal:
+ * `acquireExecutionProfileProvider`, the one caller, calls this ahead of its cache key and has no check of its own.
+ * Exported for the tests.
  */
 export function executionContextFor(
   profile: ExecutionProfile,

@@ -892,7 +892,7 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture).not.toHaveProperty("profileRefusal");
   });
 
-  test("a credential the profile layer will not grant loses the grounding, not the run", async () => {
+  test("a credential the profile layer will not grant becomes an unavailable capture carrying the refusal, never a throw", async () => {
     const h = harness("sqlite");
 
     const capture = await captureContextSnapshot({
@@ -908,6 +908,8 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(capture.kind).toBe("unavailable");
     if (capture.kind !== "unavailable") throw new Error("unreachable");
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    // A credential code travels like the privilege codes: what the run does next is the drive's call.
+    expect(capture.profileRefusal?.reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
     // The generic sentence names no cause, so what the operator gets is that sentence AND
@@ -1396,8 +1398,8 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
   });
 
   /*
-    A failure raised BEFORE the reading left is the environment's, and it loses the
-    grounding rather than the run.
+    A failure raised BEFORE the reading left is the environment's, and the capture reports
+    it rather than throwing it, so a plan run loses its grounding and not the run.
 
     Plan mode's promise is that it opens and answers on every connection, and on these
     twelve type-ids it did — because it reached no database at all. Letting an unreachable
@@ -1437,7 +1439,7 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     expect(capture.profileRefusal?.error).toBe(refusal);
   });
 
-  test("a credential the profile layer will not grant loses the grounding, not the run", async () => {
+  test("a credential the profile layer will not grant becomes an unavailable capture carrying the refusal, never a throw", async () => {
     const h = providerHarness({
       acquireThrows: new ExecutionProfileError(
         "agent credential for this connection could not be decrypted",
@@ -1450,6 +1452,7 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     expect(capture.kind).toBe("unavailable");
     if (capture.kind !== "unavailable") throw new Error("unreachable");
     expect(capture.reasonCode).toBe("CATALOG_READ_REFUSED");
+    expect(capture.profileRefusal?.reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
     expect(capture.detail).toContain("under the execution profile a grounding read takes");
     expect(capture.detail).not.toContain("could not be decrypted");
     // Same refusal, same advice, on the other of the two paths that catch this error.
