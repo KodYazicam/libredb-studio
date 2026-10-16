@@ -255,7 +255,7 @@ describe("an admitted command reads as its typed envelope", () => {
   });
 });
 
-describe("the existing refusals keep their sentences", () => {
+describe("the envelope's own shape refusals name what to send", () => {
   test("not-json and not-one-command show the envelope", () => {
     expect(refused("db.orders.find({})", "not-json")).toBe(
       `The statement is not the JSON command envelope this database takes. The envelope is ${EXAMPLE}. Nothing was sent.`,
@@ -354,10 +354,14 @@ describe("a key no reader of that operation honours is refused, naming what to s
     expect(message).toContain('leading {"$match": {...}} stage');
   });
 
-  test("options on an aggregate point at its stages", () => {
+  test("options on an aggregate point at the stages that express them, and drop the rest", () => {
     const message = refused(command("aggregate", { pipeline: [], options: { limit: 5 } }), "unknown-key");
     expect(message).toContain('An aggregate takes no "options"');
     expect(message).toContain("$limit");
+    // An option no stage expresses, such as allowDiskUse, hint or collation, gets the same sentence.
+    expect(refused(command("aggregate", { pipeline: [], options: { allowDiskUse: true } }), "unknown-key")).toBe(
+      'An aggregate takes no "options": write a sort, a skip, a limit or a projection as $sort, $skip, $limit and $project stages of its "pipeline", and drop any other option. Nothing was sent.',
+    );
   });
 
   test("a pipeline outside an aggregate points at the aggregate", () => {
@@ -568,6 +572,26 @@ describe("operators that run code, or that the engine keeps to itself, are refus
     }
   });
 
+  test("a key the engine would read as data is refused there too, on purpose", () => {
+    // Measured on 9.0.4: the engine takes these keys as data inside a $literal and in the value an $eq compares
+    // against. The reader does not tell data from operator; SERVER_SIDE_JAVASCRIPT_OPERATORS says why.
+    const placed: [string, string, string][] = [
+      [aggregate([{ $project: { x: { $literal: { $where: "data" } } } }]), "server-side-javascript", "$where"],
+      [
+        command("find", { options: { projection: { x: { $literal: { $function: 1 } } } } }),
+        "server-side-javascript",
+        "$function",
+      ],
+      [command("find", { filter: { a: { $eq: { $where: "data" } } } }), "server-side-javascript", "$where"],
+      [
+        aggregate([{ $project: { x: { $literal: { $_internalJsEmit: 1 } } } }]),
+        "internal-operator",
+        "$_internalJsEmit",
+      ],
+    ];
+    for (const [text, code, key] of placed) expect(refused(text, code)).toStartWith(`"${key}"`);
+  });
+
   test("the operators that merely match and compute are admitted", () => {
     const reads = [
       command("find", { filter: { status: { $regex: "^sh", $options: "i" } } }),
@@ -664,8 +688,8 @@ describe("the order of the checks decides which sentence a command meets", () =>
 
 describe("the reader is total", () => {
   test("a tree deeper than the call stack is read without throwing, and what it refuses is still found", () => {
-    // 40,000 levels: past the 32,768 at which a recursive walk overflowed bun's stack (measured), and well inside
-    // what JSON.parse reads.
+    // 40,000 levels: past the 16,000 to 26,000 at which a recursive walk overflowed bun's stack (measured), and well
+    // inside what JSON.parse reads.
     const depth = 40_000;
     const deep = (leaf: string) =>
       `{"collection": "orders", "operation": "find", "filter": ${'{"a": '.repeat(depth)}${leaf}${"}".repeat(depth)}}`;

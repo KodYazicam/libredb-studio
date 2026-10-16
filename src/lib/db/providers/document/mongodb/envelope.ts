@@ -5,10 +5,10 @@
  * honours: `find` (`filter`; `options` `projection`, `sort`, `skip`, `limit`), `findOne` (`filter`; `options`
  * `projection`), `aggregate` (`pipeline`), `count` (`filter`) and `distinct` (`field`, `filter`), each naming its
  * `collection` and, optionally, its `database`. A key the read would ignore is refused rather than dropped, so a
- * command never runs as less than it says, and a `limit` or a `skip` must be a whole number a cursor cannot misread.
- * A pipeline holds only `READ_PIPELINE_STAGES`, at every depth the server runs one: the command's own, each `$facet`
- * arm, and the pipelines of `$lookup` and `$unionWith`. The server-side JavaScript operators and every internal (`$_`)
- * operator are refused wherever they sit.
+ * command does not run as less than it says (a key written twice is the exception, below), and a `limit` or a `skip`
+ * must be a whole number a cursor cannot misread. A pipeline holds only `READ_PIPELINE_STAGES`, at every depth the
+ * server runs one: the command's own, each `$facet` arm, and the pipelines of `$lookup` and `$unionWith`. The
+ * server-side JavaScript operators and every internal (`$_`) operator are refused wherever they sit.
  *
  * This is the agent's grammar, not the boundary. The boundary is the connection's user and the server that enforces
  * its privileges: a command this reader admits can still be refused there, and that refusal, not this one, is what
@@ -21,7 +21,9 @@
  * (`extended-json.ts`): `{"$oid": "zz"}` passes this reader and is refused there, before anything is sent.
  *
  * Key order is the order written, which a sort and an embedded document's equality depend on, with one residual:
- * JavaScript puts integer-like keys such as "0" and "42" first, in ascending order, wherever the text wrote them.
+ * JavaScript puts integer-like keys such as "0" and "42" first, in ascending order, wherever the text wrote them. A
+ * key written twice in one object is read as its last value: `JSON.parse` drops the first in silence, so the text can
+ * show a condition the command does not send.
  */
 
 /** One JSON value, as `JSON.parse` answers it. */
@@ -154,8 +156,12 @@ const PIPELINE_WRITE_STAGES: ReadonlySet<string> = new Set(["$out", "$merge"]);
 /**
  * The operators that run JavaScript on the server: `$where` in a filter, `$function` and `$accumulator` in an
  * expression. The key is the refusal, not its value: a body arrives as code the model wrote. A key that starts with
- * `$` in a filter, a projection or a pipeline is an operator by the engine's own grammar, so the refusal by key has no
- * false positive; the operators that only match and compute (`$regex`, `$regexMatch`, `$expr`, `$cond`) are not here.
+ * `$` in a filter, a projection or a pipeline is an operator by the engine's own grammar, except where the engine
+ * reads the object holding it as data: a `$literal`'s value, and the operand of `$eq`, `$ne`, `$gt`, `$gte`, `$lt`,
+ * `$lte` or `$all` in a filter (measured on 9.0.4). The walk refuses these keys, and every `$_` key, there too, on
+ * purpose: telling data from operator would make it a second parser of the engine's grammar, so a read is refused even
+ * where the engine would have taken the name as data. The operators that only match and compute (`$regex`,
+ * `$regexMatch`, `$expr`, `$cond`) are not here.
  */
 const SERVER_SIDE_JAVASCRIPT_OPERATORS: ReadonlySet<string> = new Set(["$where", "$function", "$accumulator"]);
 
@@ -166,7 +172,13 @@ const SERVER_SIDE_JAVASCRIPT_OPERATORS: ReadonlySet<string> = new Set(["$where",
  */
 const INTERNAL_OPERATOR_PREFIX = "$_";
 
-const READ_OPERATIONS: ReadonlySet<string> = new Set(["find", "findOne", "aggregate", "count", "distinct"]);
+const READ_OPERATIONS: ReadonlySet<string> = new Set<MongoReadOperation>([
+  "find",
+  "findOne",
+  "aggregate",
+  "count",
+  "distinct",
+]);
 
 /** The keys every operation takes. */
 const TARGET_KEYS: ReadonlySet<string> = new Set(["collection", "database", "operation"]);
@@ -197,10 +209,10 @@ const EXAMPLE =
  * was sent.", because a refusal a model cannot act on is a loop.
  *
  * The checks run in this order, so a command meets the sentence about its first fault: JSON; one object; the
- * collection; the operation, so a write meets the write's sentence before any key's; a write's payload anywhere; the
- * keys the operation takes; the database; then the operation's own shape (a distinct's field; a find's or a
- * findOne's option keys, then its filter, projection and sort, then skip and limit; a count's filter; an aggregate's
- * stages); then the forbidden operators anywhere; and last the wrappers' shape anywhere.
+ * collection; the operation, so a write meets the write's sentence before any key's; a write's payload key anywhere
+ * among the command's keys; the keys the operation takes; the database; then the operation's own shape (a distinct's
+ * field; a find's or a findOne's option keys, then its filter, projection and sort, then skip and limit; a count's
+ * filter; an aggregate's stages); then the forbidden operators anywhere; and last the wrappers' shape anywhere.
  */
 export function readMongoCommand(
   text: string,
@@ -333,7 +345,7 @@ function untakenKeySentence(operation: MongoReadOperation, key: string): string 
       return 'Only a distinct takes "field": send "operation": "distinct" to read one field\'s distinct values, or project the field in a find with "options": {"projection": {"<field>": 1}}. Nothing was sent.';
     case "options":
       if (operation === "aggregate") {
-        return 'An aggregate takes no "options": write them as $sort, $skip, $limit and $project stages of its "pipeline". Nothing was sent.';
+        return 'An aggregate takes no "options": write a sort, a skip, a limit or a projection as $sort, $skip, $limit and $project stages of its "pipeline", and drop any other option. Nothing was sent.';
       }
       return operation === "count"
         ? 'A count takes no "options": it counts every document "filter" matches, so remove "options". Nothing was sent.'
@@ -408,7 +420,9 @@ function readSlot(
   );
 }
 
-/** The envelope of an operation whose keys are already the ones it takes, or the refusal of its first malformed slot. */
+/**
+ * The envelope of an operation whose keys are already the ones it takes, or the refusal of its first malformed slot.
+ */
 function shapeEnvelope(
   command: MongoJsonObject,
   operation: MongoReadOperation,
@@ -640,8 +654,8 @@ interface JsonNode {
 /**
  * Every value of a parsed command with the key it sits under, a key before the values beneath it, siblings in written
  * order. A work list rather than recursion: `JSON.parse` reads a nesting far deeper than a recursive walk's stack
- * (measured on bun 1.4.2: it read 1,000,000 levels, and a recursive walk overflowed at 32,768), and the reader is
- * total over any text it is given.
+ * (measured on bun 1.4.2: it read 1,000,000 levels, where a recursive walk overflowed at about 16,000 as a generator
+ * and at 21,000 to 26,000 as a plain function), and the reader is total over any text it is given.
  */
 function* nodesInWrittenOrder(root: MongoJsonValue): Generator<JsonNode> {
   const pending: JsonNode[] = [{ value: root, path: "" }];
