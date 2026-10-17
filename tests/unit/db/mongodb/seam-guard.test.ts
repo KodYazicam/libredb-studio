@@ -199,7 +199,7 @@ function driverModulesLoadedBy(entries: readonly string[]): number {
   const script = `
     for (const entry of ${JSON.stringify(entries)}) await import(${JSON.stringify(`${ROOT}/`)} + entry);
     const loaded = [...(globalThis.Loader?.registry?.keys?.() ?? []), ...Object.keys(require.cache)];
-    console.log(JSON.stringify(new Set(loaded.filter((key) => key.includes("node_modules/mongodb/"))).size));
+    console.log(JSON.stringify(new Set(loaded.filter((key) => key.split("\\\\").join("/").includes("node_modules/mongodb/"))).size));
   `;
   const run = Bun.spawnSync([process.execPath, "-e", script], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
   expect(run.exitCode).toBe(0);
