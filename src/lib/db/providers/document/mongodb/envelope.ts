@@ -557,6 +557,14 @@ function readStages(
       );
     }
     const names = Object.keys(stage);
+    // Several keys none of which is a stage name are one stage's fields written without the stage around them, the
+    // mistake a model makes with a $group, so that sentence shows the wrapper rather than asking for a split.
+    if (names.length > 1 && !names.some((key) => key.startsWith("$"))) {
+      return refuse(
+        "bad-pipeline",
+        `A pipeline stage names exactly one stage, and this one names ${names.join(", ")}, none of which is a stage name: write them inside the stage they belong to, whose name starts with $, for example {"$match": {"<field>": <value>}} or {"$group": {"_id": "$<field>", "<name>": {"$sum": 1}}}. Nothing was sent.`,
+      );
+    }
     if (names.length !== 1) {
       return refuse(
         "bad-pipeline",

@@ -529,6 +529,16 @@ describe("a pipeline admits only read stages, at every depth the server runs one
     refused(aggregate([{ $unionWith: { coll: "archive", pipeline: [[]] } }]), "bad-pipeline");
   });
 
+  test("a stage whose keys are all fields is told to name its stage around them", () => {
+    // A $group's fields written without the $group around them, as a real model wrote three times in one run.
+    const body = refused(aggregate([{ _id: "$customer", orders: { $sum: 1 } }]), "bad-pipeline");
+    expect(body).toContain("this one names _id, orders, none of which is a stage name");
+    expect(body).toContain('{"$group": {"_id": "$<field>", "<name>": {"$sum": 1}}}');
+    expect(body).not.toContain("write one object per stage");
+    // One stage name among them keeps the sentence that splits two stages.
+    expect(refused(aggregate([{ $match: {}, limit: 5 }]), "bad-pipeline")).toContain("write one object per stage");
+  });
+
   test("a sub-pipeline that is not an array of stages, so it cannot go unread", () => {
     for (const facet of [[], "arms", null, { a: {} }, { a: "stages" }]) {
       expect(refused(aggregate([{ $facet: facet }]), "bad-pipeline")).toContain(
