@@ -3733,14 +3733,15 @@ Found 2026-10-16 in the review of #1790 (issue #1614).
 
 ### D366. `mapDatabaseError` classes MongoDB network and server-selection failures as timeouts or generic errors on the editor path
 
-`mapDatabaseError` in `src/lib/db/errors.ts` classes an error by its message, and two of the MongoDB driver's connection failures land in the wrong class on the editor path (`MongoDBProvider.query()` and the object surface in `src/lib/db/providers/document/mongodb/index.ts`).
+`mapDatabaseError` in `src/lib/db/errors.ts` classes an error by its message, and two of the MongoDB driver's connection failures land in the wrong class on the editor path (`MongoDBProvider.query()` and `runMaintenance()` in `src/lib/db/providers/document/mongodb/index.ts`).
 A `MongoServerSelectionError` ("Server selection timed out after 30000 ms") becomes a `TimeoutError` reported as a query timeout, and a `MongoNetworkError` whose message names no refused connection, such as a socket the server closed, becomes a plain `DatabaseError`.
 So a user whose server went away is told that a query timed out, or is told nothing about the connection.
+The object routes do not map the driver's error at all: `listContainers`, `listObjects`, `describeObject` and `describeObjects` let it reach `createErrorResponse` in `src/lib/api/errors.ts`, which answers it as an internal error (500), and `countObjects` turns it into an unavailable count; only `readObjectSource` answers a transport failure as a `ConnectionError`.
 The agent path maps all three of the driver's transport failures to `ConnectionError` by their class names (`TRANSPORT_FAILURES` in `src/lib/db/providers/document/mongodb/agent-read.ts`, issue #1614); the editor path was left as it was, because the shared mapper decides every engine's classification.
 
 Found 2026-10-16 in the review of #1790 (issue #1614).
 
-**Done when:** the MongoDB editor path classes `MongoNetworkError`, `MongoNetworkTimeoutError` and `MongoServerSelectionError` as `ConnectionError` by class name, as `TRANSPORT_FAILURES` does, every other engine's classification is unchanged, and a test pins each class on the editor path.
+**Done when:** the MongoDB editor path classes `MongoNetworkError`, `MongoNetworkTimeoutError` and `MongoServerSelectionError` as `ConnectionError` by class name, as `TRANSPORT_FAILURES` does, in `query()`, `runMaintenance()` and those four object methods alike, so an object route answers those three as a connection failure rather than an internal error, every other engine's classification is unchanged, and a test pins each class on `query()` and on an object route.
 
 ### D367. The read-only budget refusal sentences are typed out in each provider
 
@@ -6770,6 +6771,10 @@ with no reading gives the editor a plan the agent still cannot weigh, and a read
 
 Amended 2026-10-17 (#1614): MongoDB does not offer auto-execute at all (`canAutoExecute` is false on every mongo variant in `src/lib/agent/agent-manifest.ts`), because both halves are missing there too and a third with them, a verified replay of a MongoDB answer in the editor; B118 records the three as one change.
 
+Amended 2026-10-17 (#1614): MySQL is in DuckDB's state (#1629).
+A run on MySQL or MariaDB asks for `EXPLAIN FORMAT=JSON` and holds the plan as `mysql-json`, the format the connect probe measures there, and that `ExplainFormat` has no `PLAN_READINGS` arm, so `planRefusal` answers `unverified-dialect` and a ticked run's answer is put in the editor unrun.
+`mysql-text`, the plain plan of a MySQL-wire server that refuses that grammar, is left unread on purpose (#574, the comment above `PLAN_READINGS` in `src/lib/agent/plan-summary.ts`).
+
 ### A7. The agent's byte budget TOTAL is measured after the result exists, on every engine that has one
 
 SQL Server is the engine that makes this visible, because it is the first whose result budget is the
@@ -7565,13 +7570,16 @@ Found 2026-10-14 while building agent execution on Kubernetes.
 
 **Done when:** a ledger header whose `workflowType` is not an `AgentRunWorkflowType` is refused at read with a named error, with a test that writes such a header and reads it back; cited in `docs/AGENT.md`.
 
-### B113. The agent user guide cites code by line number and carries em dashes
+### B113. The agent user guide and the data-flow page cite code by line number and carry em dashes
 
 `docs/AGENT_GUIDE.md` cites code as `file:line` 46 times, on 41 lines (`timeline.ts:499`, `goal-verifier.ts:349-355` and `AgentRail.tsx:401-447` among them), and those numbers have drifted as the files changed, so a reader following one lands on unrelated code.
 The same page carries 152 lines with an em dash, against the repository's writing rule.
 Found 2026-10-14 while building agent execution on Kubernetes.
 
-**Done when:** every code citation in `docs/AGENT_GUIDE.md` names a file and a symbol instead of a line, no em or en dash remains on the page, and a guard test fails on a new `file:line` citation there; cited in `docs/AGENT.md`.
+`docs/AGENT_DATA_FLOW.md` does the same: it cites code as `file:line` 66 times, on 52 lines (`investigation.ts:2540`, `provider-registry.ts:136-150` and `AgentRail.tsx:745-758` among them), and carries 87 lines with an em dash.
+Found 2026-10-17 in the review of #1790 (issue #1614), which moved the page's section 5 table, what each tool result sends to the model, to symbols and left the rest.
+
+**Done when:** every code citation in `docs/AGENT_GUIDE.md` and `docs/AGENT_DATA_FLOW.md` names a file and a symbol instead of a line, no em or en dash remains on either page, and a guard test fails on a new `file:line` citation on either; cited in `docs/AGENT.md`.
 
 ### B114. A cluster health run drops the Warning events of a controller of an unlisted kind that has no pod
 

@@ -1004,7 +1004,7 @@ The table is the registry `createCanonicalOperationRegistry()` builds (`src/lib/
 
 The three Kubernetes descriptors are R1 under one boundary, Studio's request allowlist on the final method and path plus the identity's RBAC (the R1 contract is stated under [The operations template](#the-operations-template)).
 `cluster.usage.read` and `cluster.workloads.read` are R1 `data-read` and not metadata, although the server chooses their requests: a namespace or a selector the model wrote reaches the API server, and the answer is the cluster's own state.
-The four MongoDB descriptors sit under one boundary too, the connection's user proven at open, behind the command reader every command meets ([On a MongoDB connection](#on-a-mongodb-connection)).
+The four MongoDB descriptors sit under one boundary too, the connection's user proven at open; the three that send a command (`mongo.query.read`, `mongo.plan.estimate`, `mongo.table.profile`) also meet the command reader, and `mongo.schema.read` sends only the provider's own catalog commands ([On a MongoDB connection](#on-a-mongodb-connection)).
 `mongo.plan.estimate` is R1 `data-read` where the SQL estimate is R0: with several candidate plans the server runs each for a bounded trial, so documents are read although none is returned.
 
 ### On a Kubernetes connection
@@ -2896,7 +2896,7 @@ the role's own grants are the whole boundary (A3).
 - **B110**: the answer card's inventory chip counts every captured object under the engine's entity noun, so a RabbitMQ capture of 17 streams, 6 queues and 18 exchanges reads "41 streams read".
 - **B111**: DuckDB is offered `profile_table` by the database-assessment and data-analysis workflows, and `composeTableProfile` (`src/lib/agent/table-profile.ts`) has no verified DuckDB composition, so every call answers `UNSUPPORTED_DIALECT`; it was kept as it is when the agent layer moved to workflow variants, so the SQL surface stayed byte-identical.
 - **B112**: a run's persisted workflow type is not checked when its ledger is read, so a ledger naming a workflow Studio does not know reaches five workflow-keyed tables as `undefined`, and a budget read on it fails as a `TypeError` rather than a named refusal.
-- **B113**: [`AGENT_GUIDE.md`](./AGENT_GUIDE.md) cites code by line number, and those numbers have drifted from the code they name; read the file and symbol a citation names rather than its line.
+- **B113**: [`AGENT_GUIDE.md`](./AGENT_GUIDE.md) and [`AGENT_DATA_FLOW.md`](./AGENT_DATA_FLOW.md) cite code by line number, and those numbers have drifted from the code they name; read the file and symbol a citation names rather than its line.
 - **B114**: a cluster health run drops the Warning events of a controller whose kind the workload profile does not list, such as a CloudNativePG `Cluster` or an Argo `Rollout`, when that controller has no pod in the namespace, because `readWorkloadProfile` gives it no row to count them under.
 - **B115**: plan mode on a Kubernetes connection still speaks of a database: its safety strip says nothing else reaches the database, and the objective field suggests "Why is checkout slow?".
 - **B116**: the agent section of [`FEATURES.md`](./FEATURES.md), the "Two independent axes" bullet among others, still carries em dashes.
