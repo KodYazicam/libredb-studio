@@ -1236,6 +1236,9 @@ MongoDB-specific branches:
 | Authentication failure (message contains *authentication*) | `AuthenticationError` |
 | Other driver errors | generic `QueryError` / `DatabaseError` with the original message |
 
+The mapper reads a message, not a class, so on the editor's path a server that went away is misread: a `MongoServerSelectionError` ("Server selection timed out ...") becomes a query `TimeoutError`, and a socket the server closed a generic `DatabaseError` (`docs/BACKLOG.md` D366).
+An agent run's reads map the driver's transport failures to `ConnectionError` by class name (`TRANSPORT_FAILURES` in [`agent-read.ts`](../../src/lib/db/providers/document/mongodb/agent-read.ts)).
+
 ---
 
 ## 11. Testing
@@ -1422,7 +1425,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    Every command carries `maxTimeMS`, the budget's own deadline; an explain carries it at the top of the explain command, because 8.3.11 and 7.0.43 ignore the one inside the explained command (measured: given only that one, their explains ran 1,520 ms and 715 ms against a 300 ms budget).
    Each read runs in a session the provider starts, and a timer one second past the deadline (`AGENT_DEADLINE_BACKSTOP_MS`) kills that session with `killSessions` and closes the cursor; a user holding only read may kill its own session (measured on 9.0.4, 8.3.11 and 7.0.43: the read ends with code 11601 and no operation is left).
    The server's own expiry (code 50), and anything the read settles with after the kill, is the statement deadline, killed server-side; a read that has not ended a second after the kill (`AGENT_KILL_GRACE_MS`) is the client giving up on a server that did not end it; and a server that cannot be reached is a `ConnectionError`, never a fault in the statement.
-   The timer is clamped to the 32-bit range of `setTimeout` (`MAX_STATEMENT_TIMEOUT_MS`), the hand-over budget's spelling of no time limit.
+   The timer is clamped to the 32-bit range of `setTimeout` (`MAX_STATEMENT_TIMEOUT_MS`, the largest statement timeout a budget may carry), because a delay past it fires after 1 ms.
 6. **A server-side row bound.** A `find` asks for one row past the row budget, or for its own limit when that is smaller; an `aggregate` ends with `{$limit: <budget + 1>}`; a `count` is the `$match` and `$group` pipeline the driver's `countDocuments` sends.
    The row past the budget is the refusal, in the sentence every engine's profile uses.
 7. **The byte budget, in BSON bytes**, the measure issue #1614 settled on.
@@ -1430,7 +1433,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    Measured on 9.0.4 under a 512 MiB memory limit, one read per fresh process: an aggregate projecting `$range: [0, 200000]` over 1,000 documents, and a `find` projecting the same, are refused on the byte budget, and a 15 MiB document is refused without being decoded, each with the process's resident memory growing about 31 MiB, under the 64 MiB ceiling [`tests/live/mysql-agent-profile.ts`](../../tests/live/mysql-agent-profile.ts) holds its own reads to.
    So the budget counts what the server sends, not the served text: a document holding a large `Binary` counts its bytes, though the grid shows it as `<Binary: N bytes>`.
    A `distinct` answers one reply, which the server holds to 16 MiB, and the driver decodes it whole before either budget is read, because it decodes a command's reply even when asked for it raw: `raw` keeps only embedded documents as bytes, and the reply and its `values` list are decoded (driver 7.7.0, measured against 9.0.4, 8.3.11 and 7.0.43).
-   Decoded, a reply near that cap costs about ten times its size, well past the 64 MiB ceiling: on 9.0.4 under the same limit, a 14.8 MiB reply of 780,000 small documents grew resident memory by about 145 MiB, and a 14.4 MiB reply of 900,000 short strings by about 175 MiB, before the row refusal.
+   Decoded, a reply of many small values near that cap costs about ten times its size, well past the 64 MiB ceiling: on 9.0.4 under the same limit, a 14.8 MiB reply of 780,000 small documents grew resident memory by about 145 MiB, and a 14.4 MiB reply of 900,000 short strings by about 175 MiB, before the row refusal.
    It is refused past the row budget before any row is built, then on the row whose BSON size carries the total past the byte budget.
 8. **The bound database**, as issue #1614 settled.
    A run reads the database its connection is bound to (`getDatabaseName()`: the connection's database, or a connection string's path).
@@ -1503,13 +1506,18 @@ Three residuals of reading the text as JSON stay in both: JavaScript puts intege
 - **Schema is inferred from a 100-document sample.** Fields outside the sample don't appear;
   subdocuments are expanded only to depth 3 and only up to 200 fields per collection, and array
   elements' fields are never expanded ([§3.3](#33-sampling-based-schema-inference-nested-to-three-levels)).
+  The object surface's sample is bounded in documents and not in bytes (`docs/BACKLOG.md` D369); the
+  agent's catalog read stops its sample short of the run's byte budget (§12).
 - **The editor's `aggregate` results are unbounded.** In the editor only `find` gets a default 100-document cap; an
   `aggregate` pipeline without `$limit` can return a very large result set
   ([§3.4](#34-find-is-capped-at-100-aggregate-is-not)). *Future:* inject a safety `$limit` / cap
   aggregate output. An agent run's reads are bounded (see the agent profile in §12).
 - **An agent run's `distinct` is decoded whole before its budgets are read.**
-  The driver decodes a command's reply even when asked for it raw, so a `distinct` reply near the server's 16 MiB cap costs about ten times its size in memory before its row refusal, past the ceiling the run's cursor reads stay under (the byte budget in §12).
-  *Future:* bound it on the server, as a pipeline read from a raw cursor with a trailing `$limit`, the way a `count` is the `countDocuments` pipeline.
+  The driver decodes a command's reply even when asked for it raw, so a `distinct` reply of many small values near the server's 16 MiB cap costs about ten times its size in memory before its row refusal, past the ceiling the run's cursor reads stay under (the byte budget in §12).
+  *Future:* bound it on the server, as a pipeline read from a raw cursor with a trailing `$limit`, the way a `count` is the `countDocuments` pipeline (`docs/BACKLOG.md` D370).
+- **Editor reads carry no server deadline.** `query()` sends no `maxTimeMS`, and `connection.queryTimeout` bounds the
+  connect alone, so a read started in the editor runs until the server finishes it or the Sessions panel's Terminate
+  kills it. *Future:* `docs/BACKLOG.md` D364. An agent run's reads carry `maxTimeMS` and Studio's kill (§12).
 - **No `EXPLAIN` in the editor.** MongoDB's `explain()` is not wired to the editor (`supportsExplain: false`); the
   agent's `inspect_plan` explains through the read-only profile (see §12).
 - **No multi-document transactions.** MongoDB supports them on replica sets/sharded clusters, but the

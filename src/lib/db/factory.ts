@@ -1072,9 +1072,11 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * Single source of truth for the profile list, so a new profile cannot be accepted
  * without stating both. The second field is the engine gate, and it is a PROPERTY OF
  * THE PROFILE rather than of the factory: `agent-read-only` sends model-authored
- * statements, so it is served only where the provider can bound one (the engine's own
- * read-only mechanism, or on Kubernetes the request allowlist plus the identity's RBAC),
- * and only the providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
+ * statements, so it is served only where the provider can bound one (in one of the three
+ * forms the `queryReadOnly` docblock in `src/lib/db/types.ts` names: the engine's own read-only
+ * handle or transaction, a least-privilege principal the server's own answers prove, or a
+ * Studio-enforced request allowlist plus the identity's own authorization), and only the
+ * providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
  * DuckDB, SQL Server, MySQL, Kubernetes and MongoDB (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
  * at all — it calls the curated reporting methods every provider implements — so
  * requiring a read-only STATEMENT path of it would refuse an engine over a capability

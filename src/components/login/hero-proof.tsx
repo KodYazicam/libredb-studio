@@ -90,16 +90,12 @@ export function HeroProof() {
   const claims = HERO_CLAIMS;
 
   return (
-    // `space-y-1`, not `space-y-1.5` and never `space-y-2`: the agent claim's detail
-    // names the execution engines, and each of the last two of them is a line that made
-    // this panel tall enough that the login page scrolled at 1280x800 in the WORST state a
-    // real resize produces - the window grown from 720, the fallback face still on, the
-    // vertical scrollbar narrowing the columns until the detail wrapped one line more.
-    // #1612 (MySQL, the fifth) paid with `space-y-1.5` and the leading below; #1614
-    // (MongoDB, the seventh) pays the last 2px here: the page is tuned to exactly 800px
-    // (#541) and has no slack of its own, so this panel owes every engine its own line
-    // back. The next engine pays with the leading, and the one after that with the gap
-    // under the platform line - the sequence is named so the next one knows.
+    // `space-y-1`, and no wider: the agent claim's detail names every engine agent mode
+    // executes on, and the login page is tuned to exactly 800px (#541) with no slack of its
+    // own, so at 1280x800, in the WORST state a real resize produces (the window grown from
+    // 720, the fallback face still on, the vertical scrollbar narrowing the columns until
+    // the detail wraps one line more), a wider gap here scrolls the page. Why the claim
+    // should stop growing with the engine list is `docs/BACKLOG.md` U139.
     <div className="space-y-1">
       <dl data-testid="hero-proof" className="grid grid-cols-3 gap-x-6 gap-y-2 select-none">
         {claims.map((claim) => (
