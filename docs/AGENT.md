@@ -1610,7 +1610,7 @@ under a **third execution profile**, `agent-handover`:
 | | `agent-read-only` (the run's own read) | `agent-handover` (the editor replay) |
 | --- | --- | --- |
 | Opened with | `readOnly: true`, `agentUser` credential, profiled cache | identical |
-| Requires a database-native read-only statement path | yes | yes |
+| Requires a read-only statement path its provider implements | yes | yes |
 | Rows | 200, refused not truncated | 500 (`DEFAULT_QUERY_LIMIT`), refused not truncated |
 | Statement timeout | 10 s | none — spelled as 2 147 483 647 ms |
 | Bytes | 256 KiB | 64 MiB |

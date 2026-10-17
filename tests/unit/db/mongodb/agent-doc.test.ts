@@ -48,7 +48,10 @@ function citedFor(subject: RegExp): string {
 describe("docs/AGENT.md has a MongoDB section", () => {
   test("it exists, and the table of contents reaches it", () => {
     expect(SECTION.length).toBeGreaterThan(0);
-    expect(AGENT_DOC).toContain("[On a MongoDB connection](#on-a-mongodb-connection)");
+    // The entry itself, nested under the tool set as the heading is. The engine paragraph and the descriptor paragraph
+    // link the section too, so a match anywhere in the file would pass with the entry gone.
+    const toc = AGENT_DOC.split(/^## Table of Contents$/m)[1]?.split(/^## /m)[0] ?? "";
+    expect(toc).toMatch(/^ {4}- \[On a MongoDB connection\]\(#on-a-mongodb-connection\)$/m);
   });
 });
 

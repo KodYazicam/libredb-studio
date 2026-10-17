@@ -1099,8 +1099,8 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
 interface ProfileAcquisition {
   readonly context: ProviderExecutionContext;
   /**
-   * Refuse the provider unless it exposes a database-native read-only statement path. Also the
-   * source of the context's `sendsStatements`.
+   * Refuse the provider unless it implements a read-only statement path (`queryReadOnly`). Also
+   * the source of the context's `sendsStatements`.
    */
   readonly requiresReadOnlyStatements: boolean;
 }
@@ -1213,7 +1213,7 @@ function assertAgentCredentialForm(connection: DatabaseConnection, provider: Dat
  * editor's fully-privileged pool, and an editor request can never be handed a
  * read-only one.
  *
- * Whether a provider without a database-native read-only wrapper is refused is the
+ * Whether a provider without a read-only statement path is refused is the
  * PROFILE's decision, not this function's: under `agent-read-only` it is refused
  * rather than silently served `query()` (fail closed), and under `agent-operations`
  * it is served, because that profile sends no statement for a read-only wrapper to

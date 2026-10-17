@@ -217,7 +217,7 @@ what comes back, and finishes by composing a report whose every claim cites the 
   exists only where a provider implements it: `queryReadOnly` on
   `postgres.ts`, `sqlite.ts`, `duckdb/index.ts`, `mssql.ts`, `mysql.ts`, `kubernetes/index.ts` and `mongodb/index.ts`, and nowhere else.
   On Kubernetes the boundary is Studio's request allowlist plus the agent identity's RBAC.
-  On MongoDB it is the connection's user: before a run that sends commands begins, the server must show that the user holds only read privileges on the bound database and must refuse a write from it.
+  On MongoDB it is the connection's user: before a run that sends commands reaches its first model turn, the server must show that the user holds only read privileges on the bound database and must refuse a write from it.
   On any
   other engine an Agent-mode run whose workflow sends statements is refused when it is started,
   before a run is opened, and any that reaches the provider factory ends `engine-unsupported`.
