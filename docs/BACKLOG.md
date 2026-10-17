@@ -5601,7 +5601,10 @@ Each further engine will need another squeeze, and the next one has none left to
 
 Found 2026-10-13 while reviewing #1629.
 
-Amended 2026-10-17 (#1614): MongoDB made the claim one line longer again, and it was paid back by taking the panel's `space-y-1.5` to `space-y-1` in `hero-proof.tsx`, so the next engine meets the same page with less to give.
+Amended 2026-10-17 (#1614): MongoDB made the claim one line longer again, six lines at 1280x800.
+Taking the panel's `space-y-1.5` to `space-y-1` did not pay for it once #1798 gave the engine showcase another row: the page measured 802px at 1280x800 and the #541 check in `e2e/login.spec.ts` failed.
+It was paid back by that and by taking the claims' `leading-normal` to `leading-snug` in `hero-proof.tsx`, which leaves the page 793px tall at 1280 wide (`main` before it: 786px), less than one wrapped line (16.5px) of slack for the next engine.
+A window narrowed by a vertical scrollbar (1265 wide) wraps more of the hero and scrolls on both, 843px here and 854px on `main`.
 
 **Done when:** the claim's height no longer grows with the engine list (for example a count with the names behind a disclosure), the spacing #1629 and #1614 took back is restored, and `tests/components/LoginPage.test.tsx` still pins that the claim names only engines agent mode executes on.
 
