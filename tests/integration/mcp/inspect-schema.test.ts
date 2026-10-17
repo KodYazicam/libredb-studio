@@ -6,8 +6,8 @@
  *
  * No provider fills a table comment today, so the comment cases patch the real SQLite provider's
  * listObjects to add one, and restore it. The MongoDB cases run the real provider, because it is the
- * engine that declares no "table" kind, over the driver stand-in of tests/helpers/mongodb-driver.ts,
- * because no server runs here: one over a stubbed client, and one through the real acquisition.
+ * engine that declares no "table" kind, and no server runs here: one over a hand-made client, and three
+ * through the real acquisition, over the driver stand-in of tests/helpers/mongodb-driver.ts.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -38,8 +38,8 @@ import ferretBuildInfo from "../../unit/db/mongodb/fixtures/buildinfo-ferretdb-2
 import noAuthReaderStatus from "../../unit/db/mongodb/fixtures/connection-status-no-auth-libredb-agent-9.0.4.json";
 import rootStatus from "../../unit/db/mongodb/fixtures/connection-status-root-9.0.4.json";
 
-// Before the provider is loaded, so every MongoDB provider this file builds, through the factory or by hand, opens
-// the stand-in's client. Nothing else this file imports loads the driver.
+// Before the provider is loaded, so a MongoDB provider the factory opens in this file opens the stand-in's client.
+// Nothing else this file imports loads the provider; the stand-in loads the real driver only for its BSON.
 mock.module("mongodb", () => mongoDriverModule());
 const { MongoDBProvider } = await import("@/lib/db/providers/document/mongodb");
 

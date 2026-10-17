@@ -44,8 +44,9 @@ import {
  * is handed a provider a previous one verified.
  *
  * Each run is opened as the start route opens it, with the language and verifier `persistedRunFacts` writes, so the
- * verdict a case asserts is its variant's own. The stand-in answers the repository's own object fixture
- * (`docker/mongodb-init/01-object-fixture.js`): two orders, Ada's of 120 and Grace's of 80.
+ * verdict a case asserts is its variant's own. The stand-in serves the documents of the object fixture's customers and
+ * orders collections and its active_customers view (`docker/mongodb-init/01-object-fixture.js`), with numeric ids:
+ * two orders, Ada's of 120 and Grace's of 80.
  */
 
 /** The read-role principal of `docker/mongodb-init/02-agent-principal.js`, as a seed names it. */
@@ -72,7 +73,10 @@ const ADMIN: DatabaseConnection = {
   authSource: "admin",
 };
 
-/** The comment every command of an execution-profile connection carries (`AGENT_COMMAND_COMMENT`). */
+/**
+ * The comment a statement-sending run's own commands carry (`AGENT_COMMAND_COMMENT`): its checks at open, each read and
+ * plan, its catalog read and the kill of a read's session.
+ */
 const AGENT_COMMENT = "libredb-studio-agent";
 
 const dataDirs: string[] = [];
@@ -133,7 +137,10 @@ mock.module("@/lib/seed/resolve-connection", () => ({
 const { driveAgentRun, getAgentRunService } = await import("@/lib/agent/runtime");
 const { MongoDBProvider } = await import("@/lib/db/providers/document/mongodb");
 
-/** The repository's own object fixture in the `app` database, as the stand-in answers it. */
+/**
+ * Three of the object fixture's `app` objects, the customers and orders collections and the active_customers view,
+ * with numeric ids. Every collection's indexes are the stand-in's own (`_id_` and `email_1`), not the fixture's.
+ */
 function seedAppDatabase(): void {
   mongoDriver.databaseList = [{ name: "app" }];
   mongoDriver.collectionsByDb = {
