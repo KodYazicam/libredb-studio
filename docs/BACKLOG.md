@@ -31,7 +31,7 @@ None of it is a GitHub issue.
 - [Drivers and connections](#drivers-and-connections) — D1-D370, U17 · 268
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
-- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 132
+- [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U145 · 133
 - [Dependencies](#dependencies) — P1-P9 · 7
 - [Documentation](#documentation) — DOC3-DOC34 · 30
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
@@ -5661,6 +5661,17 @@ Verified 2026-10-14 on `main` at 5b77948ee: no test file imports both modules.
 Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
 
 **Done when:** a test under `tests/unit/lib/export/` renders edge values through the functions of `temporal.ts` and asserts that `typedLiteral(..., "spark")` writes each as a literal.
+
+### U145. E2E specs open the connection dialog by clicking the sidebar header's first button, which is the ERD button once metadata has loaded
+
+The `beforeEach` of 27 specs under `e2e/` opens the connection dialog with `page.locator("text=LibreDB Studio").locator("..").locator("..").locator("button").first()`.
+`Sidebar.tsx` renders `Show ERD Diagram` before `New connection` in that header whenever the active connection offers a schema diagram, and the Sample (LibreDB) connection is active at sign-in, so which button is first depends on whether its metadata arrived before the click.
+When it has, the click opens the ERD visualizer instead, the dialog never opens, and the test times out waiting for an engine button inside it.
+Measured 2026-10-17 on `main` at 674683b19 with `e2e/opcua-provider.spec.ts`, one worker and four repeats while a second run loaded the machine: 3 of 28 tests failed this way, and 0 of 14 without the load.
+
+Found 2026-10-17 while verifying #1790.
+
+**Done when:** the specs open the dialog by the button's own name (`getByRole("button", { name: "New connection" })`, the header's `aria-label`), and no spec under `e2e/` picks a sidebar header button by its position.
 
 ## Dependencies
 
