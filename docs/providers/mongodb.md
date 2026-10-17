@@ -1211,7 +1211,7 @@ to write "one runnable statement in this MongoDB database's own query language",
 2026-08-22 answered `db.orders.aggregate([{ $group: … }])`, which is correct MongoDB and unrunnable
 here, because `query()` parses the JSON command object and nothing else. Naming only what the
 language *is* did not survive contact with the model's prior; naming what it is not did.
-Its `database` key is offered to the editor's reads alone: the label tells the model that an agent run reads only the database its connection is bound to, which layer 8 of [the boundary](#the-boundary-layer-by-layer) holds.
+Its `database` key names another database for the editor's reads alone: the label tells the model that an agent run reads only the database its connection is bound to, which layer 8 of [the boundary](#the-boundary-layer-by-layer) holds.
 
 `slowQueriesEmptyState` (*"Query stats come from the database profiler - run db.setProfilingLevel()
 to start recording into system.profile."*) is the monitoring Queries panel's empty state. That
@@ -1310,9 +1310,9 @@ Connect the provider against the `app` database. Every object above exists to ma
 the engine re-measurable; [§6](#the-object-surface-789) says which claim each one carries.
 
 ```bash
-bun test tests/integration/db/mongodb-provider.test.ts   # just this file
-bun run test                                              # the whole suite, one process per file
-bun run test:coverage                                     # CI coverage workflow
+bun tests/run-tests.ts tests/integration/db/mongodb-provider.test.ts   # just this file
+bun run test                                                           # the whole suite, one process per file
+bun run test:coverage                                                  # CI coverage workflow
 ```
 
 To smoke-test against a live server, start the compose fixture: `docker compose -f database-compose.yml up -d mongodb` runs MongoDB 9.0.4, pinned by digest, with the fixture above applied.

@@ -53,8 +53,8 @@ import type { RevivedMongoReadEnvelope } from "./extended-json";
 import { serializeMongoDocument } from "./values";
 
 /**
- * The comment every command of a statement-sending run carries (its checks at open, each read and plan, its catalog
- * read and the kill of a read's session), and the application name of every execution-profile client (`index.ts`), so
+ * The comment a statement-sending run's own commands carry (its checks at open, each read and plan, its catalog read
+ * and the kill of a read's session; the connect's `ping` carries none), and the application name of every execution-profile client (`index.ts`), so
  * the server's own records of a run (the profiler, the slow-query log, `$currentOp`, an audited authorization failure)
  * can be told from every other client's.
  */

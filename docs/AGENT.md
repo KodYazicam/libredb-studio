@@ -1440,7 +1440,7 @@ R0 rather than R1 is a claim about what bounds it: an R1 descriptor must name th
 Where the engine has a read-only mechanism, that mechanism is the boundary: a read-only transaction or session.
 On Kubernetes, which has none, the boundary is an allowlist Studio enforces on the final method and path of every request before it is sent, together with the authorization of the identity the request runs as, which on a cluster is its RBAC; that is what `kubectl.query.read`, `cluster.usage.read` and `cluster.workloads.read` name.
 On MongoDB, which has none either, the boundary is the connection's user, proven at open to hold only reads of the bound database on a server that enforces authorization; that is what `mongo.query.read`, `mongo.plan.estimate` and `mongo.table.profile` name.
-A curated provider call is not held to either, because it carries no statement for one to bound.
+A curated provider call is not held to any of them, because it carries no statement for one to bound.
 What bounds it instead is the input contract, which carries a kind out of a closed enum and two
 scalars — no `sql` key exists on it at all. The honest edge: `SlowQueryStats.query` and
 `ActiveSessionDetails.query` are statements somebody wrote, and a statement can carry literal values;

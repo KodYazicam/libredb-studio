@@ -101,10 +101,8 @@ no inventory and refuses to invent one.
 
 **What "Verified grounded" is claiming, and what it is not.** It says an inventory of that database's
 real objects reached the run and the run wrote something in that engine's own language that the editor
-accepts. It does NOT say the draft is good, and on one engine it demonstrably is not — see Redis. It
-says nothing at all about agent mode, which is still refused at the start of a statement-sending run everywhere but PostgreSQL,
-SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB; that is pinned by a test rather than by this table, because a run refused before it opens
-is not a thing worth driving eleven times.
+accepts. It does NOT say the draft is good, and on one engine it demonstrably is not: see Redis.
+It says nothing at all about agent mode, which is still refused at the start of a statement-sending run everywhere but PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB; that is pinned by a test rather than by this table, because a run refused before it opens is not a thing worth driving eleven times.
 
 **Two runs that refused, and both refusals were right.** A Couchbase run asked "how many documents of
 each type in this bucket" named the three real collections back and asked which one was meant. A Druid

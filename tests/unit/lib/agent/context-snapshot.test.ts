@@ -1326,9 +1326,10 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
   });
 
   test("the profile acquired is the operations one, for a run whose context names no statement language", async () => {
-    // A capture takes `agent-read-only` only for an agent run that sends statements in a
-    // language its engine has (`groundsUnderExecutionProfile`). This context names none, as
-    // on an engine whose provider has no read-only statement path, so the capture takes the
+    // A capture on this path takes `agent-read-only` only for an agent run of a
+    // statement-sending workflow on an engine whose statement language is its own, kubectl
+    // or mongo (`groundsUnderExecutionProfile`). This context names none, as for a SQL engine
+    // or one whose provider has no read-only statement path, so the capture takes the
     // operations profile, which every provider serves.
     const h = providerHarness();
 
