@@ -29,16 +29,6 @@ import type { DatabaseType } from "@/lib/types";
  *
  * Adding `queryReadOnly` to any provider, adding a provider, or adding a `DatabaseType`
  * therefore fails this file until `AGENT_EXECUTION_ENGINES` is updated to match.
- *
- * ONE id escapes the prototype measurement: `mongodb`. Importing
- * `providers/document/mongodb.ts` pulls `mongodb` -> `bson`, which calls
- * `node:v8 isBuildingSnapshot` at import time; Bun answers
- * `NotImplementedError: node:v8 isBuildingSnapshot is not yet implemented in Bun`
- * (measured with bun 1.3.14). For that id the file falls back to a conservative source
- * scan: the module must not mention `queryReadOnly` at all, and its base class
- * (`BaseDatabaseProvider` in `src/lib/db/base-provider.ts`, which imports no driver) must
- * not carry one either. Any mention fails the test rather than being interpreted, so the
- * fallback can only be too strict.
  */
 
 const repoRoot = join(import.meta.dir, "..", "..", "..", "..");
