@@ -2536,7 +2536,15 @@ describe("a resources recommendation folds", () => {
     with no `name` in its index spec is refused by the server (FailedToParse, measured on 9.0.4 and 7.0.43). The names
     are JSON-quoted and read through getCollection, so a collection named with a dot or a dash pastes as written.
   */
-  const documentIndex = (fields: { readonly database?: string; readonly options?: Record<string, unknown> }) =>
+  /** A document-index card, with the fields given; a rationale of null is a card that states none, as one may. */
+  const documentIndex = ({
+    rationale = "The plan reads a COLLSCAN on a filtered customer.",
+    ...fields
+  }: {
+    readonly database?: string;
+    readonly options?: Record<string, unknown>;
+    readonly rationale?: string | null;
+  }) =>
     foldLedgerEntries([
       OPENED,
       event({
@@ -2548,7 +2556,7 @@ describe("a resources recommendation folds", () => {
           collection: "orders",
           keys: { customer: 1, status: -1 },
           ...fields,
-          rationale: "The plan reads a COLLSCAN on a filtered customer.",
+          ...(rationale === null ? {} : { rationale }),
           evidence: [{ source: "artifact", correlationId: "p1" }],
         },
       } as AgentLedgerEntry & { kind: "event" }),
@@ -2578,6 +2586,13 @@ describe("a resources recommendation folds", () => {
     );
     expect(documentIndex({ options: { unique: true } }).items[1]?.quoted).toBe(
       'db.getCollection("orders").createIndex({"customer":1,"status":-1}, {"unique":true})',
+    );
+  });
+
+  test("a document index stating no rationale reads as the caveat alone, never as an undefined one", () => {
+    // The card's schema leaves the rationale optional, where the statement card's requires one.
+    expect(documentIndex({ database: "app", rationale: null }).items[1]?.detail).toBe(
+      "Not applied: nothing here runs this statement.",
     );
   });
 

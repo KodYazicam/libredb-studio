@@ -1404,12 +1404,14 @@ const MONGO_RUN_READ_QUERY: AgentToolDefinition = Object.freeze({
 
 /**
  * The catalog arm: the selector the SQL tool takes, answered by the provider's catalog read for the agent, in the
- * database the connection is bound to.
+ * database the connection is bound to. The two bounds are stated apart because they differ: a listing past the row
+ * budget is refused, while one collection's fields are inferred from a sample and cut at the provider's own bound, so
+ * no complete field list is promised. The bound is the provider's, so no number is named here.
  */
 const MONGO_INSPECT_SCHEMA: AgentToolDefinition = Object.freeze({
   name: "inspect_schema",
   description:
-    "Read the database's own catalog, optionally narrowed to one collection. Pass kind to choose the inventory: columns (the default: collections and their fields, inferred from a sample of documents) or indexes (the indexes one collection declares). MongoDB declares no foreign keys, so a relations read is refused rather than answered empty. It is subject to the same row budget as any read and is refused, not truncated, if it overflows.",
+    "Read the database's own catalog, optionally narrowed to one collection. Pass kind to choose the inventory: columns (the default: the collections, or one collection's fields, inferred from a sample of its documents) or indexes (the indexes one collection declares). MongoDB declares no foreign keys, so a relations read is refused rather than answered empty. A collection listing past the row budget is refused, not truncated. One collection's fields are listed up to a fixed bound, _id first and the rest in sorted order, so a field missing from a very wide collection's list may still exist.",
   inputSchema: catalogSelectorSchema,
   operationId: "mongo.schema.read",
 });

@@ -440,9 +440,14 @@ describe("inspect_schema on mongo", () => {
   test("the read is held to the run's clamped budget, the one every statement takes", async () => {
     const h = harness({ deadline: new AgentRunDeadline(3_000, frozenClock) });
     await mongoInspectSchemaTool(h.context, {}, null);
-    const budget = h.readCatalogReadOnly.mock.calls[0]?.[1] as { statementTimeoutMs: number; maxResultRows: number };
+    const budget = h.readCatalogReadOnly.mock.calls[0]?.[1] as {
+      statementTimeoutMs: number;
+      maxResultRows: number;
+      maxResultBytes: number;
+    };
     expect(budget.statementTimeoutMs).toBe(3_000);
     expect(budget.maxResultRows).toBe(AGENT_WORKFLOW_BUDGETS.investigation.policy.budgets.maxResultRows);
+    expect(budget.maxResultBytes).toBe(AGENT_WORKFLOW_BUDGETS.investigation.policy.budgets.maxResultBytes);
   });
 
   test("a provider with no agent catalog read is a server fault named as one, never a fall back to the editor's", async () => {
@@ -453,8 +458,11 @@ describe("inspect_schema on mongo", () => {
   });
 
   test("the description narrows to a collection, never to another database", () => {
+    // A listing past the row budget is refused (`readCatalogReadOnly`), but one collection's fields are inferred from
+    // a sample and cut at the provider's fixed bound, so the description promises a complete listing and no complete
+    // field list: a field absent from a very wide collection's list may still exist.
     expect(agentToolDefinition("mongo", "investigation", "inspect_schema").description).toBe(
-      "Read the database's own catalog, optionally narrowed to one collection. Pass kind to choose the inventory: columns (the default: collections and their fields, inferred from a sample of documents) or indexes (the indexes one collection declares). MongoDB declares no foreign keys, so a relations read is refused rather than answered empty. It is subject to the same row budget as any read and is refused, not truncated, if it overflows.",
+      "Read the database's own catalog, optionally narrowed to one collection. Pass kind to choose the inventory: columns (the default: the collections, or one collection's fields, inferred from a sample of its documents) or indexes (the indexes one collection declares). MongoDB declares no foreign keys, so a relations read is refused rather than answered empty. A collection listing past the row budget is refused, not truncated. One collection's fields are listed up to a fixed bound, _id first and the rest in sorted order, so a field missing from a very wide collection's list may still exist.",
     );
   });
 });
@@ -589,6 +597,10 @@ describe("profile_table on mongo", () => {
     });
     const past = mongoProfileTablePlan([wide], ["app"], { table: "wide", fromColumn: 40 });
     expect(past.kind === "unavailable" && past.reasonCode).toBe("NO_COLUMNS_AT_OFFSET");
+    // A batch starting exactly at the field count holds no field either: refused, never composed as a count-only
+    // $group whose answer would tell the model the inventory lists no field.
+    const atEnd = mongoProfileTablePlan([wide], ["app"], { table: "wide", fromColumn: 30 });
+    expect(atEnd.kind === "unavailable" && atEnd.reasonCode).toBe("NO_COLUMNS_AT_OFFSET");
   });
 
   test("pattern depth tests only string values, unanchored as the SQL shape test is, and converts nothing", () => {
@@ -687,6 +699,11 @@ describe("profile_table on mongo", () => {
     const result = await profileTable(service, h.context, { input: { table: "app.orders" } }, new Set(), new Set());
 
     expect(result.kind === "answered" && result.text).toContain("Profiled a collection: 7 document(s)");
+    // Covered as far as the inventory goes: its fields were inferred from a sample and are bounded, so the sentence
+    // claims the fields it lists, never every field the collection holds.
+    expect(result.kind === "answered" && result.text).toContain(
+      "Every field the inventory lists for that collection is covered.",
+    );
     expect(result.kind === "answered" && result.text).toContain("Only counts were read");
     // The collection's name is database content, so the model reads it fenced.
     expect(result.kind === "answered" && result.text).toContain("UNTRUSTED");
@@ -754,7 +771,7 @@ describe("profile_table on mongo", () => {
     expect(text).toContain("Profiled a collection: 3 document(s), no field at basic depth, 0 finding(s).");
     expect(text).toContain("Its inventory lists no field, so only its documents were counted.");
     expect(text).not.toContain("fields 1-0");
-    expect(text).not.toContain("Every field of that collection is covered.");
+    expect(text).not.toContain("Every field the inventory lists for that collection is covered.");
   });
 
   test("two batches of one collection are two steps, and one batch asked twice is one", async () => {

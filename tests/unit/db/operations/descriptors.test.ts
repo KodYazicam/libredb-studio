@@ -423,6 +423,17 @@ describe("the MongoDB boundaries", () => {
     expect(mongoQueryReadDescriptor.verification?.boundary).toContain("kills the session");
     expect(mongoPlanEstimateDescriptor.verification?.boundary).toContain("bounded trial");
   });
+
+  test("count a cursor's documents in BSON bytes before decoding, and say a distinct's reply is decoded whole first", () => {
+    // The driver decodes a command's reply even when asked for it raw (`distinctWithinBudget` in agent-read.ts), so
+    // the before-decode measure holds for the documents a cursor yields and not for the one reply a distinct answers.
+    const boundary = mongoQueryReadDescriptor.verification?.boundary ?? "";
+    expect(boundary).toContain("a cursor's documents are counted in BSON bytes before they are decoded");
+    expect(boundary).toContain(
+      "a distinct's one reply, which the server holds to 16 MiB, is decoded whole before its values are counted",
+    );
+    expect(boundary).not.toMatch(/(?<!a cursor's )documents are counted in BSON bytes/);
+  });
 });
 
 describe("the R1 boundary contract", () => {

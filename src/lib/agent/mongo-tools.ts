@@ -382,12 +382,14 @@ export async function runMongoProfile(
 }
 
 /**
- * What one batch covered of the collection's fields. A collection whose inventory lists no field is still profiled,
- * as its document count (`mongoProfileTablePlan`), and is told so rather than told every field is covered.
+ * What one batch covered of the fields the run's inventory lists for the collection. That list was inferred from a
+ * sample of its documents and is bounded, so full coverage is stated of the list, never of the collection. A
+ * collection whose inventory lists no field is still profiled, as its document count (`mongoProfileTablePlan`), and is
+ * told so rather than told every field is covered.
  */
 function fieldCoverage(plan: MongoProfilePlan): string {
   if (plan.columns.length === 0) return "Its inventory lists no field, so only its documents were counted.";
-  if (plan.remaining === 0) return "Every field of that collection is covered.";
+  if (plan.remaining === 0) return "Every field the inventory lists for that collection is covered.";
   return `${plan.remaining} further field(s) are NOT covered by this profile; call profile_table again with fromColumn=${plan.from + plan.columns.length} to reach them.`;
 }
 

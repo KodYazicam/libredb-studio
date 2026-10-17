@@ -3244,6 +3244,9 @@ describe("pause is honoured at the next checkpoint", () => {
     const kinds = kindsOf(await eventsOf(b.store, run.runId));
     expect(kinds).toContain("run-paused");
     expect(kinds).not.toContain("run-finished");
+    // Nor was it narrated: the drive reads the pause before it writes a draft, so the ledger shows no statement the
+    // drive then declined to run. `runStep`'s own checkpoint would stop the read, but only after the draft.
+    expect(kinds).not.toContain("statement-drafted");
   });
 
   test("a pause while the model was thinking reaches a draftless tool at runStep's checkpoint", async () => {
@@ -5383,6 +5386,47 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     expect(held.reason).not.toContain("compare_plans");
     // The model reads the same sentence the ledger records.
     expect(promptText(script.turns[2] as Turn)).toContain(plan.artifact.correlationId);
+    // And holds only what the sentence asks for: the run is narrowed to the variant's `narrowedExtras` and the report.
+    const declared = (script.turns[2]?.body.tools ?? []) as { function?: { name?: string } }[];
+    expect(declared.map((entry) => entry.function?.name)).toEqual(["recommend_change", "compose_report"]);
+  });
+
+  test("a run whose index rests on a read rather than a plan is sent to plan the slow command, in its own noun", async () => {
+    const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+    const run = await startMongoRun(b, "query-optimization");
+    const recommendsOnTheRead = (turn: Turn): Response =>
+      chatToolCallStream(
+        "recommend_change",
+        JSON.stringify({
+          change: "document-index",
+          collection: "orders",
+          keys: { customerId: 1 },
+          evidence: [{ source: "artifact", correlationId: correlationIdIn(turn.transcript) }],
+        }),
+        "call_recommend",
+      );
+    const script = scriptedModel(
+      callsTool("run_read_query", {
+        command: { collection: "orders", operation: "find", filter: { customerId: 7 }, options: { limit: 5 } },
+      }),
+      recommendsOnTheRead,
+      reportOn("The orders read needs an index on customerId."),
+      answersProse("No report."),
+      answersProse("No report."),
+    );
+
+    await runInvestigation(run.runId, {
+      service: b.service,
+      model: await modelOver(script.fetch),
+      resources: mongoResources(b),
+    }).catch(() => undefined);
+
+    const events = await eventsOf(b.store, run.runId);
+    expect(events.find((event) => event.kind === "recommendation")).toMatchObject({ change: "document-index" });
+    const held = events.find((event) => event.kind === "call-held");
+    if (held?.kind !== "call-held") throw new Error("the report was not held");
+    expect(held).toMatchObject({ tool: "compose_report", shortfall: "no-plan-evidence" });
+    expect(held.reason).toContain("Call inspect_plan on the slow command, then call recommend_change again");
   });
 
   test("a run that reports holding no plan is sent to plan its command and recommend an index, never to compare", async () => {

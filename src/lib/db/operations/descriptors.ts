@@ -343,8 +343,9 @@ const MONGO_READ_BOUNDARY =
   "and is refused. The command reader (envelope.ts) admits the five reads of the editor's command envelope with read " +
   "pipeline stages only and refuses server-side JavaScript; a command naming a database other than the connection's " +
   "is refused; every command carries maxTimeMS, and Studio kills the session when the server overruns it; find and " +
-  "aggregate are capped one document past the row budget server-side, documents are counted in BSON bytes before " +
-  "they are decoded, and a result past either budget is refused, never truncated.";
+  "aggregate are capped one document past the row budget server-side; a cursor's documents are counted in BSON " +
+  "bytes before they are decoded, while a distinct's one reply, which the server holds to 16 MiB, is decoded whole " +
+  "before its values are counted; and a result past either budget is refused, never truncated.";
 
 /**
  * One MongoDB command the model wrote, on a `mongodb` connection (issue #1614).
