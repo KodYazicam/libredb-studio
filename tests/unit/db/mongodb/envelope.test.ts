@@ -535,6 +535,11 @@ describe("a pipeline admits only read stages, at every depth the server runs one
     expect(body).toContain("this one names _id, orders, none of which is a stage name");
     expect(body).toContain('{"$group": {"_id": "$<field>", "<name>": {"$sum": 1}}}');
     expect(body).not.toContain("write one object per stage");
+    // One such key alone is the same slip, and a real model sent {"_id": "$customer"} six times while it was told only
+    // which stages are admitted.
+    const one = refused(aggregate([{ _id: "$customer" }]), "bad-pipeline");
+    expect(one).toContain("this one names _id, which is not a stage name");
+    expect(one).toContain('{"$group": {"_id": "$<field>", "<name>": {"$sum": 1}}}');
     // One stage name among them keeps the sentence that splits two stages.
     expect(refused(aggregate([{ $match: {}, limit: 5 }]), "bad-pipeline")).toContain("write one object per stage");
   });
