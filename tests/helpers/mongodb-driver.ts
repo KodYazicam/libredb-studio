@@ -6,7 +6,9 @@
  * about the provider's own commands rather than about the stand-in's answers: every cursor a `find` or an `aggregate`
  * opens with its filter or pipeline, its options and its builder calls; every command document, with the database it
  * was sent to; every session; and the client's URI and options. A cursor honours its `limit` and a trailing `$limit`
- * stage, as a server does, so a row bound the provider sets is a row bound the test observes.
+ * stage, as a server does, so a row bound the provider sets is a row bound the test observes. A pipeline that is one
+ * `$group` over the whole collection is evaluated, so the counts the agent's collection profile composes are the
+ * counts of the documents a test configured.
  *
  * The BSON values are the REAL driver's (`BSON`, taken before the module is replaced): a `raw` cursor yields each
  * document's real BSON bytes, and the provider decodes them with the real parser. `ObjectId`, `Binary` and
@@ -350,14 +352,107 @@ const isSampleChain = (pipeline: Doc[]): boolean =>
 const isCountGroup = (stage: unknown): boolean =>
   JSON.stringify(stage) === JSON.stringify({ $group: { _id: 1, n: { $sum: 1 } } });
 
-/** The documents an aggregate answers: the sample chain interpreted, a count counted, a trailing `$limit` honoured. */
+/** The value at a field path (`$a.b`) of `document`, or undefined where the document holds none. */
+function fieldAt(document: Doc, fieldPath: string): unknown {
+  let value: unknown = document;
+  for (const key of fieldPath.slice(1).split(".")) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    value = (value as Doc)[key];
+  }
+  return value;
+}
+
+/** What `$type` answers for a value: the BSON type alias, `missing` where the field is absent. */
+function bsonAliasOf(value: unknown): string {
+  if (value === undefined) return "missing";
+  if (value === null) return "null";
+  if (typeof value === "string") return "string";
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return Number.isInteger(value) && Math.abs(value) < 2 ** 31 ? "int" : "double";
+  if (value instanceof Date) return "date";
+  if (Array.isArray(value)) return "array";
+  return "object";
+}
+
+/** An expression's value read as a condition, as the server reads one: false, null, missing and 0 are false. */
+const holds = (value: unknown): boolean => value !== false && value !== null && value !== undefined && value !== 0;
+
+/**
+ * One aggregation expression evaluated against one document: the operators the agent's collection profile composes
+ * (`mongo-tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
+ * composition sends fails the test that drives it rather than counting nothing. `$and` stops at its first false
+ * operand, as the server's does, and `$regexMatch` refuses an input that is not a string, as the server's does.
+ */
+function evaluate(expression: unknown, document: Doc): unknown {
+  if (typeof expression === "string" && expression.startsWith("$")) return fieldAt(document, expression);
+  if (typeof expression !== "object" || expression === null) return expression;
+  if (Array.isArray(expression)) return expression.map((entry) => evaluate(entry, document));
+  const [operator, ...others] = Object.keys(expression);
+  if (operator === undefined || others.length > 0) throw new Error("an expression is one operator");
+  const argument = (expression as Doc)[operator];
+  const operands = Array.isArray(argument) ? argument : [argument];
+  switch (operator) {
+    case "$type":
+      return bsonAliasOf(evaluate(argument, document));
+    case "$eq":
+      return evaluate(operands[0], document) === evaluate(operands[1], document);
+    case "$in":
+      return (operands[1] as unknown[]).includes(evaluate(operands[0], document));
+    case "$and":
+      return operands.every((operand) => holds(evaluate(operand, document)));
+    case "$cond":
+      return holds(evaluate(operands[0], document)) ? evaluate(operands[1], document) : evaluate(operands[2], document);
+    case "$regexMatch": {
+      const { input, regex, options } = argument as { input: unknown; regex: string; options?: string };
+      const text = evaluate(input, document);
+      if (typeof text !== "string") throw mongoServerError(51104, "$regexMatch needs 'input' to be of type string");
+      return new RegExp(regex, options).test(text);
+    }
+    default:
+      throw new Error(`the stand-in does not evaluate ${operator}`);
+  }
+}
+
+/**
+ * A `$group` over the whole collection (`_id: null`), interpreted rather than ignored: each accumulator is a `$sum`
+ * of its expression over every document, and the group answers no row at all over no document, as the server's
+ * does. Any accumulator other than `$sum` is refused by name.
+ */
+function wholeCollectionGroup(group: Doc, documents: readonly Doc[]): Doc[] {
+  if (documents.length === 0) return [];
+  const row: Doc = { _id: null };
+  for (const [alias, accumulator] of Object.entries(group)) {
+    if (alias === "_id") continue;
+    const sum = (accumulator as { $sum?: unknown } | null)?.$sum;
+    if (sum === undefined) throw new Error(`the stand-in groups with $sum only, and ${alias} is not one`);
+    row[alias] = documents.reduce((total, document) => {
+      const value = evaluate(sum, document);
+      return total + (typeof value === "number" ? value : 0);
+    }, 0);
+  }
+  return [row];
+}
+
+/** The `$group` of a pipeline that is one whole-collection group, a trailing `$limit` aside; otherwise undefined. */
+function wholeCollectionGroupOf(pipeline: readonly Doc[]): Doc | undefined {
+  const stages = typeof pipeline.at(-1)?.$limit === "number" ? pipeline.slice(0, -1) : pipeline;
+  const group = stages.length === 1 ? (stages[0].$group as Doc | undefined) : undefined;
+  return group !== undefined && group._id === null ? group : undefined;
+}
+
+/**
+ * The documents an aggregate answers: the sample chain interpreted, a count counted, a whole-collection `$group`
+ * evaluated, a trailing `$limit` honoured.
+ */
 function aggregateDocuments(name: string, database: string, pipeline: Doc[]): Doc[] {
   if (isSampleChain(pipeline)) return runSampleChain(name, database, pipeline);
   const documents = documentsOf(`${database}.${name}`);
   const last = pipeline.at(-1);
   if (isCountGroup(last)) return documents.length === 0 ? [] : [{ _id: 1, n: documents.length }];
+  const group = wholeCollectionGroupOf(pipeline);
+  const answered = group === undefined ? documents : wholeCollectionGroup(group, documents);
   const limit = (last as { $limit?: unknown } | undefined)?.$limit;
-  return typeof limit === "number" ? documents.slice(0, limit) : documents;
+  return typeof limit === "number" ? answered.slice(0, limit) : answered;
 }
 
 /** The plan an explain answers by default: a COLLSCAN, with the fields a server adds beside it. */
