@@ -470,6 +470,9 @@ const ENGINE_CLAIM_FILES = [
 
 /** Copy that names no agent-mode engine today, scanned so that a sentence added there is held to the list too. */
 const ENGINE_CLAIM_SCANNED = [
+  "README_es.md",
+  "README_pt.md",
+  "README_ur.md",
   "docs/AGENT_DATA_FLOW.md",
   "deploy/azure/listing/listing-fields.md",
   "deploy/aws/listing/listing-fields.md",
