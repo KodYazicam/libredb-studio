@@ -28,7 +28,7 @@ None of it is a GitHub issue.
 **Sections**
 
 - [SQL statement reading](#sql-statement-reading) — S2-S9 · 6
-- [Drivers and connections](#drivers-and-connections) — D1-D370, U17 · 268
+- [Drivers and connections](#drivers-and-connections) — D1-D372, U17 · 270
 - [Value interpolation](#value-interpolation) — V1
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U145 · 133
@@ -3785,6 +3785,28 @@ Both were refused on the row budget only after the decode; the cursor reads grow
 Found 2026-10-17 while building the MongoDB agent read (#1790, issue #1614).
 
 **Done when:** the agent's `distinct` is bounded on the server, for example as a `$match` and `$group` pipeline read from a raw cursor with a trailing `$limit` of one past the row budget, the way `count` became the `countDocuments` pipeline, keeping `distinct`'s flattening of arrays, and `tests/live/mongodb-agent-profile.ts` holds a near-16 MiB `distinct` under the 64 MiB ceiling.
+
+### D371. A MongoDB server cut mid-read reaches an agent run as a statement deadline, not a lost connection
+
+`runUnderAgentDeadline` in `src/lib/db/providers/document/mongodb/agent-read.ts` maps the driver's transport failures to `ConnectionError` by class name (`TRANSPORT_FAILURES`), which ends a run as an environment failure, but a server cut mid-read does not reach that mapping before the read's deadline.
+Driver 7.7.0 retries a read's first command, which waits out the client's 30 s server selection (`MONGODB_SERVER_SELECTION_TIMEOUT_MS` in `src/lib/db/providers/document/mongodb/index.ts`), and a cursor whose `getMore` failed first sends `killCursors` to the lost server through the same selection (`AbstractCursor.cleanup`), so the network error surfaces only after that wait.
+Every agent workflow reads under a 10 s statement deadline, so the provider's timer fires first, its `killSessions` waits on the same selection, and the read ends as the client giving up on a server that did not end it: a `QueryError`, which the run offers the model as a statement to repair.
+Measured 2026-10-17 on 9.0.4, `docker kill` 1.7 s into a read as `libredb_agent` through `acquireExecutionProfileProvider` under the investigation budget: a cut during an aggregate's first command and one during a find's `getMore` both settled at 12.0 s with "Read-only execution exceeded the statement deadline of 10000ms and the server did not end it, so the client stopped waiting", while the client had seen its connection close and the server's heartbeat fail at the cut.
+Under a 60 s deadline the same two cuts were a `ConnectionError` at 31.8 s ("The MongoDB server could not be reached while the statement ran: ..."), so the mapping holds and only its timing loses.
+
+Found 2026-10-17 in the review of #1790 (issue #1614).
+
+**Done when:** a server cut mid-read reaches the run as a `ConnectionError` before the statement deadline ends it, while a replica-set election the driver rides out is still read as the read it is, for example by reading the client's own server monitoring during the read, and a test cuts a live standalone and a live replica-set primary mid-read.
+
+### D372. The no-plan-evidence notice says no plan was inspected when one was
+
+`shortfallNotice` in `src/lib/agent/investigation.ts` answers the `no-plan-evidence` shortfall with "Your index recommendation rests on no plan: ... and no plan has been inspected", and asks the run to call `inspect_plan` before it recommends again.
+`verifyQueryOptimizationGoal` in `src/lib/agent/goal-verifier.ts` returns `no-plan-evidence` whenever no index recommendation cites a plan artifact, which includes a run that inspected a plan and cited a read instead, so the sentence is false there and sends the run to read a plan it already holds.
+The notice is the same on every engine an optimization run reaches, SQL and MongoDB alike, and no test pins that clause.
+
+Found 2026-10-17 in the review of #1790 (issue #1614); it is older than that change.
+
+**Done when:** the sentence says the recommendation cites no plan this run inspected, or names the plan the run holds by its artifact id, and a test drives a run that holds a plan, cites a read, and is told so.
 
 ## Value interpolation
 
