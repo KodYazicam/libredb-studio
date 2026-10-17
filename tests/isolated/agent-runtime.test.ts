@@ -339,14 +339,14 @@ describe("a drive that fails before the loop", () => {
   });
 
   test("records an engine the agent cannot execute on read-only", async () => {
-    // The default connection of a zero-config deployment is the LibreDB sample,
-    // which has no database-native read-only profile. Reported as "internal", that
+    // The LibreDB sample, a built-in connection of a zero-config deployment, is served by
+    // a provider that implements no read-only statement path. Reported as "internal", that
     // is a server fault the user should report; reported as itself, it is a
     // connection they should switch away from.
     await openRun("arun_noprofile");
     mockResolveConnection.mockImplementationOnce(async () => {
       throw new ExecutionProfileError(
-        'Provider type "libredb" has no database-native read-only execution profile',
+        'Provider type "libredb" implements no read-only statement path (queryReadOnly)',
         "PROFILE_UNSUPPORTED_BY_PROVIDER",
       );
     });

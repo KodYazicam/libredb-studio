@@ -1953,7 +1953,7 @@ describe("acquireExecutionProfileProvider", () => {
     expect(getExecutionProfileCacheStats().size).toBe(0);
   });
 
-  test("refuses a provider type without a database-native read-only wrapper", async () => {
+  test("refuses a provider type without a read-only statement path", async () => {
     const error: unknown = await acquireExecutionProfileProvider(
       makeConnection("redis", { id: "redis-profile" }),
       "agent-read-only",
@@ -1961,6 +1961,11 @@ describe("acquireExecutionProfileProvider", () => {
 
     expect(error).toBeInstanceOf(ExecutionProfileError);
     expect((error as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("PROFILE_UNSUPPORTED_BY_PROVIDER");
+    // The rule is the method, not the kind of boundary behind it: Kubernetes and MongoDB are granted the profile with
+    // no database read-only session.
+    expect((error as Error).message).toBe(
+      'Provider type "redis" implements no read-only statement path (queryReadOnly)',
+    );
     expect(getExecutionProfileCacheStats().size).toBe(0);
   });
 

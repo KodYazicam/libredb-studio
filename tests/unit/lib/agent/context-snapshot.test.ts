@@ -1037,6 +1037,24 @@ describe("captureContextSnapshot — an environment failure on the composed path
     expect(engines.filter((engine) => advice.includes(engine))).toEqual([]);
   });
 
+  test("a provider with no read-only statement path is told so, naming no kind of boundary", async () => {
+    // The factory grants the profile to any provider that implements `queryReadOnly`, whatever bounds it: a database
+    // read-only session on the SQL engines, a request allowlist on Kubernetes, a server-proven principal on MongoDB.
+    const h = harness("postgres");
+
+    const capture = await captureContextSnapshot({
+      ...h.context,
+      acquireProvider: async () => {
+        throw new ExecutionProfileError("no read-only statement path", "PROFILE_UNSUPPORTED_BY_PROVIDER");
+      },
+    });
+
+    if (capture.kind !== "unavailable") throw new Error("unreachable");
+    expect(capture.detail.split("so its schema was not read for this run. ")[1]).toBe(
+      "This engine's provider implements no read-only statement path, so the profile cannot be granted on it at all.",
+    );
+  });
+
   test("a principal that lacks a privilege is told to grant it, or to connect as a user at all", async () => {
     // The same code is raised for a connection that authenticated no user, whose repair is a user and not a grant.
     const h = harness("postgres");

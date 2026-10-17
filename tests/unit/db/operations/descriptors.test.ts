@@ -67,8 +67,8 @@ describe("canonical operation registry", () => {
 
   test("the provider schema read is R0 metadata, and takes no input at all", () => {
     // R0 for the same reason the curated reading is: an R1 descriptor must NAME the
-    // database-native mechanism bounding it, and a provider call has no statement for
-    // a read-only transaction to bound. What bounds this one is that its input is
+    // mechanism bounding it, and a provider call has no statement for a read-only
+    // transaction to bound. What bounds this one is that its input is
     // EMPTY — there is no selector to widen and nothing a model wrote reaches an
     // engine.
     expect(dbSchemaReadDescriptor).toMatchObject({
@@ -93,8 +93,8 @@ describe("canonical operation registry", () => {
 
   test("the curated operational read is R0 metadata, and takes no statement at all", () => {
     // R0 rather than R1, and that is a claim about what bounds it rather than a way
-    // around the verification marker: an R1 descriptor must NAME the database-native
-    // mechanism bounding it, and a curated provider call has none — there is no
+    // around the verification marker: an R1 descriptor must NAME the mechanism
+    // bounding it, and a curated provider call has none: there is no
     // statement for a read-only transaction to bound. What bounds it is the shape of
     // the input, which carries a kind out of a closed enum and nothing a model wrote.
     expect(dbOperationsReadDescriptor).toMatchObject({
@@ -125,8 +125,8 @@ describe("canonical operation registry", () => {
       resourceCost: "heavy",
       supportsDryRun: false,
     });
-    // R1 is registrable only with a substantive verification marker naming a
-    // database-native boundary; the registry refuses a blank one.
+    // R1 is registrable only with a substantive verification marker naming its
+    // boundary; the registry refuses a blank one.
     expect(sqlTableProfileDescriptor.verification?.boundary).toContain("READ ONLY");
     expect(sqlTableProfileDescriptor.verification?.reviewedBy).toContain("#330");
   });

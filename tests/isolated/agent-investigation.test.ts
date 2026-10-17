@@ -6209,7 +6209,7 @@ describe("agent mode is no wider than it was, on an engine grounding now reaches
       acquireFails: () =>
         ++acquisitions > 1
           ? new ExecutionProfileError(
-              'Provider type "mongodb" has no database-native read-only execution profile',
+              'Provider type "mongodb" implements no read-only statement path (queryReadOnly)',
               "PROFILE_UNSUPPORTED_BY_PROVIDER",
             )
           : undefined,

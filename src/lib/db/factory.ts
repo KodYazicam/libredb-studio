@@ -1334,7 +1334,7 @@ export async function acquireExecutionProfileProvider(
   if (acquisition.requiresReadOnlyStatements && typeof provider.queryReadOnly !== "function") {
     await closeFreshTunnel();
     throw new ExecutionProfileError(
-      `Provider type "${connection.type}" has no database-native read-only execution profile`,
+      `Provider type "${connection.type}" implements no read-only statement path (queryReadOnly)`,
       "PROFILE_UNSUPPORTED_BY_PROVIDER",
     );
   }

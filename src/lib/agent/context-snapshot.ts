@@ -1018,7 +1018,7 @@ const PROFILE_REFUSAL_ADVICE: Readonly<Record<ExecutionProfileDenyCode, string>>
   PROFILE_SERVER_UNENFORCED:
     "The server accepted a write it should have refused, from a user whose privileges allow none or from no user at all, so it does not enforce authorization and no user is held read-only there. Turn on the server's authorization (on MongoDB, security.authorization) and connect as a user holding only read privileges; changing the connection's user alone cannot help.",
   PROFILE_UNSUPPORTED_BY_PROVIDER:
-    "This engine has no database-native read-only statement path, so the profile cannot be granted on it at all.",
+    "This engine's provider implements no read-only statement path, so the profile cannot be granted on it at all.",
   // One code for several targets on several engines, so it says what the target is and names none of them.
   PROFILE_UNSUPPORTED_TARGET:
     "This engine can grant the profile, but not against this target: a server on the engine's wire protocol that is not, or does not identify itself as, the server its read-only enforcement was measured on, or an in-memory database, where a read-only handle has nothing to read. Point the connection at the measured engine itself, or at a database file.",
