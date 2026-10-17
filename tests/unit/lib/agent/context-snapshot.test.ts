@@ -1248,8 +1248,8 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
       describeObjects,
     } as unknown as DatabaseProvider;
     // The profile is recorded here rather than read off the spy's call list, because
-    // it is the ARGUMENT that is under test: acquiring `agent-read-only` would throw
-    // PROFILE_UNSUPPORTED_BY_PROVIDER on every engine this path exists to reach.
+    // it is the ARGUMENT that is under test: what the run is decides it
+    // (`groundsUnderExecutionProfile` in `src/lib/agent/tools.ts`), not the engine.
     const profiles: unknown[] = [];
     const acquireProvider = mock(async (_connection: DatabaseConnection, profile: unknown) => {
       if (options.acquireThrows) throw options.acquireThrows;
@@ -1325,10 +1325,11 @@ describe("captureContextSnapshot — the provider's own inventory", () => {
     }
   });
 
-  test("the profile acquired is the operations one, which is the only one these engines serve", async () => {
-    // Not a style preference: `agent-read-only` requires `queryReadOnly`, which none
-    // of these engines implements, so acquiring it would throw
-    // PROFILE_UNSUPPORTED_BY_PROVIDER before the provider was ever reached.
+  test("the profile acquired is the operations one, for a run whose context names no statement language", async () => {
+    // A capture takes `agent-read-only` only for an agent run that sends statements in a
+    // language its engine has (`groundsUnderExecutionProfile`). This context names none, as
+    // on an engine whose provider has no read-only statement path, so the capture takes the
+    // operations profile, which every provider serves.
     const h = providerHarness();
 
     await captureContextSnapshot(h.context);
