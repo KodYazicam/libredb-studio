@@ -261,6 +261,10 @@ describe("agent runs on a MongoDB connection, scored by their own verifiers", ()
     ]);
 
     expect(run.thrown).toBeUndefined();
+    // The statement language the prompt quotes offers another database to the editor only, as the provider refuses it.
+    expect(promptText(run.turns[0] as Turn)).toContain(
+      "an agent run reads only the database its connection is bound to",
+    );
     expect(completed(run.events)).toEqual(["mongo.schema.read", "mongo.query.read"]);
     // The grounding and both tools acquired the read-only profile, whose open proved the boundary once.
     expect(acquired).toEqual(["agent-read-only", "agent-read-only", "agent-read-only"]);
