@@ -478,9 +478,12 @@ const ENGINE_CLAIM_SCANNED = [
   "deploy/aws/listing/listing-fields.md",
 ];
 
-/** The phrase each file uses for agent mode, in English and in each translated README's own words. */
+/**
+ * The phrase each file uses for agent mode, in English and in each translated README's own words, and the method the
+ * agent's statements reach an engine through, which a sentence naming its implementers names instead.
+ */
 const AGENT_ENGINE_CLAIM =
-  /agent mode|agentモード|agent 모드|режим agent|agent 模式|read-only (?:investigation )?agent|(?:execut(?:es|ing)|runs) statements|statement path|agent read-only profile/i;
+  /agent mode|agentモード|agent 모드|режим agent|agent 模式|read-only (?:investigation )?agent|(?:execut(?:es|ing)|runs) statements|statement path|agent read-only profile|queryReadOnly/i;
 
 /** A sentence naming SQL engines for MCP, whose `run_read_query` serves the SQL engines alone (#1614 decision 2). */
 const MCP_CLAIM = /\bMCP\b|run_read_query|Three read-only tools/;
@@ -506,12 +509,15 @@ const sentencesOf = (text: string): string[] =>
 
 const PRODUCT_ENGINES = EXTERNAL_DATABASE_TYPES.map((type) => getDBConfig(type).label);
 
-/** The sentences of `text` that claim where agent mode executes. */
+/**
+ * The sentences of `text` that claim where agent mode executes: three or more of the engines on the list, named beside
+ * an agent-mode phrase. Two named engines are a statement about that pair, such as the composed catalog on PostgreSQL
+ * and SQLite, rather than a list.
+ */
 const engineClaimsIn = (text: string): string[] =>
   sentencesOf(text).filter(
     (sentence) =>
-      sentence.includes("SQL Server") &&
-      sentence.includes("MySQL") &&
+      AGENT_EXECUTION_ENGINES.filter((type) => sentence.includes(getDBConfig(type).label)).length >= 3 &&
       AGENT_ENGINE_CLAIM.test(sentence) &&
       !MCP_CLAIM.test(sentence) &&
       !PRODUCT_ENGINES.every((label) => sentence.includes(label)),
@@ -567,10 +573,11 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
 
   /**
    * The copy that names the engines agent mode executes on, in prose and in five languages. A sentence is selected by
-   * what it claims rather than by where it sits: it names SQL Server and MySQL together beside one of the phrases each
-   * file uses for agent mode. Two kinds of sentence name those engines for another reason and are left out: MCP's
-   * `run_read_query` list, by name, because that tool serves the SQL engines alone (#1614 decision 2), and the
-   * product's whole engine list, which names every engine and which the Railway overview runs into its agent clause.
+   * what it claims rather than by where it sits: it names three or more of the engines on the list beside one of the
+   * phrases each file uses for agent mode, or beside `queryReadOnly`, the method a sentence naming its implementers
+   * names. Two kinds of sentence name those engines for another reason and are left out: MCP's `run_read_query` list,
+   * by name, because that tool serves the SQL engines alone (#1614 decision 2), and the product's whole engine list,
+   * which names every engine and which the Railway overview runs into its agent clause.
    */
   test.each(ENGINE_CLAIM_FILES)(
     "%s carries an agent-mode engine sentence (an empty selection passes the rest)",
@@ -596,6 +603,17 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
     expect(
       engineClaimsIn("- `run_read_query` runs on PostgreSQL, SQLite, DuckDB, SQL Server and MySQL in agent mode."),
     ).toEqual([]);
+  });
+
+  test("the selector reads a list of queryReadOnly's implementers, and leaves a pair of engines out", () => {
+    expect(
+      engineClaimsIn(
+        "The read tools reach the database through `provider.queryReadOnly`, which PostgreSQL, SQLite and DuckDB implement.",
+      ),
+    ).toHaveLength(1);
+    expect(engineClaimsIn("In agent mode the server composes catalog statements on PostgreSQL and SQLite.")).toEqual(
+      [],
+    );
   });
 
   test.each([...ENGINE_CLAIM_FILES, ...ENGINE_CLAIM_SCANNED, "src/lib/agent/engine-support.ts"])(

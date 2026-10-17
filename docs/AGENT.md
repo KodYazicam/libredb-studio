@@ -1287,12 +1287,9 @@ storage pressure — and it is the one workflow that is **not** built on the rea
 | --- | --- |
 | `inspect_operations`, `recommend_change`, `compose_report` | `inspect_schema`, `run_read_query`, `inspect_plan`, `profile_table`, `compare_plans` |
 
-**Everything it leaves out is left out for one reason: those tools send SQL.** All three read-class
-tools reach the database through `provider.queryReadOnly`, which only PostgreSQL, SQLite, DuckDB and
-SQL Server implement, so offering any of them here would reintroduce — tool by tool — the exact engine
-restriction this workflow exists to escape. `compare_plans` is left out because it names two
-`inspect_plan` artifacts this run cannot produce: a tool that could only ever refuse is worse than
-no tool.
+**Everything it leaves out is left out for one reason: those tools send statements.**
+All three read-class tools reach the database under the `agent-read-only` profile, which the factory grants only to a provider with `queryReadOnly`, and only PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB implement it, so offering any of them here would reintroduce, tool by tool, the exact engine restriction this workflow exists to escape.
+`compare_plans` is left out because it names two `inspect_plan` artifacts this run cannot produce: a tool that could only ever refuse is worse than no tool.
 
 **It is grounded, and with a different inventory from every other workflow** (#411). Until then this
 was the one workflow that captured no schema at all, on the reasoning that an operations objective is
