@@ -6181,7 +6181,7 @@ describe("a presentation the model serialized reaches the tool through the SDK",
   #414's own bound, and the one invariant whose whole point is that this change did NOT
   widen agent mode.
 
-  Grounding reached the twelve type-ids the read-only profile refuses, because the schema
+  Grounding reached every type-id the read-only profile refuses, because the schema
   capture asks for `agent-operations` — a profile whose acquisition does not require
   `queryReadOnly`. Agent mode's TOOLS are unchanged: `inspect_schema` and
   `run_read_query` compose SQL and acquire `agent-read-only`, which those engines cannot
@@ -6199,7 +6199,7 @@ describe("agent mode is no wider than it was, on an engine grounding now reaches
 
   test("a schema workflow is grounded and still refused at its first read", async () => {
     // The acquisition the CAPTURE makes is granted — it asks for `agent-operations`,
-    // and MongoDB serves it. Every acquisition after it is the tool path asking for
+    // and Redis serves it. Every acquisition after it is the tool path asking for
     // `agent-read-only`, which is what `factory.ts` refuses on a provider with no
     // `queryReadOnly`. One fixture, both real behaviours, in the order a live run meets
     // them.
@@ -6209,7 +6209,7 @@ describe("agent mode is no wider than it was, on an engine grounding now reaches
       acquireFails: () =>
         ++acquisitions > 1
           ? new ExecutionProfileError(
-              'Provider type "mongodb" implements no read-only statement path (queryReadOnly)',
+              'Provider type "redis" implements no read-only statement path (queryReadOnly)',
               "PROFILE_UNSUPPORTED_BY_PROVIDER",
             )
           : undefined,
@@ -6218,7 +6218,7 @@ describe("agent mode is no wider than it was, on an engine grounding now reaches
     const script = scriptedModel(
       // `run_read_query` rather than `inspect_schema`: both are refused, but for
       // different reasons and only this one reaches the profile. `inspect_schema`
-      // composes a catalog statement per dialect and there is none for MongoDB, so it
+      // composes a catalog statement per dialect and there is none for Redis, so it
       // is refused before a provider is asked for. The statement tool is where a
       // schema-workflow agent run really meets the engine limit.
       callsTool("run_read_query", { sql: "SELECT 1", rationale: "size the collection" }),
@@ -6230,7 +6230,7 @@ describe("agent mode is no wider than it was, on an engine grounding now reaches
         model: await modelOver(script.fetch),
         resources: {
           ...b.resources,
-          connection: { ...CONNECTION, type: "mongodb" },
+          connection: { ...CONNECTION, type: "redis" },
           capabilities: { ...OBJECT_CAPABILITIES, queryLanguage: "json", declaresForeignKeys: false },
         },
       }),
