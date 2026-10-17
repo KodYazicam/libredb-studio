@@ -1474,9 +1474,23 @@ const MONGO_RECOMMEND_CHANGE: AgentToolDefinition = Object.freeze({
 });
 
 /**
+ * The answer, in this engine's words. A plan here is not a description that runs nothing: with several candidate
+ * plans the engine tries each for a bounded trial (`MONGO_INSPECT_PLAN`), so what keeps one from being the answer is
+ * that it returns none of the command's documents. The schema is the shared tool's, since what is presented is an
+ * artifact id and a presentation in every language; `ANSWER_NOT_A_DATA_READ_TEXT` says the same when a plan is
+ * presented anyway.
+ */
+const MONGO_PRESENT_ANSWER: AgentToolDefinition = Object.freeze({
+  name: "present_answer",
+  description: `Record that one result you have already read IS the answer, and how it should be shown. Only a result of a run_read_query you drafted can be the answer: a plan returns none of the command's documents and a profile returns counts about a collection, so neither may be presented; both may still be cited as evidence. Pass the artifact id that read reported; the command behind it comes from this run's own ledger, so you do not supply it. The columns a chart names are checked against that result's real columns and refused if they do not match. Your report must then cite this same artifact in at least one claim: the presentation shows the result and the claims say what it means, so a report resting on other evidence entirely leaves the run scored as not having answered. ${AGENT_ANSWER_CONTRACT}`,
+  inputSchema: presentAnswerSchema,
+});
+
+/**
  * The tool definitions a MongoDB workflow replaces: the statement tool for its command argument, the catalog and
- * plan tools for their mongo arms, the profile for its aggregation, and the recommendation for its index card.
- * `compare_plans` is replaced by NOTHING - the variant does not offer it, for the reason its manifest entry states.
+ * plan tools for their mongo arms, the profile for its aggregation, the recommendation for its index card, and the
+ * answer for what a plan and a profile are on this engine. `compare_plans` is replaced by NOTHING - the variant does
+ * not offer it, for the reason its manifest entry states.
  */
 const MONGO_STATEMENT_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDefinition>>> = Object.freeze({
   run_read_query: MONGO_RUN_READ_QUERY,
@@ -1484,6 +1498,7 @@ const MONGO_STATEMENT_TOOLS: Readonly<Partial<Record<AgentToolName, AgentToolDef
   inspect_plan: MONGO_INSPECT_PLAN,
   profile_table: MONGO_PROFILE_TABLE,
   recommend_change: MONGO_RECOMMEND_CHANGE,
+  present_answer: MONGO_PRESENT_ANSWER,
 });
 
 /**
@@ -1716,6 +1731,19 @@ const UNAVAILABLE_TEXT: Readonly<Record<AgentToolUnavailableCode, string>> = Obj
     "This exact statement has already failed in this run. Draft a different statement rather than sending the same one again.",
   REPAIR_BUDGET_EXHAUSTED:
     "This run has used all of its repair attempts. Stop drafting statements and report what has been established.",
+});
+
+/**
+ * `ANSWER_NOT_A_DATA_READ` in the words of the run's language, the refusal a run meets when it presents a plan or a
+ * profile. MongoDB's says what its `present_answer` description says (`MONGO_PRESENT_ANSWER`), since the shared
+ * sentence, that a plan describes a statement without running it, is not true of a plan whose candidates are each
+ * tried for a bounded trial.
+ */
+const ANSWER_NOT_A_DATA_READ_TEXT: Readonly<Record<AgentStatementLanguageId, string>> = Object.freeze({
+  sql: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,
+  kubectl: UNAVAILABLE_TEXT.ANSWER_NOT_A_DATA_READ,
+  mongo:
+    "That result is this run's, and it holds none of the documents a read returns, so it cannot be the answer: a plan returns none of the command's documents, and a profile returns counts the server composed about a collection. Present the result of a run_read_query you drafted, and run the read first if you have not. A plan or a profile can still be cited as evidence in your report.",
 });
 
 /**
@@ -5478,10 +5506,12 @@ export function presentAnswerTool(
     // cell to this code 28 times a sweep, and the two readings it could have - nothing readable
     // existed, or the named alternative was ignored - call for opposite fixes. The cited operation
     // and whether an alternative was offered are what tell them apart.
-    return unavailable(
-      "ANSWER_NOT_A_DATA_READ",
-      instead === undefined ? undefined : `this run already read ${instead}, present that`,
-    );
+    const detail = instead === undefined ? undefined : `this run already read ${instead}, present that`;
+    const reason = ANSWER_NOT_A_DATA_READ_TEXT[context.statementLanguage ?? "sql"];
+    return {
+      ...unavailable("ANSWER_NOT_A_DATA_READ", detail),
+      modelText: detail === undefined ? reason : `${reason} (${detail})`,
+    };
   }
   const sql = statementBehind(run.events, artifact.correlationId);
   if (sql === null) return unavailable("ANSWER_STATEMENT_UNKNOWN");

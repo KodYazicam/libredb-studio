@@ -13,7 +13,10 @@ import { AgentRunDeadline } from "@/lib/agent/deadline";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { AgentRepairLedger } from "@/lib/agent/repair-ledger";
 import {
+  AGENT_ANSWER_CONTRACT,
+  AGENT_TOOL_DEFINITIONS,
   type AgentToolContext,
+  type AgentToolName,
   agentToolDefinition,
   comparePlansTool,
   presentableArtifact,
@@ -343,6 +346,14 @@ describe("inspect_schema on mongo", () => {
     expect(outcome.kind === "unavailable" && outcome.reasonCode).toBe("CATALOG_MATCHED_NOTHING");
   });
 
+  test("a database holding no collection is answered as matching nothing, never as an empty artifact to cite", async () => {
+    // The SQL arm's answer to a listing with no row: a catalog read that inspected nothing establishes nothing.
+    const h = harness({}, undefined, async () => ({ kind: "listed", container: "app", objects: [] }));
+    const outcome = await mongoInspectSchemaTool(h.context, {}, null);
+    expect(h.readCatalogReadOnly.mock.calls[0]?.[0]).toEqual({});
+    expect(outcome).toMatchObject({ kind: "unavailable", reasonCode: "CATALOG_MATCHED_NOTHING" });
+  });
+
   test("a collection whose sample held no field is said to exist and be empty, never to be missing", async () => {
     // An empty collection or view infers no field at all, and "there is no object of that name" would be false.
     const h = harness({}, undefined, async () => ({
@@ -385,15 +396,32 @@ describe("inspect_schema on mongo", () => {
     expect(none.kind === "unavailable" && none.reasonCode).toBe("CATALOG_INVENTORY_EMPTY");
   });
 
-  test("a database-wide index inventory is redirected, and a relations read refused as an absence never stated", async () => {
+  test("a database-wide index inventory is sent to one collection, and a relations read refused as an absence never stated", async () => {
     const h = harness();
     const broad = await mongoInspectSchemaTool(h.context, { kind: "indexes" }, null);
     expect(broad.kind === "unavailable" && broad.reasonCode).toBe("KIND_REFUSED");
-    expect(broad.kind === "unavailable" && broad.detail).toContain("index-stats");
+    expect(broad.kind === "unavailable" && broad.detail).toBe(
+      "A database-wide index inventory is not a catalog read here. Narrow to one collection with table, and its indexes are described beside its fields.",
+    );
     const relations = await mongoInspectSchemaTool(h.context, { kind: "relations" }, null);
     expect(relations.kind === "unavailable" && relations.reasonCode).toBe("KIND_REFUSED");
     expect(relations.kind === "unavailable" && relations.detail).toContain("no foreign keys");
     expect(h.acquireProvider).not.toHaveBeenCalled();
+
+    // A refusal naming a tool the run does not hold is answered "there is no tool called ..." and costs the run a turn
+    // (#350), so each refusal names only tools that every mongo variant offering inspect_schema holds.
+    const holders = Object.entries(AGENT_WORKFLOW_VARIANTS.mongo).flatMap(([workflow, variant]) =>
+      variant?.tools.includes("inspect_schema") === true ? [{ workflow, tools: variant.tools }] : [],
+    );
+    expect(holders.length).toBeGreaterThan(0);
+    for (const refusal of [broad, relations]) {
+      const named = (Object.keys(AGENT_TOOL_DEFINITIONS) as AgentToolName[]).filter((tool) =>
+        refusal.modelText.includes(tool),
+      );
+      for (const { workflow, tools } of holders) {
+        for (const tool of named) expect(tools, `${workflow} holds ${tool}`).toContain(tool);
+      }
+    }
   });
 
   test("an engine's refusal settles as a database error the model can repair, and is never thrown", async () => {
@@ -402,6 +430,9 @@ describe("inspect_schema on mongo", () => {
       throw new QueryError('This run reads the database "app" its connection is bound to', "mongodb");
     });
     const outcome = await mongoInspectSchemaTool(h.context, { schema: "admin" }, null);
+    // The database the model named is the one asked for, so the refusal is the provider's to make, never this arm's
+    // listing of the bound database under another's name.
+    expect(h.readCatalogReadOnly.mock.calls[0]?.[0]).toEqual({ container: "admin" });
     expect(outcome.kind).toBe("refused");
     expect(outcome.kind === "refused" && outcome.refusal.class).toBe("database-error");
   });
@@ -691,6 +722,12 @@ describe("profile_table on mongo", () => {
     );
   });
 
+  test("planning mode has no tools at all, so nothing is resolved or composed", () => {
+    const h = harness({ mode: "planning" });
+    const outcome = planMongoProfile(h.context, { runId: "run-1", events: [] }, { table: "orders" });
+    expect(outcome).toMatchObject({ kind: "unavailable", reasonCode: "MODE_HAS_NO_TOOLS" });
+  });
+
   test("an empty collection profiles as zero documents, because a $group over nothing answers no row", async () => {
     const h = harness(undefined, async () => ({ rows: [], fields: [], rowCount: 0, executionTime: 1 }));
     const { service, recorded } = serviceOver(snapshotOf([orders], ["app"]));
@@ -970,6 +1007,42 @@ describe("present_answer on mongo", () => {
     );
     expect(outcome.kind === "unavailable" && outcome.reasonCode).toBe("ANSWER_NOT_A_DATA_READ");
     expect(outcome.kind === "unavailable" && outcome.detail).toBe("this run already read read-1, present that");
+    expect(outcome.modelText).toEndWith(" (this run already read read-1, present that)");
+  });
+
+  test("a plan is refused as returning none of the command's documents, never as a command that ran nothing", () => {
+    // With several candidate plans the engine tries each for a bounded trial, so the SQL sentence, that a plan
+    // describes a statement without running it, would contradict the inspect_plan description this run holds.
+    const plan = drafted("s1", artifact("plan-1", "mongo.plan.estimate"), '{"collection":"orders","operation":"find"}');
+    const outcome = presentAnswerTool(
+      harness({ workflowType: "data-analysis" }).context,
+      { runId: "run-1", events: plan, autoExecute: false },
+      { artifact: "plan-1", presentation: { kind: "table" } },
+    );
+    expect(outcome).toMatchObject({ kind: "unavailable", reasonCode: "ANSWER_NOT_A_DATA_READ" });
+    expect(outcome.modelText).toBe(
+      "That result is this run's, and it holds none of the documents a read returns, so it cannot be the answer: a plan returns none of the command's documents, and a profile returns counts the server composed about a collection. Present the result of a run_read_query you drafted, and run the read first if you have not. A plan or a profile can still be cited as evidence in your report.",
+    );
+
+    // A SQL run's plan is still told the shared sentence.
+    const sqlPlan = drafted("s1", artifact("plan-1", "sql.explain.estimate"), "SELECT * FROM orders");
+    const sql = presentAnswerTool(
+      harness({ workflowType: "data-analysis", statementLanguage: "sql" }).context,
+      { runId: "run-1", events: sqlPlan, autoExecute: false },
+      { artifact: "plan-1", presentation: { kind: "table" } },
+    );
+    expect(sql.modelText).toContain("a plan DESCRIBES a statement without running it");
+  });
+
+  test("the description says what keeps a plan and a profile from being the answer, in commands and collections", () => {
+    const definition = agentToolDefinition("mongo", "data-analysis", "present_answer");
+    expect(definition.description).toBe(
+      `Record that one result you have already read IS the answer, and how it should be shown. Only a result of a run_read_query you drafted can be the answer: a plan returns none of the command's documents and a profile returns counts about a collection, so neither may be presented; both may still be cited as evidence. Pass the artifact id that read reported; the command behind it comes from this run's own ledger, so you do not supply it. The columns a chart names are checked against that result's real columns and refused if they do not match. Your report must then cite this same artifact in at least one claim: the presentation shows the result and the claims say what it means, so a report resting on other evidence entirely leaves the run scored as not having answered. ${AGENT_ANSWER_CONTRACT}`,
+    );
+    // What is presented is an artifact id and a presentation in every language, so the schema is the one tool's; and a
+    // SQL run is offered the shared definition unchanged.
+    expect(definition.inputSchema).toBe(AGENT_TOOL_DEFINITIONS.present_answer.inputSchema);
+    expect(agentToolDefinition("sql", "data-analysis", "present_answer")).toBe(AGENT_TOOL_DEFINITIONS.present_answer);
   });
 
   test("a run holding only a plan holds nothing presentable", () => {

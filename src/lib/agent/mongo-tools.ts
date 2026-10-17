@@ -16,8 +16,7 @@
  *   holds is read where the inventory read it; any other name is passed whole. The `relations` kind is refused rather
  *   than answered empty, because MongoDB declares no foreign keys and an empty block would read as an absence the
  *   engine never stated. The `indexes` kind is answered from the same description the columns kind reads - one
- *   collection's indexes travel beside its fields - while a DATABASE-wide index inventory is the `index-stats` reading
- *   of `inspect_operations`, not a catalog row, and a selector with no collection is refused toward it.
+ *   collection's indexes travel beside its fields - so a selector with no collection is refused and told to name one.
  * - `mongoInspectPlanTool`: the command wrapped in the `explain` command at `queryPlanner` verbosity - the engine
  *   answers with its plan and none of the command's documents - through the same profiled `queryReadOnly` path every
  *   statement takes, audited as `mongo.plan.estimate`.
@@ -90,7 +89,7 @@ export async function mongoInspectSchemaTool(
   if (kind === "indexes" && table === undefined) {
     return unavailable(
       "KIND_REFUSED",
-      "A database-wide index inventory is not a catalog read here: it is the index-stats reading of inspect_operations, served with the counts the engine itself reports. Narrow to one collection with table, and its indexes are described beside its fields.",
+      "A database-wide index inventory is not a catalog read here. Narrow to one collection with table, and its indexes are described beside its fields.",
     );
   }
   const selector = {

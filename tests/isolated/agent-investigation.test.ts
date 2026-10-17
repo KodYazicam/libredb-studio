@@ -5461,7 +5461,9 @@ describe("a MongoDB run is told only what its own tools can do", () => {
 
   test("a data-analysis run is told a plan returns none of the command's documents, never that it runs nothing", async () => {
     // The variant offers inspect_plan as well, and a plan with several candidates runs each for a bounded trial, so
-    // "without running it" is not true of it: what a plan never does is answer with the command's documents.
+    // "without running it" is not true of it: what a plan never does is answer with the command's documents. The
+    // opening turn says so in both places it states the rule, the rules and the answer tool's own description, and
+    // the refusal a presented plan meets says so too (`mongo-tools.test.ts`).
     const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
     const run = await startMongoRun(b, "data-analysis");
     const script = scriptedModel(answersProse("ok"), answersProse("ok"));
@@ -5475,6 +5477,10 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     const rules = rulesOfTurn(script.turns[0] as Turn);
     expect(rules).toContain("a plan returns none of the command's documents");
     expect(rules).not.toContain("without running it");
+    const declared = (script.turns[0]?.body.tools ?? []) as { function?: { name?: string; description?: string } }[];
+    const answer = declared.find((entry) => entry.function?.name === "present_answer")?.function?.description;
+    expect(answer).toContain("a plan returns none of the command's documents");
+    expect(answer).not.toContain("without running it");
   });
 
   test("a data-analysis record carrying auto-execute is not told it is on, because no mongo variant hands over", async () => {

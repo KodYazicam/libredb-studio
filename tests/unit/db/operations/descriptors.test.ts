@@ -385,10 +385,23 @@ describe("the MongoDB composed profile", () => {
     expect(mongoQueryReadDescriptor.inputSchema.safeParse({ command }).success).toBe(false);
   });
 
+  test("holds the composed command to 65,536 characters, measured on a command the reader admits", () => {
+    /** A count the reader admits, its filter's one value padded so the whole command is exactly `length` long. */
+    const sized = (length: number): string => {
+      const head = '{"collection":"orders","operation":"count","filter":{"note":"';
+      const tail = '"}}';
+      return `${head}${"x".repeat(length - head.length - tail.length)}${tail}`;
+    };
+    expect(sized(65_536)).toHaveLength(65_536);
+    expect(mongoTableProfileDescriptor.inputSchema.safeParse({ command: sized(65_536) }).success).toBe(true);
+    // One character past the bound, and the length is the only thing refused: the reader admits the command.
+    const over = mongoTableProfileDescriptor.inputSchema.safeParse({ command: sized(65_537) });
+    expect(over.error?.issues.map((issue) => issue.code)).toEqual(["too_big"]);
+  });
+
   test("still reads the composed command with the reader every command meets", () => {
     const write = JSON.stringify({ collection: "orders", operation: "aggregate", pipeline: [{ $out: "copy" }] });
     expect(mongoTableProfileDescriptor.inputSchema.safeParse({ command: write }).success).toBe(false);
-    expect(mongoTableProfileDescriptor.inputSchema.safeParse({ command: "x".repeat(65_537) }).success).toBe(false);
     expect(mongoTableProfileDescriptor.inputSchema.safeParse({ sql: composedProfile(1, 8) }).success).toBe(false);
   });
 });
