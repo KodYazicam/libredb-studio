@@ -30,13 +30,14 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { operatorCopyViolations } from "../../scripts/sync-chart-version.mjs";
-import { AGENT_WORKFLOW_VARIANTS } from "@/lib/agent/agent-manifest";
+import { AGENT_STATEMENT_LANGUAGE, AGENT_WORKFLOW_VARIANTS } from "@/lib/agent/agent-manifest";
 import { AGENT_EXECUTION_ENGINES, namedList } from "@/lib/agent/engine-support";
 import { AGENT_HISTORY_MAX_CONVERSATIONS, AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { agentPosture } from "@/lib/agent/posture";
 import { getDBConfig } from "@/lib/db-ui-config";
 import { EXTERNAL_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { createCanonicalOperationRegistry } from "@/lib/db/operations/descriptors";
+import type { DatabaseType } from "@/lib/types";
 
 const ROOT = path.resolve(import.meta.dir, "../..");
 const read = (relative: string): string => readFileSync(path.join(ROOT, relative), "utf8");
@@ -224,6 +225,32 @@ describe("the panel's documentation describes the rail in the words it renders",
     expect(row).toBeDefined();
     expect(row).not.toContain("table count");
     expect(row).toContain("the engine's own noun");
+  });
+
+  test("the guide's strip table has one row for each reading the posture renders, and no other", () => {
+    // Every reading the strip can show, from the module that writes it: plan mode, agent mode with no connection
+    // resolved, and agent mode on every engine with the hand-over consented and not. The engine is labelled the way
+    // the guide names one, so the arm that names it renders the guide's own placeholder.
+    const label = "`<engine>`";
+    const engines = Object.keys(AGENT_STATEMENT_LANGUAGE) as DatabaseType[];
+    const postures = [
+      agentPosture({ mode: "planning", engine: null, engineLabel: label, handover: false }),
+      agentPosture({ mode: "agent", engine: null, engineLabel: label, handover: false }),
+      ...engines.flatMap((engine) =>
+        [false, true].map((handover) => agentPosture({ mode: "agent", engine, engineLabel: label, handover })),
+      ),
+    ];
+    const readings = [...new Set(postures.map((posture) => `*${posture.headline}* | *${posture.qualifier}*`))].sort();
+    const table = AGENT_GUIDE.split("| The pill says | Beside it | When |\n| --- | --- | --- |\n")[1]?.split("\n\n")[0];
+    const rows = (table ?? "").split("\n").map((row) =>
+      row
+        .split("|")
+        .slice(1, 3)
+        .map((cell) => cell.trim())
+        .join(" | "),
+    );
+    expect(rows).toHaveLength(readings.length);
+    expect([...rows].sort()).toEqual(readings);
   });
 });
 

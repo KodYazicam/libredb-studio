@@ -7583,9 +7583,9 @@ Found 2026-10-14 while building agent execution on Kubernetes.
 
 ### B113. The agent user guide and the data-flow page cite code by line number and carry em dashes
 
-`docs/AGENT_GUIDE.md` cites code as `file:line` 46 times, on 41 lines (`timeline.ts:499`, `goal-verifier.ts:349-355` and `AgentRail.tsx:401-447` among them), and those numbers have drifted as the files changed, so a reader following one lands on unrelated code.
-The same page carries 152 lines with an em dash, against the repository's writing rule.
-Found 2026-10-14 while building agent execution on Kubernetes.
+`docs/AGENT_GUIDE.md` cites code as `file:line` 45 times, on 40 lines (`timeline.ts:499`, `goal-verifier.ts:349-355` and `AgentRail.tsx:401-447` among them), and those numbers have drifted as the files changed, so a reader following one lands on unrelated code.
+The same page carries 149 lines with an em dash, against the repository's writing rule.
+Found 2026-10-14 while building agent execution on Kubernetes; counted again on 2026-10-17, after #1790 edited the page.
 
 `docs/AGENT_DATA_FLOW.md` does the same: it cites code as `file:line` 66 times, on 52 lines (`investigation.ts:2540`, `provider-registry.ts:136-150` and `AgentRail.tsx:745-758` among them), and carries 87 lines with an em dash.
 Found 2026-10-17 in the review of #1790 (issue #1614), which moved the page's section 5 table, what each tool result sends to the model, to symbols and left the rest.

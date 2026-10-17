@@ -439,15 +439,17 @@ report as unanswered.
 
 **Under the header, one line always says what reaches your database.** While a run is open that is
 the *run's* reading, taken from its own record; before one, and once one has ended, it is what
-pressing **Start** would do. It is five readings and not a mood, and the qualifier beside the pill is
-part of the claim rather than a footnote:
+pressing **Start** would do.
+It is one of the readings below and not a mood, and the qualifier beside the pill is part of the claim rather than a footnote:
 
 | The pill says | Beside it | When |
 | --- | --- | --- |
 | *Executes nothing it drafts* | *one schema read grounds it, nothing else reaches the database* | **Plan** mode, on every engine — production included. The one reach is the schema capture that grounds the draft: metadata only, no data rows |
-| *Reads only* | *200 rows and 10 s per statement, enforced by the engine* | **Agent** mode on an engine whose provider implements a database-native read-only statement path |
+| *Reads only* | *200 rows and 10 s per statement, enforced by the engine* | **Agent** mode on one of the SQL engines it executes on |
 | *Reads only, and one statement in your editor* | *500 rows, no time limit, same read-only session* | The same, with **auto-execute** ticked for the run being opened — and it stays that reading while that run is going |
-| *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode on any other engine. The run would end `engine-unsupported` before its first statement |
+| *Reads only* | *200 rows and 10 s per statement, enforced by Studio's request allowlist* | **Agent** mode on Kubernetes, where auto-execute is not offered, so there is nothing to widen |
+| *Reads only* | *200 rows and 10 s per command, enforced by the server* | **Agent** mode on MongoDB, where auto-execute is not offered, so there is nothing to widen |
+| *Cannot execute on `<engine>`* | *plan mode drafts here, and the operations workflow still runs* | **Agent** mode on any other engine. A run whose workflow sends a statement is refused when it is started, before a run is opened |
 | *Cannot execute yet* | *no connection is resolved, so no engine has been established* | **Agent** mode with no connection resolved. Nothing has been read, so the panel does not claim to know which engine you are on |
 
 Those two figures are the ones the server is enforcing, and they are the same on every workflow — the
@@ -465,9 +467,9 @@ The ⓘ at the end of the row opens the whole claim behind whichever of those is
 is readable to a screen reader whether or not the popover is open. On *Cannot execute on `<engine>`*
 an amber card appears above **Start** with the same facts and a **Switch to Plan** button — **and
 Start is not disabled**, because the refusal belongs to the provider factory and the **Operate**
-workflow sends no statement at all, so it runs on those engines exactly as it does anywhere else. Any
-other workflow started there anyway still ends `engine-unsupported` — after a model turn, and before
-its first statement. The strip tells you first; it does not stand in the way.
+workflow sends no statement at all, so it runs on those engines exactly as it does anywhere else.
+Any other workflow started there anyway is refused when it is started, before a run is opened, so no model turn is spent.
+The strip tells you first; it does not stand in the way.
 
 **While a run is open the objective is a line rather than a box.** The question is settled — it is on
 the run's own header, and every entry below was framed with it — so it reads as one line with the
