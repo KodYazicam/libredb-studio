@@ -943,7 +943,7 @@ Stated plainly, because a surface that hides its edges is the one that surprises
   pipeline — the policy decision, the audit event and the budget accounting that
   `executeAuditedOperation` performs before the driver is touched
   (`src/lib/db/operations/execution.ts:129`, reached only from `src/lib/agent/tools.ts:1906`) — under
-  a read-only execution profile whose boundary is database-native rather than a parser: a read-only
+  a read-only execution profile whose boundary on the SQL engines is database-native rather than a parser: a read-only
   transaction on PostgreSQL, `PRAGMA query_only` re-asserted per statement on SQLite, a `READ_ONLY`
   engine handle plus an SQL-level guard on DuckDB, and on SQL Server a verified least-privilege
   principal, an optimizer admission that compiles the statement without running it, a server-side row
