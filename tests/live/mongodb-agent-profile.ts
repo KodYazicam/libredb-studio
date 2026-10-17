@@ -16,7 +16,8 @@
  *    without the read user's credentials;
  *  - no refusal changes a server: every database and collection reads back the same, and a collection named
  *    libredb_agent_probe still holds its three documents;
- *  - the open's own commands carry `maxTimeMS` and the agent's comment, as the server logs them;
+ *  - the open's three checks (`buildInfo`, `connectionStatus` and the probe's `delete`) carry `maxTimeMS` and the
+ *    agent's comment, as the server logs them;
  *  - the operations profile opens root, and a server without authorization, unverified, and lists collections;
  *  - every write, `$out` and `$merge` at the top level and nested, two commands in one statement, the internal and the
  *    JavaScript operators and the diagnostic stages are refused before anything is sent; the writes, sent around that
@@ -33,7 +34,7 @@
  *  - 20 reads under the hand-over budget are served, with no TimeoutOverflowWarning.
  *
  * `--matrix` repeats the checks that depend on the version on MongoDB 8.3.11 and 7.0.43 (the action set, the open's
- * commands, the deadline and the kill as the read user, the plans) and adds FerretDB 2.7.0, refused
+ * three checks, the deadline and the kill as the read user, the plans) and adds FerretDB 2.7.0, refused
  * PROFILE_UNSUPPORTED_TARGET and opened by the operations profile.
  *
  * It is NOT in `bun run test`: the runner excludes `tests/live/` by name (`EXCLUDED` in `tests/runner/discover.ts`).
@@ -235,16 +236,29 @@ function removeEverything(): void {
   for (const name of containers.splice(0)) {
     try {
       docker(["rm", "-f", "-v", name]);
-    } catch {
-      // Already gone.
+    } catch (error) {
+      reportUnlessGone(name, error);
     }
   }
   for (const name of networks.splice(0)) {
     try {
       docker(["network", "rm", name]);
-    } catch {
-      // Already gone.
+    } catch (error) {
+      reportUnlessGone(name, error);
     }
+  }
+}
+
+/**
+ * A removal that failed because the object was never made, as after a failed start, is silent; any other failure is
+ * printed, because a daemon error here can leave a container running. Docker 29.9 removes a missing container with
+ * `rm -f` and no error, and answers `network <name> not found` for a missing network, where older releases say
+ * `No such container` and `No such network`.
+ */
+function reportUnlessGone(name: string, error: unknown): void {
+  const stderr = String((error as { stderr?: unknown }).stderr ?? error);
+  if (!/No such (container|network)|network \S+ not found/.test(stderr)) {
+    console.error(`Could not remove ${name}: ${stderr.trim()}`);
   }
 }
 
