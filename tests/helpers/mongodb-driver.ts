@@ -381,7 +381,8 @@ const holds = (value: unknown): boolean => value !== false && value !== null && 
  * One aggregation expression evaluated against one document: the operators the agent's collection profile composes
  * (`mongo-tools.ts`), and nothing else. An operator outside them is refused by name, so a change to what the
  * composition sends fails the test that drives it rather than counting nothing. `$and` stops at its first false
- * operand, as the server's does, and `$regexMatch` refuses an input that is not a string, as the server's does.
+ * operand, as the server's does, and `$regexMatch` answers false for a null or missing input and refuses any other input
+ * that is not a string, as the server's does.
  */
 function evaluate(expression: unknown, document: Doc): unknown {
   if (typeof expression === "string" && expression.startsWith("$")) return fieldAt(document, expression);
@@ -405,6 +406,7 @@ function evaluate(expression: unknown, document: Doc): unknown {
     case "$regexMatch": {
       const { input, regex, options } = argument as { input: unknown; regex: string; options?: string };
       const text = evaluate(input, document);
+      if (text === null || text === undefined) return false;
       if (typeof text !== "string") throw mongoServerError(51104, "$regexMatch needs 'input' to be of type string");
       return new RegExp(regex, options).test(text);
     }
