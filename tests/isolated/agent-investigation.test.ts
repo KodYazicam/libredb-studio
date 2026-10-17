@@ -5484,6 +5484,28 @@ describe("a MongoDB run is told only what its own tools can do", () => {
     },
   );
 
+  test.each(commandWorkflows)(
+    "a %s run is told an aggregation reads a field with its dollar sign, and a filter names it without",
+    async (workflowType) => {
+      // A real model summed {"$sum": "total"} on the browser pass: the server answers 0 for a string it cannot add, so
+      // the run reported every customer's total as 0 and was scored answered, and nothing else would have told it.
+      const b = boot(freshDataDir(), { describesSchema: async () => [ORDERS] });
+      const run = await startMongoRun(b, workflowType);
+      const script = scriptedModel(answersProse("ok"), answersProse("ok"));
+
+      await runInvestigation(run.runId, {
+        service: b.service,
+        model: await modelOver(script.fetch),
+        resources: mongoResources(b),
+      });
+
+      const rules = rulesOfTurn(script.turns[0] as Turn);
+      expect(rules).toContain('write "$<field>", with the dollar sign, as in {"$sum": "$total"}');
+      expect(rules).toContain('a bare "total" is the string itself, which $sum ignores, so the sum reads 0');
+      expect(rules).toContain("A filter, in a find or a $match stage, names its fields without the dollar sign.");
+    },
+  );
+
   test("its rules name neither a plan comparison nor an untouched document", async () => {
     // A plan with several candidates runs each for a bounded trial, so "no document touched" is not true of it, and
     // a comparison tool the run does not hold is a rule its tool set cannot satisfy (#350).

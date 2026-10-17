@@ -1792,6 +1792,13 @@ const MONGO_COLLECTION_RULE =
   'The inventory names each collection with its database in front, as in app.orders; a command names the collection alone, as in "collection": "orders", and reads the database this run\'s connection is bound to.';
 
 /**
+ * How a command reads a field's value, said beside the collection rule because the server cannot say it: a model that
+ * wrote `{"$sum": "total"}` was answered 0 for every group, since `$sum` ignores a string, and nothing refused it.
+ */
+const MONGO_FIELD_PATH_RULE =
+  'Where an aggregation reads a field\'s value, as $group and $project do, write "$<field>", with the dollar sign, as in {"$sum": "$total"}: a bare "total" is the string itself, which $sum ignores, so the sum reads 0. A filter, in a find or a $match stage, names its fields without the dollar sign.';
+
+/**
  * The tool rules by language, then by workflow. The SQL record is total, as above. A language holds rules for the
  * workflows it has a variant of, and no more: `systemPrompt` throws for an agent-mode run whose language has none,
  * which `requiredVariant` would already have refused. `operations` sends no statement in any language, so its
@@ -1844,12 +1851,14 @@ export const WORKFLOW_TOOL_RULES: Readonly<
    * The MongoDB tool rules: the read-class four exist here, so the rules say how THIS engine spells them - the
    * command envelope rather than SQL, the aggregation that stands in for a GROUP BY, and the sample-inferred
    * schema the inventory carries, which is the one honest limit a MongoDB run is told about its own grounding.
-   * Every workflow that writes a command is told how a collection is spelled in one (`MONGO_COLLECTION_RULE`).
+   * Every workflow that writes a command is told how a collection is spelled in one (`MONGO_COLLECTION_RULE`) and how
+   * it reads a field (`MONGO_FIELD_PATH_RULE`).
    */
   mongo: Object.freeze({
     investigation: [
       "Read the database with run_read_query, one command envelope at a time: find, findOne, aggregate, count and distinct are the reads there are, each as JSON.",
       MONGO_COLLECTION_RULE,
+      MONGO_FIELD_PATH_RULE,
       "Narrow every read to what the question needs with a filter, or a $match stage before any $group: a read past the row budget is refused, never cut.",
       "A pipeline stage that writes ($out, $merge) is refused, as is any write operation: this run reads and reports, and what it establishes goes into the report.",
       "The schema inventory was sampled from documents, not declared: a field the sample never saw is absent from it, so say what you read rather than what the schema implies.",
@@ -1864,6 +1873,7 @@ export const WORKFLOW_TOOL_RULES: Readonly<
       "Every plan you can obtain is an estimate with no timings in it. Say so rather than implying a measurement.",
       "recommend_change offers the index to the user and never creates it: this run is read-only by construction.",
       MONGO_COLLECTION_RULE,
+      MONGO_FIELD_PATH_RULE,
     ].join(" "),
     "database-assessment": [
       "You must call profile_table on at least one collection before you report: this workflow answers with the counts that tool takes, and counts you compose yourself with run_read_query do not establish them.",
@@ -1871,11 +1881,13 @@ export const WORKFLOW_TOOL_RULES: Readonly<
       "MongoDB declares no foreign keys and no nullability: a field may be absent or null, and the profile's counts are the honest way to tell which is which.",
       "Grade what you find against completeness, uniqueness, consistency and validity, and say which of the four each finding speaks to.",
       MONGO_COLLECTION_RULE,
+      MONGO_FIELD_PATH_RULE,
     ].join(" "),
     operations: SQL_WORKFLOW_TOOL_RULES.operations,
     "data-analysis": [
       "Answer from data you have READ. The schema inventory tells you where to look; only a result you ran can be the answer.",
       MONGO_COLLECTION_RULE,
+      MONGO_FIELD_PATH_RULE,
       "profile_table at basic depth tells a large collection from a small one, and a field the documents fill from one they do not: it returns document counts and how many documents have a value, and reads no value out of any field.",
       "When you have the answer, call present_answer with the artifact id of the read that IS the answer.",
       "Only a result of run_read_query can be presented: a plan returns none of the command's documents, and a profile counts a collection rather than answering the question. Cite either as evidence, but present a read.",
