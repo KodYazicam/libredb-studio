@@ -691,6 +691,24 @@ describe("the owned deadline", () => {
     }
   });
 
+  test("a plan's cursor, which its explain never opens, is closed once the plan settles; the kill alone ends a hung one", async () => {
+    for (const envelope of [FIND, FIND_ONE, AGGREGATE, COUNT]) {
+      const { client, opened } = fakeClient();
+      await read(client, envelope, "estimate-plan");
+      expect(opened[0].closes).toBe(1);
+    }
+    const failed = fakeClient({ error: serverError(2, "BadValue") });
+    await rejection(read(failed.client, FIND, "estimate-plan"));
+    expect(failed.opened[0].closes).toBe(1);
+    const hung = fakeClient({ hang: true, killed: "interrupted" });
+    const error = await rejection(read(hung.client, FIND, "estimate-plan", { ...BUDGET, statementTimeoutMs: 20 }));
+    expect((error as Error).message).toBe(
+      "Read-only execution exceeded the statement deadline of 20ms and was killed server-side",
+    );
+    expect(hung.sent.filter(({ command }) => command.killSessions !== undefined)).toHaveLength(1);
+    expect(hung.opened[0].closes).toBe(1);
+  });
+
   test("the server's own deadline (code 50) is the statement deadline, and nothing is killed", async () => {
     const { client, sent } = fakeClient({ error: serverError(50, "operation exceeded time limit") });
     const error = await rejection(read(client, FIND));
