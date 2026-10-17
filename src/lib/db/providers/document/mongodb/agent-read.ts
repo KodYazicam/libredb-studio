@@ -19,8 +19,11 @@
  *   the byte budget). It is then refused past the row budget before any row is built and past the byte budget on the
  *   crossing row.
  * - **An owned deadline.** Every call carries `maxTimeMS`, the server's own deadline, and runs in a session this
- *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor,
- *   and a lost server is a connection failure rather than a fault in the statement.
+ *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor.
+ *   A transport failure the driver reports is a connection failure rather than a fault in the statement, but the
+ *   driver reports a server cut mid-read only after its own 30 s server selection (it retries a read's first command,
+ *   and a failed `getMore` first sends `killCursors` to the lost server), so a read under a shorter deadline ends as
+ *   the client giving up instead (measured on 9.0.4; `docs/BACKLOG.md` D371).
  * - **The bound database.** A run reads the database its connection is bound to; a command naming another is refused
  *   before anything is sent, as issue #1614 settled.
  *

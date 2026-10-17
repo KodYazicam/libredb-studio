@@ -716,7 +716,7 @@ describe("the owned deadline", () => {
     expect(sent).toEqual([]);
   });
 
-  test("a lost server is a connection failure, from the read or from the kill, never a statement fault", async () => {
+  test("a transport failure the driver reports is a connection failure, from the read or from the kill, never a statement fault", async () => {
     for (const name of ["MongoNetworkError", "MongoNetworkTimeoutError", "MongoServerSelectionError"]) {
       const fromRead = await rejection(read(fakeClient({ error: transportError(name) }).client, FIND));
       expect(fromRead).toBeInstanceOf(ConnectionError);

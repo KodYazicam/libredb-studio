@@ -1211,6 +1211,7 @@ to write "one runnable statement in this MongoDB database's own query language",
 2026-08-22 answered `db.orders.aggregate([{ $group: … }])`, which is correct MongoDB and unrunnable
 here, because `query()` parses the JSON command object and nothing else. Naming only what the
 language *is* did not survive contact with the model's prior; naming what it is not did.
+Its `database` key is offered to the editor's reads alone: the label tells the model that an agent run reads only the database its connection is bound to, which layer 8 of [the boundary](#the-boundary-layer-by-layer) holds.
 
 `slowQueriesEmptyState` (*"Query stats come from the database profiler - run db.setProfilingLevel()
 to start recording into system.profile."*) is the monitoring Queries panel's empty state. That
@@ -1238,6 +1239,7 @@ MongoDB-specific branches:
 
 The mapper reads a message, not a class, so on the editor's path a server that went away is misread: a `MongoServerSelectionError` ("Server selection timed out ...") becomes a query `TimeoutError`, and a socket the server closed a generic `DatabaseError` (`docs/BACKLOG.md` D366).
 An agent run's reads map the driver's transport failures to `ConnectionError` by class name (`TRANSPORT_FAILURES` in [`agent-read.ts`](../../src/lib/db/providers/document/mongodb/agent-read.ts)).
+A server cut mid-read reaches that mapping only after the driver's own 30 s server selection, so under an agent run's deadline it ends as the client giving up instead (layer 5 of [the boundary](#the-boundary-layer-by-layer), `docs/BACKLOG.md` D371).
 
 ---
 
@@ -1256,6 +1258,9 @@ verification, over `buildInfo` and `connectionStatus` replies captured from 9.0.
 `fixtures/`), `agent-read.test.ts` (the deadline, the streamed read, the one builder and the bound database, against a
 client of its own over the real driver's BSON) and `seam-guard.test.ts` (no registry and no agent module loads the
 driver). The live check is `tests/live/mongodb-agent-profile.ts`.
+`driver-stand-in.test.ts` holds the stand-in's own `$regexMatch` to a 9.0.4 server's answers.
+The agent runs themselves are [`tests/isolated/agent-mongodb-e2e.test.ts`](../../tests/isolated/agent-mongodb-e2e.test.ts), driven through the composition root over the stand-in: the four statement-sending workflows answered on the fixture, the admin, no-auth and FerretDB refusals with their run reasons, and plan mode and the operations workflow opening unverified.
+[`tests/integration/mcp/inspect-schema.test.ts`](../../tests/integration/mcp/inspect-schema.test.ts) holds MCP `inspect_schema` on MongoDB, which opens under `agent-operations` unverified on the admin seed, on a server without authorization and on FerretDB.
 
 > ⚠️ **Mock isolation:** `bun`'s `mock.module()` is process-wide; files mocking different drivers
 > would cross-contaminate if they shared one. They never do: `bun run test` gives every test file its
@@ -1310,9 +1315,10 @@ bun run test                                              # the whole suite, one
 bun run test:coverage                                     # CI coverage workflow
 ```
 
-To smoke-test against a live server: `docker run --rm -p 27017:27017 mongo:7`, then connect to
-`mongodb://localhost:27017/test` in the Studio UI. The agent profile's live check starts servers of its own:
-`bun tests/live/mongodb-agent-profile.ts`.
+To smoke-test against a live server, start the compose fixture: `docker compose -f database-compose.yml up -d mongodb` runs MongoDB 9.0.4, pinned by digest, with the fixture above applied.
+The editor connects to `mongodb://admin:admin@localhost:27017/app?authSource=admin`, and an agent run connects as `libredb_agent` ([Setting up the agent's user](#setting-up-the-agents-user)).
+The agent profile's live check starts servers of its own: `bun tests/live/mongodb-agent-profile.ts` runs 9.0.4 with and without authorization, and `--matrix` adds 8.3.11, 7.0.43 and FerretDB 2.7.0.
+`LIBREDB_LIVE_MONGO_IMAGE` may name another reference to the same 9.0.4 digest, such as `mirror.gcr.io/library/mongo:9.0.4@sha256:f90507905ce6e52e4a63d0ff8964fc254fa4d37ccbe56c56f4bc0186eb02edea`, where Docker Hub cannot be reached.
 
 ---
 
@@ -1424,7 +1430,9 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
 5. **The server's deadline, and Studio's.**
    Every command carries `maxTimeMS`, the budget's own deadline; an explain carries it at the top of the explain command, because 8.3.11 and 7.0.43 ignore the one inside the explained command (measured: given only that one, their explains ran 1,520 ms and 715 ms against a 300 ms budget).
    Each read runs in a session the provider starts, and a timer one second past the deadline (`AGENT_DEADLINE_BACKSTOP_MS`) kills that session with `killSessions` and closes the cursor; a user holding only read may kill its own session (measured on 9.0.4, 8.3.11 and 7.0.43: the read ends with code 11601 and no operation is left).
-   The server's own expiry (code 50), and anything the read settles with after the kill, is the statement deadline, killed server-side; a read that has not ended a second after the kill (`AGENT_KILL_GRACE_MS`) is the client giving up on a server that did not end it; and a server that cannot be reached is a `ConnectionError`, never a fault in the statement.
+   Measured with `maxTimeMS` disabled by the `maxTimeNeverTimeOut` fail point, every read and plan under a 500 ms budget ended at 1,501 to 1,521 ms, killed server-side, with nothing left running, on 9.0.4, 8.3.11 and 7.0.43.
+   The server's own expiry (code 50), and anything the read settles with after the kill, is the statement deadline, killed server-side; a read that has not ended a second after the kill (`AGENT_KILL_GRACE_MS`) is the client giving up on a server that did not end it; and a transport failure the driver reports is a `ConnectionError`, never a fault in the statement.
+   A server cut mid-read is not reported in time, though: the driver retries a read's first command, and a failed `getMore` first sends `killCursors` to the lost server, each after the client's 30 s server selection, so under an agent workflow's 10 s deadline the read ends as the client giving up (measured on 9.0.4: a cut 1.7 s into a read settled at 12.0 s, and under a 60 s deadline as a `ConnectionError` at 31.8 s; `docs/BACKLOG.md` D371).
    The timer is clamped to the 32-bit range of `setTimeout` (`MAX_STATEMENT_TIMEOUT_MS`, the largest statement timeout a budget may carry), because a delay past it fires after 1 ms.
 6. **A server-side row bound.** A `find` asks for one row past the row budget, or for its own limit when that is smaller; an `aggregate` ends with `{$limit: <budget + 1>}`; a `count` is the `$match` and `$group` pipeline the driver's `countDocuments` sends.
    The row past the budget is the refusal, in the sentence every engine's profile uses.
@@ -1441,7 +1449,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    `readCatalogReadOnly()` refuses another container the same way.
 
 The estimating plan (`inspect_plan`) explains the command the read would run, built by the same builder (`openBoundedRead`), at `queryPlanner` verbosity and under the same deadline.
-A cursor's explain is a command of its own in the read's session and never opens that cursor (driver 7.7.0's `FindCursor.explain` and `AggregationCursor.explain`), so a plan the server does not end itself is ended by the kill of the session alone.
+A cursor's explain is a command of its own in the read's session and never opens that cursor (driver 7.7.0's `FindCursor.explain` and `AggregationCursor.explain`), so a plan the server does not end itself is ended by the kill of the session alone, and the plan's cursor is closed once the explain settles.
 The server plans it and, when several candidate plans fit, runs each for a bounded trial to choose one; it returns no result rows.
 The plan is answered without the rest of the reply: only the plan's own keys pass its top level, so what the server says about itself (`serverInfo` with its host and port, `serverParameters`, the echoed `command`, `ok` and the cluster time) is dropped, and so is the `queryShapeHash` 9.0.4 and 8.3.11 answer for the command's shape.
 Below the top level the plan passes as the server wrote it, because it echoes the command's field names, whatever they are: a filter on a field named `ok` keeps `ok` in the parsed query, the index's key pattern and its bounds (measured on 9.0.4, 8.3.11 and 7.0.43, where an unsharded plan holds none of the server's own keys below the top level).
@@ -1516,6 +1524,9 @@ Three residuals of reading the text as JSON stay in both: JavaScript puts intege
 - **An agent run's `distinct` is decoded whole before its budgets are read.**
   The driver decodes a command's reply even when asked for it raw, so a `distinct` reply of many small values near the server's 16 MiB cap costs about ten times its size in memory before its row refusal, past the ceiling the run's cursor reads stay under (the byte budget in §12).
   *Future:* bound it on the server, as a pipeline read from a raw cursor with a trailing `$limit`, the way a `count` is the `countDocuments` pipeline (`docs/BACKLOG.md` D370).
+- **A server cut mid-read ends an agent read at its deadline, not as a lost connection.**
+  The driver reports the cut only after its own 30 s server selection, so the run is told the client gave up on a server that did not end the read, a statement failure, rather than that the server went away (layer 5 of §12).
+  *Future:* read the client's own server monitoring during the read (`docs/BACKLOG.md` D371).
 - **Editor reads carry no server deadline.** `query()` sends no `maxTimeMS`, and `connection.queryTimeout` bounds the
   connect alone, so a read started in the editor runs until the server finishes it or the Sessions panel's Terminate
   kills it. *Future:* `docs/BACKLOG.md` D364. An agent run's reads carry `maxTimeMS` and Studio's kill (§12).
