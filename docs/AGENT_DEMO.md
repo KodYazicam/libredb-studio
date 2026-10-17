@@ -74,7 +74,8 @@ driven on 2026-09-18 with `gemini-3.5-flash-lite` against AdventureWorks2022 on 
 (RTM-CU26) 16.0.4265.3, and that row records what those runs did rather than what the code allows.
 MySQL gained the same path in #1612, and its row below still records the drive that ran before the
 profile existed — the code allows more than the row says, exactly as it did for SQL Server then.
-MongoDB gained one of its own in #1614, a user the server proves holds only read privileges rather than a session, and its row too records the drive that ran before that profile existed.
+MongoDB gained one of its own in #1614, a user the server proves holds only read privileges rather than a session.
+Its four workflows were driven on 2026-10-17 with `gemini-3.5-flash-lite` against MongoDB 9.0.4, and its last cell records what those runs did.
 Every other row's last column is as it was driven on 2026-08-15/17.
 
 | Engine | Plan mode, as driven 2026-08-15/17 | Plan grounding after #414, driven 2026-08-17 | Operate | Investigate · Analyze · Optimize · Assess |
@@ -84,7 +85,7 @@ Every other row's last column is as it was driven on 2026-08-15/17.
 | **MySQL** 9 | Expected to work | **Verified grounded**, provider inventory: 3 tables, correct join | Expected to work | Refused |
 | **Oracle** XE 21 | Expected to work | **Verified grounded**, provider inventory: 3 tables, correct join | Expected to work | Refused |
 | **SQL Server** 2022 | Verified, ungrounded | **Verified grounded**, provider inventory: 3 tables, correct `TOP 10` T-SQL | Verified | **Verified**, driven 2026-09-18: all four answered. Analyze counted 121,317 rows and averaged 905.45 (the engine answers 121317 and 905.449206) and returned a 4-row bar-chart spec; Optimize completed `inspect_plan` and recommended a nonclustered index on `Sales.SalesOrderDetail(CarrierTrackingNumber)` off the Clustered Index Scan in the plan; Assess produced a `table-profiled` event and ten grounded reads; Investigate answered |
-| **MongoDB** 8 | Verified, ungrounded | **Verified grounded**, provider inventory: 5 collections then 6 with a view; `$group`/`$lookup` aggregation | Verified | Refused, verified |
+| **MongoDB** 8 | Verified, ungrounded | **Verified grounded**, provider inventory: 5 collections then 6 with a view; `$group`/`$lookup` aggregation | Verified | **Verified**, driven 2026-10-17 on 9.0.4 as `libredb_agent` (`read` on `app`): all four answered. Analyze grouped the orders in one aggregation and answered Ada 1 order for 120 and Grace 1 for 80; Optimize read a `COLLSCAN` off `inspect_plan` and recommended an index on `orders.customer` citing that plan; Assess profiled all five collections and views; Investigate named Ada and Grace, and Alan as the customer with no order. The admin seed is refused before any model turn (`agent-principal-refused`), and so are a server without authorization (`server-authorization-off`) and FerretDB 2.7.0 (`profile-target-unsupported`) |
 | **ClickHouse** 26 | Verified, ungrounded | **Verified grounded**, provider inventory: 5 tables, correct join | Verified | Refused |
 | **Couchbase** 8 | Expected to work | **Verified grounded**, provider inventory: 3 collections with their indexes, correct SQL++ | Expected to work | Refused |
 | **Druid** 37 | Expected to work | **Verified grounded**, provider inventory: 2 datasources, correct Druid SQL | Expected to work | Refused |
