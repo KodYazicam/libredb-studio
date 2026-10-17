@@ -96,8 +96,9 @@ const MONGO_UNAUTHORIZED_CODE = 13;
  * itself, or a host that is a wire-compatible service's, is refused by name; then the document must hold the stable
  * fields a MongoDB answers, a version whose first three numbers `versionArray` repeats and a `storageEngines` list
  * carrying `wiredTiger`. Measured: FerretDB 2.7.0 answers `version: "7.0.77"` and a matching `versionArray`, and no
- * `storageEngines`. Never `allocator`, `javascriptEngine` or `gitVersion`: the first changes between releases (9.0.4
- * answers `tcmalloc-google`, 7.0.43 `tcmalloc`) and FerretDB answers a 40-hex `gitVersion` of its own.
+ * `storageEngines`. Never `allocator`, `javascriptEngine` or `gitVersion`: the first two change between releases (9.0.4
+ * answers `tcmalloc-google` and `mozjs-wasm`, 7.0.43 `tcmalloc` and `mozjs`), and FerretDB answers a 40-hex
+ * `gitVersion` of its own.
  */
 export function assertAgentEngineIsAdmissible(buildInfo: Document, hosts: readonly string[]): void {
   for (const [key, server] of Object.entries(SELF_IDENTIFYING_BUILDINFO_KEYS)) {

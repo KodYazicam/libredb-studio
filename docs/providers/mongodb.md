@@ -1427,9 +1427,11 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    The row past the budget is the refusal, in the sentence every engine's profile uses.
 7. **The byte budget, in BSON bytes**, the measure issue #1614 settled on.
    A cursor is read raw, one document at a time, and each document's own BSON size is added to the byte budget before it is decoded, so the document that crosses it is never decoded and memory holds the budget's rows and one batch, not the result.
-   Measured on 9.0.4 under a 512 MiB memory limit: an aggregate projecting `$range: [0, 200000]` over 1,000 documents is refused on the byte budget, and a 15 MiB document is refused without being decoded, each with the process's resident memory growing 0 to 31 MiB across runs, under the 64 MiB ceiling [`tests/live/mysql-agent-profile.ts`](../../tests/live/mysql-agent-profile.ts) holds its own reads to.
+   Measured on 9.0.4 under a 512 MiB memory limit, one read per fresh process: an aggregate projecting `$range: [0, 200000]` over 1,000 documents, and a `find` projecting the same, are refused on the byte budget, and a 15 MiB document is refused without being decoded, each with the process's resident memory growing about 31 MiB, under the 64 MiB ceiling [`tests/live/mysql-agent-profile.ts`](../../tests/live/mysql-agent-profile.ts) holds its own reads to.
    So the budget counts what the server sends, not the served text: a document holding a large `Binary` counts its bytes, though the grid shows it as `<Binary: N bytes>`.
-   A `distinct` answers one reply, which the server holds to 16 MiB and the driver decodes; it is refused past the row budget before any row is built, then on the row whose BSON size carries the total past the byte budget.
+   A `distinct` answers one reply, which the server holds to 16 MiB, and the driver decodes it whole before either budget is read, because it decodes a command's reply even when asked for it raw: `raw` keeps only embedded documents as bytes, and the reply and its `values` list are decoded (driver 7.7.0, measured against 9.0.4, 8.3.11 and 7.0.43).
+   Decoded, a reply near that cap costs about ten times its size, well past the 64 MiB ceiling: on 9.0.4 under the same limit, a 14.8 MiB reply of 780,000 small documents grew resident memory by about 145 MiB, and a 14.4 MiB reply of 900,000 short strings by about 175 MiB, before the row refusal.
+   It is refused past the row budget before any row is built, then on the row whose BSON size carries the total past the byte budget.
 8. **The bound database**, as issue #1614 settled.
    A run reads the database its connection is bound to (`getDatabaseName()`: the connection's database, or a connection string's path).
    A command whose `database` names another is refused before anything is sent, naming the bound one; one naming the bound database is read there.
@@ -1437,7 +1439,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
 
 The estimating plan (`inspect_plan`) explains the command the read would run, built by the same builder (`openBoundedRead`), at `queryPlanner` verbosity and under the same deadline.
 The server plans it and, when several candidate plans fit, runs each for a bounded trial to choose one; it returns no result rows.
-The plan is answered without what the server says about itself: only the plan's own keys pass the reply's top level, so `serverInfo` (its host and port), `serverParameters`, the echoed `command`, `ok` and the cluster time do not.
+The plan is answered without the rest of the reply: only the plan's own keys pass its top level, so what the server says about itself (`serverInfo` with its host and port, `serverParameters`, the echoed `command`, `ok` and the cluster time) is dropped, and so is the `queryShapeHash` 9.0.4 and 8.3.11 answer for the command's shape.
 Below the top level the plan passes as the server wrote it, because it echoes the command's field names, whatever they are: a filter on a field named `ok` keeps `ok` in the parsed query, the index's key pattern and its bounds (measured on 9.0.4, 8.3.11 and 7.0.43, where an unsharded plan holds none of the server's own keys below the top level).
 A sharded plan names each shard's address, and those are dropped where the server's 9.0.4 source writes them (a shard a find lists loses its `connectionString` and `serverInfo`, and a shard a split pipeline answers for its `host`); no sharded cluster is measured.
 
@@ -1505,6 +1507,9 @@ Three residuals of reading the text as JSON stay in both: JavaScript puts intege
   `aggregate` pipeline without `$limit` can return a very large result set
   ([§3.4](#34-find-is-capped-at-100-aggregate-is-not)). *Future:* inject a safety `$limit` / cap
   aggregate output. An agent run's reads are bounded (see the agent profile in §12).
+- **An agent run's `distinct` is decoded whole before its budgets are read.**
+  The driver decodes a command's reply even when asked for it raw, so a `distinct` reply near the server's 16 MiB cap costs about ten times its size in memory before its row refusal, past the ceiling the run's cursor reads stay under (the byte budget in §12).
+  *Future:* bound it on the server, as a pipeline read from a raw cursor with a trailing `$limit`, the way a `count` is the `countDocuments` pipeline.
 - **No `EXPLAIN` in the editor.** MongoDB's `explain()` is not wired to the editor (`supportsExplain: false`); the
   agent's `inspect_plan` explains through the read-only profile (see §12).
 - **No multi-document transactions.** MongoDB supports them on replica sets/sharded clusters, but the

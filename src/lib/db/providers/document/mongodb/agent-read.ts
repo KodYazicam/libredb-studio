@@ -13,8 +13,11 @@
  *   measure issue #1614 settled on), so the document that crosses it is never decoded. An admitted document is
  *   decoded as the driver decodes one and kept only as its served row, so memory holds the budget's rows and one
  *   batch, not the result.
- *   A `distinct` answers one reply, which the server holds to 16 MiB; the driver decodes it, and it is refused past
- *   the row budget before any row is built and past the byte budget on the crossing row.
+ *   A `distinct` answers one reply, which the server holds to 16 MiB, and the driver decodes it whole before either
+ *   budget is read, because it decodes a command's reply even when asked for it raw: near that cap the decoded reply
+ *   costs about ten times its size in memory (the measurement is in `docs/providers/mongodb.md`, under the byte
+ *   budget). It is then refused past the row budget before any row is built and past the byte budget on the crossing
+ *   row.
  * - **An owned deadline.** Every call carries `maxTimeMS`, the server's own deadline, and runs in a session this
  *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor,
  *   and a lost server is a connection failure rather than a fault in the statement.
@@ -341,8 +344,9 @@ export function openBoundedRead(
  * The keys of an explain reply that are the plan: a find's `queryPlanner` and an aggregate's `stages`, or, for an
  * aggregate a sharded cluster splits, the keys the server's 9.0.4 source writes in their place (`appendExplainResults`:
  * `mergeType`, `mergeShardId`, `splitPipeline` and each shard's plan under `shards`). Every other key at the top level
- * is the server speaking about itself: `serverInfo` (its host and port), `serverParameters`, the `command` echoed
- * back, `ok` and the cluster time.
+ * is dropped: the server speaking about itself (`serverInfo` with its host and port, `serverParameters`, the `command`
+ * echoed back, `ok` and the cluster time) and the `queryShapeHash` of the command's shape, which 9.0.4 and 8.3.11
+ * answer.
  */
 const PLAN_KEYS = [
   "explainVersion",
@@ -498,7 +502,9 @@ export async function sampleWithinBudget(
 
 /**
  * A `distinct`'s values as rows, one per value under the field's name: refused past the row budget before any row is
- * built, then on the row whose BSON size carries the total past the byte budget.
+ * built, then on the row whose BSON size carries the total past the byte budget. The reply arrives decoded whole, so
+ * these refusals bound what is served, not what the read held: the driver decodes a command's reply even when asked
+ * for it raw, which keeps only embedded documents as bytes and still decodes the `values` list.
  */
 function distinctWithinBudget(
   reply: Document,
