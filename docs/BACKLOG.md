@@ -33,7 +33,7 @@ None of it is a GitHub issue.
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U144 · 132
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC33 · 29
+- [Documentation](#documentation) — DOC3-DOC34 · 30
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
@@ -6190,6 +6190,16 @@ Verified 2026-10-14 on `main`: `git diff 22543b91b..5b77948ee -- docs/providers/
 Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
 
 **Done when:** section 8.3 of `docs/providers/snowflake.md` says that a database whose schemas fail to list is named in the inventory as not read, with Snowflake's sentence, and the walk goes on, and `tests/unit/db/snowflake/provider-doc.test.ts` pins that sentence.
+
+### DOC34. Four pages describe each agent engine's read-only boundary and leave MySQL's out
+
+The narrative of `docs/SECURITY.md` row 3.4 states the layers that bound an agent statement on PostgreSQL, SQLite, DuckDB and SQL Server, and on MongoDB since #1790, and the read-only bullets of `README.md` ("Read-only, enforced by the database rather than by a parser"), `docs/AGENT_GUIDE.md` ("It cannot write") and `docs/FEATURES.md` ("Read-only, enforced by the database") state the first four.
+None of them says what bounds one on MySQL and MariaDB, where agent mode has executed statements since #1629: a principal verified before the first statement to hold nothing past `SELECT` and `SHOW VIEW`, then `START TRANSACTION READ ONLY` on a connection closed after the call (`docs/providers/mysql.md` section 12).
+The row's file list has named `mysql.ts` and its integration test since #1790.
+
+Found 2026-10-17 in the review of #1790 (issue #1614); pre-existing since #1629.
+
+**Done when:** each of the four pages states MySQL's layers beside the other engines', in its own register and from `docs/providers/mysql.md` section 12, and a test holds each page's boundary sentence to name every SQL engine of `AGENT_EXECUTION_ENGINES`.
 
 ## Release pipeline
 
