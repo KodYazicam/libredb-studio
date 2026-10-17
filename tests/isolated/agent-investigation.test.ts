@@ -5543,11 +5543,10 @@ describe("a MongoDB run is told only what its own tools can do", () => {
 });
 
 /*
-  D11: a run that sends statements and whose grounding the execution profile refuses ends before its first model turn,
-  on every engine. Every database tool such a run holds acquires the same profile and would be refused the same way,
-  so a model turn there buys nothing but a drafted statement that never runs - and on MongoDB, before the probe changed
-  nothing, a second refused acquisition that wrote. Plan mode and the operations workflow send no statement of the
-  model's, and keep going ungrounded (B48).
+  A run that sends statements and whose grounding the execution profile refuses ends before its first model turn, on
+  every engine (#1614). Every database tool such a run holds acquires the same profile and would be refused the same
+  way, so a model turn there buys nothing but a drafted statement that never runs. Plan mode and the operations workflow
+  send no statement of the model's, and keep going ungrounded (B48).
 */
 describe("a run whose grounding the execution profile refuses", () => {
   const column = (name: string): ColumnSchema => ({ name, type: "string", nullable: true, isPrimary: false });
@@ -5629,7 +5628,7 @@ describe("a run whose grounding the execution profile refuses", () => {
 
   test("a PostgreSQL run ends the same way: the drive decides it, never the engine", async () => {
     // A superuser on PostgreSQL is refused at the composed catalog read, which acquires the read-only profile like
-    // every statement does. Before D11 it spent a paid turn and drafted a statement first.
+    // every statement does. Before #1614 it spent a paid turn and drafted a statement first.
     const b = boot(freshDataDir(), { acquireFails: () => tooBroad() });
     const run = await startRun(b, "agent");
 
