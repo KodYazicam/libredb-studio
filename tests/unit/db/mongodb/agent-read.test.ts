@@ -692,11 +692,9 @@ describe("the owned deadline", () => {
   });
 
   test("a plan's cursor, which its explain never opens, is closed once the plan settles; the kill alone ends a hung one", async () => {
-    for (const envelope of [FIND, FIND_ONE, AGGREGATE, COUNT]) {
-      const { client, opened } = fakeClient();
-      await read(client, envelope, "estimate-plan");
-      expect(opened[0].closes).toBe(1);
-    }
+    const plans = [FIND, FIND_ONE, AGGREGATE, COUNT].map((envelope) => ({ envelope, fake: fakeClient() }));
+    await Promise.all(plans.map(({ envelope, fake }) => read(fake.client, envelope, "estimate-plan")));
+    for (const { fake } of plans) expect(fake.opened[0].closes).toBe(1);
     const failed = fakeClient({ error: serverError(2, "BadValue") });
     await rejection(read(failed.client, FIND, "estimate-plan"));
     expect(failed.opened[0].closes).toBe(1);
