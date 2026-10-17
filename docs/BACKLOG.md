@@ -33,7 +33,7 @@ None of it is a GitHub issue.
 - [Row editing](#row-editing) — R1–R3 · 3
 - [Studio UI and query execution](#studio-ui-and-query-execution) — X2-X27, U2-U145 · 133
 - [Dependencies](#dependencies) — P1-P9 · 7
-- [Documentation](#documentation) — DOC3-DOC34 · 30
+- [Documentation](#documentation) — DOC3-DOC35 · 31
 - [Release pipeline](#release-pipeline) — REL1-REL8 · 8
 - [Chart configuration surface](#chart-configuration-surface) — N1 · 1
 - [Security Phase 1 deferrals](#security-phase-1-deferrals) — H1–H14 · 4
@@ -6237,6 +6237,16 @@ The row's file list has named `mysql.ts` and its integration test since #1790.
 Found 2026-10-17 in the review of #1790 (issue #1614); pre-existing since #1629.
 
 **Done when:** each of the three pages states MySQL's layers beside the other engines', in its own register and from `docs/providers/mysql.md` section 12, and a test holds each page's boundary sentence to name every SQL engine of `AGENT_EXECUTION_ENGINES`.
+
+### DOC35. The provider tree in DATABASE_PROVIDERS.md leaves out every provider directory added since it was last drawn
+
+The directory tree at the top of `docs/DATABASE_PROVIDERS.md` has no line for `document/firestore`, `industrial/` (`modbus`, `mtconnect`, `opcua`, `sparkplug`), `keyvalue/mqtt`, `network/` (`netconf`, `snmp`) or `sql/bigquery`, `sql/snowflake` and `sql/spark`, although the engine table further down the same page lists each of them.
+It also leaves out shared modules a provider author meets: `keyvalue/redis-command-text.ts` and, under `sql/`, `column-types.ts`, `mysql-show-create.ts`, `pg-wire-cancel.ts`, `read-only-budget.ts`, `sqlite-int64.ts` and `sqlite-worker.ts`.
+Counted 2026-10-17 on the #1790 branch; every omission is older than that PR, which only redrew the MongoDB line as `mongodb/`.
+
+Found 2026-10-17 while verifying #1790.
+
+**Done when:** the tree names every directory and shared module under `src/lib/db/providers/`, and a test walks that directory and fails when the tree misses one.
 
 ## Release pipeline
 
