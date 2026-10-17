@@ -14,10 +14,10 @@
  *   decoded as the driver decodes one and kept only as its served row, so memory holds the budget's rows and one
  *   batch, not the result.
  *   A `distinct` answers one reply, which the server holds to 16 MiB, and the driver decodes it whole before either
- *   budget is read, because it decodes a command's reply even when asked for it raw: near that cap the decoded reply
- *   costs about ten times its size in memory (the measurement is in `docs/providers/mongodb.md`, under the byte
- *   budget). It is then refused past the row budget before any row is built and past the byte budget on the crossing
- *   row.
+ *   budget is read, because it decodes a command's reply even when asked for it raw: near that cap, a reply of many
+ *   small values costs about ten times its size in memory (the measurement is in `docs/providers/mongodb.md`, under
+ *   the byte budget). It is then refused past the row budget before any row is built and past the byte budget on the
+ *   crossing row.
  * - **An owned deadline.** Every call carries `maxTimeMS`, the server's own deadline, and runs in a session this
  *   module owns; when the server does not end it, `runUnderAgentDeadline` kills the session and closes the cursor,
  *   and a lost server is a connection failure rather than a fault in the statement.
@@ -439,6 +439,26 @@ function withoutKeys(shard: unknown, address: ReadonlySet<string>): unknown {
 }
 
 /**
+ * The plan of the read a cursor would run, at `queryPlanner` verbosity under the server deadline. The explain is a
+ * command of its own in the cursor's session (driver 7.7.0's `FindCursor.explain` and `AggregationCursor.explain`) and
+ * never opens the cursor, so closing the cursor ends nothing on the server: a plan the server does not end itself is
+ * ended by the deadline's kill of the session alone (tests/live/mongodb-agent-profile.ts measures it with `maxTimeMS`
+ * disabled). The cursor is closed once the plan settles all the same, because the client keeps every cursor it builds
+ * among its active cursors until that cursor closes (measured with driver 7.7.0 against 9.0.4: five explained cursors
+ * left open stayed there until the client closed).
+ */
+async function explainCursor(
+  cursor: FindCursor<Document> | AggregationCursor<Document>,
+  maxTimeMS: number,
+): Promise<Document> {
+  try {
+    return await cursor.explain({ verbosity: "queryPlanner", maxTimeMS });
+  } finally {
+    await cursor.close();
+  }
+}
+
+/**
  * A raw cursor's documents, read one at a time under the budget: the row past the row budget, or the document whose
  * BSON bytes carry the total past the byte budget, is the refusal, and the crossing document is never decoded. Each
  * admitted document is decoded and kept only as its served row; the bytes are not kept, because the driver may hand
@@ -567,7 +587,7 @@ export async function readMongoForAgent(
       if (mode === "estimate-plan") {
         const plan =
           read.kind === "cursor"
-            ? await track(read.cursor).explain({ verbosity: "queryPlanner", maxTimeMS })
+            ? await explainCursor(read.cursor, maxTimeMS)
             : await db.command(
                 { explain: read.command, verbosity: "queryPlanner", maxTimeMS, comment: AGENT_COMMAND_COMMENT },
                 { session },
