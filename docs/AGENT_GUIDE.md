@@ -229,11 +229,9 @@ now two different sentences, and the difference is the whole of what changed:
 
 - **Grounding: every engine.** What a Plan run is TOLD about your database. It needs no read-only
   statement path, because the provider reading sends no statement, so it reaches all forty-two engines.
-- **Agent mode: PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB.** What a run may DO by itself. Its tools
-  execute statements and need a read-only path the provider implements, which only those providers do, so a
-  schema-workflow Agent run on any other engine still ends *"The agent cannot run on this database
-  engine: it offers no read-only execution profile."* — after grounding has succeeded, which is
-  slightly odd to watch and entirely honest: the run knows your schema and still may not read a row.
+- **Agent mode: PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB.** What a run may DO by itself.
+  Its tools execute statements and need a read-only path the provider implements, which only those providers do.
+  So a schema-workflow Agent run on any other engine is refused when you press **Start**, before a run is opened and before anything is read, with the reason the rail's amber card shows (`workflowAvailability` in `src/app/api/agent/runs/route.ts`, #512); a Plan run there is still grounded.
   See [What the agent does not do](#what-the-agent-does-not-do).
 
 Two things are worth knowing about the provider reading, because they are not true of the composed

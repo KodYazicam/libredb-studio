@@ -101,9 +101,9 @@ no inventory and refuses to invent one.
 **What "Verified grounded" is claiming, and what it is not.** It says an inventory of that database's
 real objects reached the run and the run wrote something in that engine's own language that the editor
 accepts. It does NOT say the draft is good, and on one engine it demonstrably is not — see Redis. It
-says nothing at all about agent mode, which still ends `engine-unsupported` everywhere but PostgreSQL,
-SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB; that is pinned by a test rather than by this table, because a run that fails at its first
-read is not a thing worth driving eleven times.
+says nothing at all about agent mode, which is still refused at the start of a statement-sending run everywhere but PostgreSQL,
+SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB; that is pinned by a test rather than by this table, because a run refused before it opens
+is not a thing worth driving eleven times.
 
 **Two runs that refused, and both refusals were right.** A Couchbase run asked "how many documents of
 each type in this bucket" named the three real collections back and asked which one was meant. A Druid
@@ -148,8 +148,7 @@ is not. That sentence is unchanged by #414 and is the reason it was written this
 is where the condition holds, not the rule — and it now holds on ten engines rather than two, which is
 a demo you can give rather than a caveat you have to make. Operate reads what the engine reports about itself, so it needs no SQL and reaches
 everything.
-The other four workflows send statements and need a read-only statement path the provider implements, which today only PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB provide; everywhere else the run ends with
-*"The agent cannot run on this database engine: it offers no read-only execution profile."*
+The other four workflows send statements and need a read-only statement path the provider implements, which today only PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes and MongoDB provide; everywhere else a run of one of them is refused when it is started, before a run is opened, with the reason the rail's amber card shows.
 
 **Grounding was engine-dependent and nothing else**, in every workflow — until #414, after which the
 engine decides only HOW a run is grounded and not whether. That much was not true even when this
