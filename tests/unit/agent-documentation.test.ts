@@ -750,3 +750,50 @@ describe("docs/AGENT.md states agent execution on Kubernetes as the code decides
     }
   });
 });
+
+/**
+ * A read-only transaction is not what bounds an agent statement on MySQL and MariaDB: DDL, GRANT and SET GLOBAL each
+ * commit implicitly, which ends the transaction before the statement runs, so the principal is the first layer there
+ * and the transaction the second (`docs/providers/mysql.md` section 12.1, measured), and the provider reads the
+ * principal's grants at its first statement rather than at open. On PostgreSQL the read-only transaction is not the
+ * whole boundary either, because it does not stop a superuser's `COPY ... TO PROGRAM`, which is why the role is
+ * verified at open (`docs/SECURITY.md` row 3.4). A sentence that lists MySQL among the engines a read-only transaction
+ * bounds says the reverse of the first, and one that names PostgreSQL's transaction alone leaves out half of the second.
+ */
+describe("the SQL engines' boundaries are stated in the order their provider documents measured", () => {
+  const clausesOf = (sentence: string, label: string): string[] =>
+    sentence.split("; ").filter((clause) => clause.includes(label));
+
+  test("the MySQL provider document is still the source: the principal first, read at the first statement", () => {
+    const mysql = read("docs/providers/mysql.md");
+    expect(mysql).toContain(
+      "### 12.1 The principal is the first layer, because a read-only transaction ends where DDL begins",
+    );
+    expect(mysql).toContain("The verification runs at the FIRST `queryReadOnly` call, not at `connect()`");
+  });
+
+  test("docs/AGENT.md's engine paragraph puts MySQL's principal before its transaction, and PostgreSQL's role beside its own", () => {
+    const paragraph = AGENT_DOC.split("- **Agent mode requires ")[1]?.split(/\n\n/)[0] ?? "";
+    const sentence = paragraph.split("\n").find((line) => line.trim().startsWith("On the SQL engines")) ?? "";
+    const [mysql = "", ...otherMysql] = clausesOf(sentence, "MySQL");
+    expect(otherMysql).toEqual([]);
+    expect(mysql).toContain("principal verified before the first statement");
+    expect(mysql).toContain("implicit");
+    expect(mysql.indexOf("principal")).toBeLessThan(mysql.indexOf("`START TRANSACTION READ ONLY`"));
+    const [postgres = "", ...otherPostgres] = clausesOf(sentence, "PostgreSQL");
+    expect(otherPostgres).toEqual([]);
+    expect(postgres).toContain("read-only transaction");
+    expect(postgres).toContain("role verified at open");
+  });
+
+  test("docs/FEATURES.md's read-only bullet reads MySQL's principal at the first statement, not at open", () => {
+    const bullet =
+      read("docs/FEATURES.md")
+        .split("\n")
+        .find((line) => line.includes("**Read-only, enforced by the database:**")) ?? "";
+    const mysql = bullet.slice(bullet.indexOf("On MySQL and MariaDB"));
+    expect(bullet).toContain("On MySQL and MariaDB");
+    expect(mysql).toContain("principal verified before the first statement");
+    expect(mysql).not.toMatch(/^On MySQL and MariaDB[^.]*verified at open/);
+  });
+});

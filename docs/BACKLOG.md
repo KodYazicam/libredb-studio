@@ -6191,15 +6191,16 @@ Found 2026-10-14 in the final review of the Apache Spark provider (#1759).
 
 **Done when:** section 8.3 of `docs/providers/snowflake.md` says that a database whose schemas fail to list is named in the inventory as not read, with Snowflake's sentence, and the walk goes on, and `tests/unit/db/snowflake/provider-doc.test.ts` pins that sentence.
 
-### DOC34. Four pages describe each agent engine's read-only boundary and leave MySQL's out
+### DOC34. Three pages describe each agent engine's read-only boundary and leave MySQL's out
 
-The narrative of `docs/SECURITY.md` row 3.4 states the layers that bound an agent statement on PostgreSQL, SQLite, DuckDB and SQL Server, and on MongoDB since #1790, and the read-only bullets of `README.md` ("Read-only, enforced by the database rather than by a parser"), `docs/AGENT_GUIDE.md` ("It cannot write") and `docs/FEATURES.md` ("Read-only, enforced by the database") state the first four.
+The narrative of `docs/SECURITY.md` row 3.4 states the layers that bound an agent statement on PostgreSQL, SQLite, DuckDB and SQL Server, and on MongoDB since #1790, and the read-only bullets of `README.md` ("Read-only, enforced by the database rather than by a parser") and `docs/AGENT_GUIDE.md` ("It cannot write") state the first four.
 None of them says what bounds one on MySQL and MariaDB, where agent mode has executed statements since #1629: a principal verified before the first statement to hold nothing past `SELECT` and `SHOW VIEW`, then `START TRANSACTION READ ONLY` on a connection closed after the call (`docs/providers/mysql.md` section 12).
+The read-only bullet of `docs/FEATURES.md` ("Read-only, enforced by the database") states those two layers and why the principal comes first, and is the wording to mirror; the engine paragraph of `docs/AGENT.md` has stated them too since #1790.
 The row's file list has named `mysql.ts` and its integration test since #1790.
 
 Found 2026-10-17 in the review of #1790 (issue #1614); pre-existing since #1629.
 
-**Done when:** each of the four pages states MySQL's layers beside the other engines', in its own register and from `docs/providers/mysql.md` section 12, and a test holds each page's boundary sentence to name every SQL engine of `AGENT_EXECUTION_ENGINES`.
+**Done when:** each of the three pages states MySQL's layers beside the other engines', in its own register and from `docs/providers/mysql.md` section 12, and a test holds each page's boundary sentence to name every SQL engine of `AGENT_EXECUTION_ENGINES`.
 
 ## Release pipeline
 
