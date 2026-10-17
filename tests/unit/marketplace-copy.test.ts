@@ -189,8 +189,10 @@ describe("no listing says the database itself refuses the agent's writes", () =>
       // True of the SQL engines and false of the others agent mode executes on: on Kubernetes Studio's request
       // allowlist and the identity's RBAC bound a run, and on MongoDB the connection's user does, proven at open,
       // behind Studio's command fence (docs/AGENT.md). "Under the read-only boundary documented for each engine"
-      // stays true as the list grows.
-      expect(submittedCopy(path)).not.toMatch(/the database itself (enforces|proved)|the database, not the IDE/i);
+      // stays true as the list grows. The listings wrap their lines, so a phrase split by a line break is matched too.
+      expect(submittedCopy(path).replace(/\s+/g, " ")).not.toMatch(
+        /the database itself (enforces|proved)|the database, not the IDE/i,
+      );
     });
   }
 });

@@ -648,7 +648,8 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
     (file) => {
       // The Rancher file's editorial notes date old copy by its engine count, so only its submitted copy is held.
       const text = file === "deploy/rancher/CATALOG_LISTING.md" ? rancherSubmittedCopy() : read(file);
-      expect(text).not.toMatch(ENGINE_COUNT);
+      // The READMEs and listings wrap their lines, so a count split by a line break is matched too.
+      expect(text.replace(/\s+/g, " ")).not.toMatch(ENGINE_COUNT);
     },
   );
 
