@@ -1441,6 +1441,7 @@ The image runs the init scripts on a fresh data directory only, so recreate the 
    `readCatalogReadOnly()` refuses another container the same way.
 
 The estimating plan (`inspect_plan`) explains the command the read would run, built by the same builder (`openBoundedRead`), at `queryPlanner` verbosity and under the same deadline.
+A cursor's explain is a command of its own in the read's session and never opens that cursor (driver 7.7.0's `FindCursor.explain` and `AggregationCursor.explain`), so a plan the server does not end itself is ended by the kill of the session alone.
 The server plans it and, when several candidate plans fit, runs each for a bounded trial to choose one; it returns no result rows.
 The plan is answered without the rest of the reply: only the plan's own keys pass its top level, so what the server says about itself (`serverInfo` with its host and port, `serverParameters`, the echoed `command`, `ok` and the cluster time) is dropped, and so is the `queryShapeHash` 9.0.4 and 8.3.11 answer for the command's shape.
 Below the top level the plan passes as the server wrote it, because it echoes the command's field names, whatever they are: a filter on a field named `ok` keeps `ok` in the parsed query, the index's key pattern and its bounds (measured on 9.0.4, 8.3.11 and 7.0.43, where an unsharded plan holds none of the server's own keys below the top level).
